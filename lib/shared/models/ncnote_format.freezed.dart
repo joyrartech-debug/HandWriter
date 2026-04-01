@@ -1,0 +1,4484 @@
+// coverage:ignore-file
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint
+// ignore_for_file: unused_element, deprecated_member_use, deprecated_member_use_from_same_package, use_function_type_syntax_for_parameters, unnecessary_const, avoid_init_to_null, invalid_override_different_default_values_named, prefer_expression_function_bodies, annotate_overrides, invalid_annotation_target, unnecessary_question_mark
+
+part of 'ncnote_format.dart';
+
+// **************************************************************************
+// FreezedGenerator
+// **************************************************************************
+
+T _$identity<T>(T value) => value;
+
+final _privateConstructorUsedError = UnsupportedError(
+    'It seems like you constructed your class using `MyClass._()`. This constructor is only meant to be used by freezed and you are not supposed to need it nor use it.\nPlease check the documentation here for more information: https://github.com/rrousselGit/freezed#adding-getters-and-methods-to-our-models');
+
+NotebookMetadata _$NotebookMetadataFromJson(Map<String, dynamic> json) {
+  return _NotebookMetadata.fromJson(json);
+}
+
+/// @nodoc
+mixin _$NotebookMetadata {
+  String get id => throw _privateConstructorUsedError;
+  String get title => throw _privateConstructorUsedError;
+  int get formatVersion => throw _privateConstructorUsedError;
+  DateTime get createdAt => throw _privateConstructorUsedError;
+  DateTime get modifiedAt => throw _privateConstructorUsedError;
+  String get coverStyle => throw _privateConstructorUsedError;
+  int get coverColor => throw _privateConstructorUsedError; // Material Blue 800
+  String get paperType =>
+      throw _privateConstructorUsedError; // blank, lined, grid, dotted
+  int get paperColor => throw _privateConstructorUsedError;
+  int get pageCount => throw _privateConstructorUsedError;
+  List<String> get tags => throw _privateConstructorUsedError;
+  String? get author => throw _privateConstructorUsedError;
+  String? get description => throw _privateConstructorUsedError;
+
+  /// Serializes this NotebookMetadata to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of NotebookMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $NotebookMetadataCopyWith<NotebookMetadata> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $NotebookMetadataCopyWith<$Res> {
+  factory $NotebookMetadataCopyWith(
+          NotebookMetadata value, $Res Function(NotebookMetadata) then) =
+      _$NotebookMetadataCopyWithImpl<$Res, NotebookMetadata>;
+  @useResult
+  $Res call(
+      {String id,
+      String title,
+      int formatVersion,
+      DateTime createdAt,
+      DateTime modifiedAt,
+      String coverStyle,
+      int coverColor,
+      String paperType,
+      int paperColor,
+      int pageCount,
+      List<String> tags,
+      String? author,
+      String? description});
+}
+
+/// @nodoc
+class _$NotebookMetadataCopyWithImpl<$Res, $Val extends NotebookMetadata>
+    implements $NotebookMetadataCopyWith<$Res> {
+  _$NotebookMetadataCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of NotebookMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? title = null,
+    Object? formatVersion = null,
+    Object? createdAt = null,
+    Object? modifiedAt = null,
+    Object? coverStyle = null,
+    Object? coverColor = null,
+    Object? paperType = null,
+    Object? paperColor = null,
+    Object? pageCount = null,
+    Object? tags = null,
+    Object? author = freezed,
+    Object? description = freezed,
+  }) {
+    return _then(_value.copyWith(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      title: null == title
+          ? _value.title
+          : title // ignore: cast_nullable_to_non_nullable
+              as String,
+      formatVersion: null == formatVersion
+          ? _value.formatVersion
+          : formatVersion // ignore: cast_nullable_to_non_nullable
+              as int,
+      createdAt: null == createdAt
+          ? _value.createdAt
+          : createdAt // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      modifiedAt: null == modifiedAt
+          ? _value.modifiedAt
+          : modifiedAt // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      coverStyle: null == coverStyle
+          ? _value.coverStyle
+          : coverStyle // ignore: cast_nullable_to_non_nullable
+              as String,
+      coverColor: null == coverColor
+          ? _value.coverColor
+          : coverColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      paperType: null == paperType
+          ? _value.paperType
+          : paperType // ignore: cast_nullable_to_non_nullable
+              as String,
+      paperColor: null == paperColor
+          ? _value.paperColor
+          : paperColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      pageCount: null == pageCount
+          ? _value.pageCount
+          : pageCount // ignore: cast_nullable_to_non_nullable
+              as int,
+      tags: null == tags
+          ? _value.tags
+          : tags // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+      author: freezed == author
+          ? _value.author
+          : author // ignore: cast_nullable_to_non_nullable
+              as String?,
+      description: freezed == description
+          ? _value.description
+          : description // ignore: cast_nullable_to_non_nullable
+              as String?,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$NotebookMetadataImplCopyWith<$Res>
+    implements $NotebookMetadataCopyWith<$Res> {
+  factory _$$NotebookMetadataImplCopyWith(_$NotebookMetadataImpl value,
+          $Res Function(_$NotebookMetadataImpl) then) =
+      __$$NotebookMetadataImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String id,
+      String title,
+      int formatVersion,
+      DateTime createdAt,
+      DateTime modifiedAt,
+      String coverStyle,
+      int coverColor,
+      String paperType,
+      int paperColor,
+      int pageCount,
+      List<String> tags,
+      String? author,
+      String? description});
+}
+
+/// @nodoc
+class __$$NotebookMetadataImplCopyWithImpl<$Res>
+    extends _$NotebookMetadataCopyWithImpl<$Res, _$NotebookMetadataImpl>
+    implements _$$NotebookMetadataImplCopyWith<$Res> {
+  __$$NotebookMetadataImplCopyWithImpl(_$NotebookMetadataImpl _value,
+      $Res Function(_$NotebookMetadataImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of NotebookMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? title = null,
+    Object? formatVersion = null,
+    Object? createdAt = null,
+    Object? modifiedAt = null,
+    Object? coverStyle = null,
+    Object? coverColor = null,
+    Object? paperType = null,
+    Object? paperColor = null,
+    Object? pageCount = null,
+    Object? tags = null,
+    Object? author = freezed,
+    Object? description = freezed,
+  }) {
+    return _then(_$NotebookMetadataImpl(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      title: null == title
+          ? _value.title
+          : title // ignore: cast_nullable_to_non_nullable
+              as String,
+      formatVersion: null == formatVersion
+          ? _value.formatVersion
+          : formatVersion // ignore: cast_nullable_to_non_nullable
+              as int,
+      createdAt: null == createdAt
+          ? _value.createdAt
+          : createdAt // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      modifiedAt: null == modifiedAt
+          ? _value.modifiedAt
+          : modifiedAt // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      coverStyle: null == coverStyle
+          ? _value.coverStyle
+          : coverStyle // ignore: cast_nullable_to_non_nullable
+              as String,
+      coverColor: null == coverColor
+          ? _value.coverColor
+          : coverColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      paperType: null == paperType
+          ? _value.paperType
+          : paperType // ignore: cast_nullable_to_non_nullable
+              as String,
+      paperColor: null == paperColor
+          ? _value.paperColor
+          : paperColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      pageCount: null == pageCount
+          ? _value.pageCount
+          : pageCount // ignore: cast_nullable_to_non_nullable
+              as int,
+      tags: null == tags
+          ? _value._tags
+          : tags // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+      author: freezed == author
+          ? _value.author
+          : author // ignore: cast_nullable_to_non_nullable
+              as String?,
+      description: freezed == description
+          ? _value.description
+          : description // ignore: cast_nullable_to_non_nullable
+              as String?,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$NotebookMetadataImpl implements _NotebookMetadata {
+  const _$NotebookMetadataImpl(
+      {required this.id,
+      required this.title,
+      this.formatVersion = 1,
+      required this.createdAt,
+      required this.modifiedAt,
+      this.coverStyle = 'default',
+      this.coverColor = 0xFF1565C0,
+      this.paperType = 'lined',
+      this.paperColor = 0xFFFFFFFF,
+      this.pageCount = 0,
+      final List<String> tags = const [],
+      this.author,
+      this.description})
+      : _tags = tags;
+
+  factory _$NotebookMetadataImpl.fromJson(Map<String, dynamic> json) =>
+      _$$NotebookMetadataImplFromJson(json);
+
+  @override
+  final String id;
+  @override
+  final String title;
+  @override
+  @JsonKey()
+  final int formatVersion;
+  @override
+  final DateTime createdAt;
+  @override
+  final DateTime modifiedAt;
+  @override
+  @JsonKey()
+  final String coverStyle;
+  @override
+  @JsonKey()
+  final int coverColor;
+// Material Blue 800
+  @override
+  @JsonKey()
+  final String paperType;
+// blank, lined, grid, dotted
+  @override
+  @JsonKey()
+  final int paperColor;
+  @override
+  @JsonKey()
+  final int pageCount;
+  final List<String> _tags;
+  @override
+  @JsonKey()
+  List<String> get tags {
+    if (_tags is EqualUnmodifiableListView) return _tags;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_tags);
+  }
+
+  @override
+  final String? author;
+  @override
+  final String? description;
+
+  @override
+  String toString() {
+    return 'NotebookMetadata(id: $id, title: $title, formatVersion: $formatVersion, createdAt: $createdAt, modifiedAt: $modifiedAt, coverStyle: $coverStyle, coverColor: $coverColor, paperType: $paperType, paperColor: $paperColor, pageCount: $pageCount, tags: $tags, author: $author, description: $description)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$NotebookMetadataImpl &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.title, title) || other.title == title) &&
+            (identical(other.formatVersion, formatVersion) ||
+                other.formatVersion == formatVersion) &&
+            (identical(other.createdAt, createdAt) ||
+                other.createdAt == createdAt) &&
+            (identical(other.modifiedAt, modifiedAt) ||
+                other.modifiedAt == modifiedAt) &&
+            (identical(other.coverStyle, coverStyle) ||
+                other.coverStyle == coverStyle) &&
+            (identical(other.coverColor, coverColor) ||
+                other.coverColor == coverColor) &&
+            (identical(other.paperType, paperType) ||
+                other.paperType == paperType) &&
+            (identical(other.paperColor, paperColor) ||
+                other.paperColor == paperColor) &&
+            (identical(other.pageCount, pageCount) ||
+                other.pageCount == pageCount) &&
+            const DeepCollectionEquality().equals(other._tags, _tags) &&
+            (identical(other.author, author) || other.author == author) &&
+            (identical(other.description, description) ||
+                other.description == description));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType,
+      id,
+      title,
+      formatVersion,
+      createdAt,
+      modifiedAt,
+      coverStyle,
+      coverColor,
+      paperType,
+      paperColor,
+      pageCount,
+      const DeepCollectionEquality().hash(_tags),
+      author,
+      description);
+
+  /// Create a copy of NotebookMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$NotebookMetadataImplCopyWith<_$NotebookMetadataImpl> get copyWith =>
+      __$$NotebookMetadataImplCopyWithImpl<_$NotebookMetadataImpl>(
+          this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$NotebookMetadataImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _NotebookMetadata implements NotebookMetadata {
+  const factory _NotebookMetadata(
+      {required final String id,
+      required final String title,
+      final int formatVersion,
+      required final DateTime createdAt,
+      required final DateTime modifiedAt,
+      final String coverStyle,
+      final int coverColor,
+      final String paperType,
+      final int paperColor,
+      final int pageCount,
+      final List<String> tags,
+      final String? author,
+      final String? description}) = _$NotebookMetadataImpl;
+
+  factory _NotebookMetadata.fromJson(Map<String, dynamic> json) =
+      _$NotebookMetadataImpl.fromJson;
+
+  @override
+  String get id;
+  @override
+  String get title;
+  @override
+  int get formatVersion;
+  @override
+  DateTime get createdAt;
+  @override
+  DateTime get modifiedAt;
+  @override
+  String get coverStyle;
+  @override
+  int get coverColor; // Material Blue 800
+  @override
+  String get paperType; // blank, lined, grid, dotted
+  @override
+  int get paperColor;
+  @override
+  int get pageCount;
+  @override
+  List<String> get tags;
+  @override
+  String? get author;
+  @override
+  String? get description;
+
+  /// Create a copy of NotebookMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$NotebookMetadataImplCopyWith<_$NotebookMetadataImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+DocumentStructure _$DocumentStructureFromJson(Map<String, dynamic> json) {
+  return _DocumentStructure.fromJson(json);
+}
+
+/// @nodoc
+mixin _$DocumentStructure {
+  String get notebookId => throw _privateConstructorUsedError;
+  int get formatVersion => throw _privateConstructorUsedError;
+  List<PageEntry> get pages => throw _privateConstructorUsedError;
+
+  /// Serializes this DocumentStructure to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of DocumentStructure
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $DocumentStructureCopyWith<DocumentStructure> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $DocumentStructureCopyWith<$Res> {
+  factory $DocumentStructureCopyWith(
+          DocumentStructure value, $Res Function(DocumentStructure) then) =
+      _$DocumentStructureCopyWithImpl<$Res, DocumentStructure>;
+  @useResult
+  $Res call({String notebookId, int formatVersion, List<PageEntry> pages});
+}
+
+/// @nodoc
+class _$DocumentStructureCopyWithImpl<$Res, $Val extends DocumentStructure>
+    implements $DocumentStructureCopyWith<$Res> {
+  _$DocumentStructureCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of DocumentStructure
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? notebookId = null,
+    Object? formatVersion = null,
+    Object? pages = null,
+  }) {
+    return _then(_value.copyWith(
+      notebookId: null == notebookId
+          ? _value.notebookId
+          : notebookId // ignore: cast_nullable_to_non_nullable
+              as String,
+      formatVersion: null == formatVersion
+          ? _value.formatVersion
+          : formatVersion // ignore: cast_nullable_to_non_nullable
+              as int,
+      pages: null == pages
+          ? _value.pages
+          : pages // ignore: cast_nullable_to_non_nullable
+              as List<PageEntry>,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$DocumentStructureImplCopyWith<$Res>
+    implements $DocumentStructureCopyWith<$Res> {
+  factory _$$DocumentStructureImplCopyWith(_$DocumentStructureImpl value,
+          $Res Function(_$DocumentStructureImpl) then) =
+      __$$DocumentStructureImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({String notebookId, int formatVersion, List<PageEntry> pages});
+}
+
+/// @nodoc
+class __$$DocumentStructureImplCopyWithImpl<$Res>
+    extends _$DocumentStructureCopyWithImpl<$Res, _$DocumentStructureImpl>
+    implements _$$DocumentStructureImplCopyWith<$Res> {
+  __$$DocumentStructureImplCopyWithImpl(_$DocumentStructureImpl _value,
+      $Res Function(_$DocumentStructureImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of DocumentStructure
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? notebookId = null,
+    Object? formatVersion = null,
+    Object? pages = null,
+  }) {
+    return _then(_$DocumentStructureImpl(
+      notebookId: null == notebookId
+          ? _value.notebookId
+          : notebookId // ignore: cast_nullable_to_non_nullable
+              as String,
+      formatVersion: null == formatVersion
+          ? _value.formatVersion
+          : formatVersion // ignore: cast_nullable_to_non_nullable
+              as int,
+      pages: null == pages
+          ? _value._pages
+          : pages // ignore: cast_nullable_to_non_nullable
+              as List<PageEntry>,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$DocumentStructureImpl implements _DocumentStructure {
+  const _$DocumentStructureImpl(
+      {required this.notebookId,
+      this.formatVersion = 1,
+      required final List<PageEntry> pages})
+      : _pages = pages;
+
+  factory _$DocumentStructureImpl.fromJson(Map<String, dynamic> json) =>
+      _$$DocumentStructureImplFromJson(json);
+
+  @override
+  final String notebookId;
+  @override
+  @JsonKey()
+  final int formatVersion;
+  final List<PageEntry> _pages;
+  @override
+  List<PageEntry> get pages {
+    if (_pages is EqualUnmodifiableListView) return _pages;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_pages);
+  }
+
+  @override
+  String toString() {
+    return 'DocumentStructure(notebookId: $notebookId, formatVersion: $formatVersion, pages: $pages)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$DocumentStructureImpl &&
+            (identical(other.notebookId, notebookId) ||
+                other.notebookId == notebookId) &&
+            (identical(other.formatVersion, formatVersion) ||
+                other.formatVersion == formatVersion) &&
+            const DeepCollectionEquality().equals(other._pages, _pages));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, notebookId, formatVersion,
+      const DeepCollectionEquality().hash(_pages));
+
+  /// Create a copy of DocumentStructure
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$DocumentStructureImplCopyWith<_$DocumentStructureImpl> get copyWith =>
+      __$$DocumentStructureImplCopyWithImpl<_$DocumentStructureImpl>(
+          this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$DocumentStructureImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _DocumentStructure implements DocumentStructure {
+  const factory _DocumentStructure(
+      {required final String notebookId,
+      final int formatVersion,
+      required final List<PageEntry> pages}) = _$DocumentStructureImpl;
+
+  factory _DocumentStructure.fromJson(Map<String, dynamic> json) =
+      _$DocumentStructureImpl.fromJson;
+
+  @override
+  String get notebookId;
+  @override
+  int get formatVersion;
+  @override
+  List<PageEntry> get pages;
+
+  /// Create a copy of DocumentStructure
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$DocumentStructureImplCopyWith<_$DocumentStructureImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+PageEntry _$PageEntryFromJson(Map<String, dynamic> json) {
+  return _PageEntry.fromJson(json);
+}
+
+/// @nodoc
+mixin _$PageEntry {
+  String get pageId => throw _privateConstructorUsedError;
+  int get pageNumber => throw _privateConstructorUsedError;
+  String get fileName =>
+      throw _privateConstructorUsedError; // es. "page_001.json"
+  double get width => throw _privateConstructorUsedError;
+  double get height => throw _privateConstructorUsedError;
+  String? get thumbnailFile => throw _privateConstructorUsedError;
+  DateTime? get lastModified => throw _privateConstructorUsedError;
+
+  /// Serializes this PageEntry to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of PageEntry
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $PageEntryCopyWith<PageEntry> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $PageEntryCopyWith<$Res> {
+  factory $PageEntryCopyWith(PageEntry value, $Res Function(PageEntry) then) =
+      _$PageEntryCopyWithImpl<$Res, PageEntry>;
+  @useResult
+  $Res call(
+      {String pageId,
+      int pageNumber,
+      String fileName,
+      double width,
+      double height,
+      String? thumbnailFile,
+      DateTime? lastModified});
+}
+
+/// @nodoc
+class _$PageEntryCopyWithImpl<$Res, $Val extends PageEntry>
+    implements $PageEntryCopyWith<$Res> {
+  _$PageEntryCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of PageEntry
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? pageId = null,
+    Object? pageNumber = null,
+    Object? fileName = null,
+    Object? width = null,
+    Object? height = null,
+    Object? thumbnailFile = freezed,
+    Object? lastModified = freezed,
+  }) {
+    return _then(_value.copyWith(
+      pageId: null == pageId
+          ? _value.pageId
+          : pageId // ignore: cast_nullable_to_non_nullable
+              as String,
+      pageNumber: null == pageNumber
+          ? _value.pageNumber
+          : pageNumber // ignore: cast_nullable_to_non_nullable
+              as int,
+      fileName: null == fileName
+          ? _value.fileName
+          : fileName // ignore: cast_nullable_to_non_nullable
+              as String,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      thumbnailFile: freezed == thumbnailFile
+          ? _value.thumbnailFile
+          : thumbnailFile // ignore: cast_nullable_to_non_nullable
+              as String?,
+      lastModified: freezed == lastModified
+          ? _value.lastModified
+          : lastModified // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$PageEntryImplCopyWith<$Res>
+    implements $PageEntryCopyWith<$Res> {
+  factory _$$PageEntryImplCopyWith(
+          _$PageEntryImpl value, $Res Function(_$PageEntryImpl) then) =
+      __$$PageEntryImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String pageId,
+      int pageNumber,
+      String fileName,
+      double width,
+      double height,
+      String? thumbnailFile,
+      DateTime? lastModified});
+}
+
+/// @nodoc
+class __$$PageEntryImplCopyWithImpl<$Res>
+    extends _$PageEntryCopyWithImpl<$Res, _$PageEntryImpl>
+    implements _$$PageEntryImplCopyWith<$Res> {
+  __$$PageEntryImplCopyWithImpl(
+      _$PageEntryImpl _value, $Res Function(_$PageEntryImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of PageEntry
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? pageId = null,
+    Object? pageNumber = null,
+    Object? fileName = null,
+    Object? width = null,
+    Object? height = null,
+    Object? thumbnailFile = freezed,
+    Object? lastModified = freezed,
+  }) {
+    return _then(_$PageEntryImpl(
+      pageId: null == pageId
+          ? _value.pageId
+          : pageId // ignore: cast_nullable_to_non_nullable
+              as String,
+      pageNumber: null == pageNumber
+          ? _value.pageNumber
+          : pageNumber // ignore: cast_nullable_to_non_nullable
+              as int,
+      fileName: null == fileName
+          ? _value.fileName
+          : fileName // ignore: cast_nullable_to_non_nullable
+              as String,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      thumbnailFile: freezed == thumbnailFile
+          ? _value.thumbnailFile
+          : thumbnailFile // ignore: cast_nullable_to_non_nullable
+              as String?,
+      lastModified: freezed == lastModified
+          ? _value.lastModified
+          : lastModified // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$PageEntryImpl implements _PageEntry {
+  const _$PageEntryImpl(
+      {required this.pageId,
+      required this.pageNumber,
+      required this.fileName,
+      this.width = 595.0,
+      this.height = 842.0,
+      this.thumbnailFile,
+      this.lastModified});
+
+  factory _$PageEntryImpl.fromJson(Map<String, dynamic> json) =>
+      _$$PageEntryImplFromJson(json);
+
+  @override
+  final String pageId;
+  @override
+  final int pageNumber;
+  @override
+  final String fileName;
+// es. "page_001.json"
+  @override
+  @JsonKey()
+  final double width;
+  @override
+  @JsonKey()
+  final double height;
+  @override
+  final String? thumbnailFile;
+  @override
+  final DateTime? lastModified;
+
+  @override
+  String toString() {
+    return 'PageEntry(pageId: $pageId, pageNumber: $pageNumber, fileName: $fileName, width: $width, height: $height, thumbnailFile: $thumbnailFile, lastModified: $lastModified)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$PageEntryImpl &&
+            (identical(other.pageId, pageId) || other.pageId == pageId) &&
+            (identical(other.pageNumber, pageNumber) ||
+                other.pageNumber == pageNumber) &&
+            (identical(other.fileName, fileName) ||
+                other.fileName == fileName) &&
+            (identical(other.width, width) || other.width == width) &&
+            (identical(other.height, height) || other.height == height) &&
+            (identical(other.thumbnailFile, thumbnailFile) ||
+                other.thumbnailFile == thumbnailFile) &&
+            (identical(other.lastModified, lastModified) ||
+                other.lastModified == lastModified));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, pageId, pageNumber, fileName,
+      width, height, thumbnailFile, lastModified);
+
+  /// Create a copy of PageEntry
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$PageEntryImplCopyWith<_$PageEntryImpl> get copyWith =>
+      __$$PageEntryImplCopyWithImpl<_$PageEntryImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$PageEntryImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _PageEntry implements PageEntry {
+  const factory _PageEntry(
+      {required final String pageId,
+      required final int pageNumber,
+      required final String fileName,
+      final double width,
+      final double height,
+      final String? thumbnailFile,
+      final DateTime? lastModified}) = _$PageEntryImpl;
+
+  factory _PageEntry.fromJson(Map<String, dynamic> json) =
+      _$PageEntryImpl.fromJson;
+
+  @override
+  String get pageId;
+  @override
+  int get pageNumber;
+  @override
+  String get fileName; // es. "page_001.json"
+  @override
+  double get width;
+  @override
+  double get height;
+  @override
+  String? get thumbnailFile;
+  @override
+  DateTime? get lastModified;
+
+  /// Create a copy of PageEntry
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$PageEntryImplCopyWith<_$PageEntryImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+PageData _$PageDataFromJson(Map<String, dynamic> json) {
+  return _PageData.fromJson(json);
+}
+
+/// @nodoc
+mixin _$PageData {
+  String get pageId => throw _privateConstructorUsedError;
+  int get pageNumber => throw _privateConstructorUsedError;
+  double get width => throw _privateConstructorUsedError;
+  double get height => throw _privateConstructorUsedError;
+  RenderingLayers get layers => throw _privateConstructorUsedError;
+  List<String> get assetReferences => throw _privateConstructorUsedError;
+  DateTime? get createdAt => throw _privateConstructorUsedError;
+  DateTime? get modifiedAt => throw _privateConstructorUsedError;
+
+  /// Serializes this PageData to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of PageData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $PageDataCopyWith<PageData> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $PageDataCopyWith<$Res> {
+  factory $PageDataCopyWith(PageData value, $Res Function(PageData) then) =
+      _$PageDataCopyWithImpl<$Res, PageData>;
+  @useResult
+  $Res call(
+      {String pageId,
+      int pageNumber,
+      double width,
+      double height,
+      RenderingLayers layers,
+      List<String> assetReferences,
+      DateTime? createdAt,
+      DateTime? modifiedAt});
+
+  $RenderingLayersCopyWith<$Res> get layers;
+}
+
+/// @nodoc
+class _$PageDataCopyWithImpl<$Res, $Val extends PageData>
+    implements $PageDataCopyWith<$Res> {
+  _$PageDataCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of PageData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? pageId = null,
+    Object? pageNumber = null,
+    Object? width = null,
+    Object? height = null,
+    Object? layers = null,
+    Object? assetReferences = null,
+    Object? createdAt = freezed,
+    Object? modifiedAt = freezed,
+  }) {
+    return _then(_value.copyWith(
+      pageId: null == pageId
+          ? _value.pageId
+          : pageId // ignore: cast_nullable_to_non_nullable
+              as String,
+      pageNumber: null == pageNumber
+          ? _value.pageNumber
+          : pageNumber // ignore: cast_nullable_to_non_nullable
+              as int,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      layers: null == layers
+          ? _value.layers
+          : layers // ignore: cast_nullable_to_non_nullable
+              as RenderingLayers,
+      assetReferences: null == assetReferences
+          ? _value.assetReferences
+          : assetReferences // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+      createdAt: freezed == createdAt
+          ? _value.createdAt
+          : createdAt // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+      modifiedAt: freezed == modifiedAt
+          ? _value.modifiedAt
+          : modifiedAt // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+    ) as $Val);
+  }
+
+  /// Create a copy of PageData
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $RenderingLayersCopyWith<$Res> get layers {
+    return $RenderingLayersCopyWith<$Res>(_value.layers, (value) {
+      return _then(_value.copyWith(layers: value) as $Val);
+    });
+  }
+}
+
+/// @nodoc
+abstract class _$$PageDataImplCopyWith<$Res>
+    implements $PageDataCopyWith<$Res> {
+  factory _$$PageDataImplCopyWith(
+          _$PageDataImpl value, $Res Function(_$PageDataImpl) then) =
+      __$$PageDataImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String pageId,
+      int pageNumber,
+      double width,
+      double height,
+      RenderingLayers layers,
+      List<String> assetReferences,
+      DateTime? createdAt,
+      DateTime? modifiedAt});
+
+  @override
+  $RenderingLayersCopyWith<$Res> get layers;
+}
+
+/// @nodoc
+class __$$PageDataImplCopyWithImpl<$Res>
+    extends _$PageDataCopyWithImpl<$Res, _$PageDataImpl>
+    implements _$$PageDataImplCopyWith<$Res> {
+  __$$PageDataImplCopyWithImpl(
+      _$PageDataImpl _value, $Res Function(_$PageDataImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of PageData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? pageId = null,
+    Object? pageNumber = null,
+    Object? width = null,
+    Object? height = null,
+    Object? layers = null,
+    Object? assetReferences = null,
+    Object? createdAt = freezed,
+    Object? modifiedAt = freezed,
+  }) {
+    return _then(_$PageDataImpl(
+      pageId: null == pageId
+          ? _value.pageId
+          : pageId // ignore: cast_nullable_to_non_nullable
+              as String,
+      pageNumber: null == pageNumber
+          ? _value.pageNumber
+          : pageNumber // ignore: cast_nullable_to_non_nullable
+              as int,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      layers: null == layers
+          ? _value.layers
+          : layers // ignore: cast_nullable_to_non_nullable
+              as RenderingLayers,
+      assetReferences: null == assetReferences
+          ? _value._assetReferences
+          : assetReferences // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+      createdAt: freezed == createdAt
+          ? _value.createdAt
+          : createdAt // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+      modifiedAt: freezed == modifiedAt
+          ? _value.modifiedAt
+          : modifiedAt // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$PageDataImpl implements _PageData {
+  const _$PageDataImpl(
+      {required this.pageId,
+      required this.pageNumber,
+      required this.width,
+      required this.height,
+      required this.layers,
+      final List<String> assetReferences = const [],
+      this.createdAt,
+      this.modifiedAt})
+      : _assetReferences = assetReferences;
+
+  factory _$PageDataImpl.fromJson(Map<String, dynamic> json) =>
+      _$$PageDataImplFromJson(json);
+
+  @override
+  final String pageId;
+  @override
+  final int pageNumber;
+  @override
+  final double width;
+  @override
+  final double height;
+  @override
+  final RenderingLayers layers;
+  final List<String> _assetReferences;
+  @override
+  @JsonKey()
+  List<String> get assetReferences {
+    if (_assetReferences is EqualUnmodifiableListView) return _assetReferences;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_assetReferences);
+  }
+
+  @override
+  final DateTime? createdAt;
+  @override
+  final DateTime? modifiedAt;
+
+  @override
+  String toString() {
+    return 'PageData(pageId: $pageId, pageNumber: $pageNumber, width: $width, height: $height, layers: $layers, assetReferences: $assetReferences, createdAt: $createdAt, modifiedAt: $modifiedAt)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$PageDataImpl &&
+            (identical(other.pageId, pageId) || other.pageId == pageId) &&
+            (identical(other.pageNumber, pageNumber) ||
+                other.pageNumber == pageNumber) &&
+            (identical(other.width, width) || other.width == width) &&
+            (identical(other.height, height) || other.height == height) &&
+            (identical(other.layers, layers) || other.layers == layers) &&
+            const DeepCollectionEquality()
+                .equals(other._assetReferences, _assetReferences) &&
+            (identical(other.createdAt, createdAt) ||
+                other.createdAt == createdAt) &&
+            (identical(other.modifiedAt, modifiedAt) ||
+                other.modifiedAt == modifiedAt));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType,
+      pageId,
+      pageNumber,
+      width,
+      height,
+      layers,
+      const DeepCollectionEquality().hash(_assetReferences),
+      createdAt,
+      modifiedAt);
+
+  /// Create a copy of PageData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$PageDataImplCopyWith<_$PageDataImpl> get copyWith =>
+      __$$PageDataImplCopyWithImpl<_$PageDataImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$PageDataImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _PageData implements PageData {
+  const factory _PageData(
+      {required final String pageId,
+      required final int pageNumber,
+      required final double width,
+      required final double height,
+      required final RenderingLayers layers,
+      final List<String> assetReferences,
+      final DateTime? createdAt,
+      final DateTime? modifiedAt}) = _$PageDataImpl;
+
+  factory _PageData.fromJson(Map<String, dynamic> json) =
+      _$PageDataImpl.fromJson;
+
+  @override
+  String get pageId;
+  @override
+  int get pageNumber;
+  @override
+  double get width;
+  @override
+  double get height;
+  @override
+  RenderingLayers get layers;
+  @override
+  List<String> get assetReferences;
+  @override
+  DateTime? get createdAt;
+  @override
+  DateTime? get modifiedAt;
+
+  /// Create a copy of PageData
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$PageDataImplCopyWith<_$PageDataImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+RenderingLayers _$RenderingLayersFromJson(Map<String, dynamic> json) {
+  return _RenderingLayers.fromJson(json);
+}
+
+/// @nodoc
+mixin _$RenderingLayers {
+  BackgroundLayer get background => throw _privateConstructorUsedError;
+  List<ContentElement> get content => throw _privateConstructorUsedError;
+
+  /// Serializes this RenderingLayers to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of RenderingLayers
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $RenderingLayersCopyWith<RenderingLayers> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $RenderingLayersCopyWith<$Res> {
+  factory $RenderingLayersCopyWith(
+          RenderingLayers value, $Res Function(RenderingLayers) then) =
+      _$RenderingLayersCopyWithImpl<$Res, RenderingLayers>;
+  @useResult
+  $Res call({BackgroundLayer background, List<ContentElement> content});
+
+  $BackgroundLayerCopyWith<$Res> get background;
+}
+
+/// @nodoc
+class _$RenderingLayersCopyWithImpl<$Res, $Val extends RenderingLayers>
+    implements $RenderingLayersCopyWith<$Res> {
+  _$RenderingLayersCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of RenderingLayers
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? background = null,
+    Object? content = null,
+  }) {
+    return _then(_value.copyWith(
+      background: null == background
+          ? _value.background
+          : background // ignore: cast_nullable_to_non_nullable
+              as BackgroundLayer,
+      content: null == content
+          ? _value.content
+          : content // ignore: cast_nullable_to_non_nullable
+              as List<ContentElement>,
+    ) as $Val);
+  }
+
+  /// Create a copy of RenderingLayers
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $BackgroundLayerCopyWith<$Res> get background {
+    return $BackgroundLayerCopyWith<$Res>(_value.background, (value) {
+      return _then(_value.copyWith(background: value) as $Val);
+    });
+  }
+}
+
+/// @nodoc
+abstract class _$$RenderingLayersImplCopyWith<$Res>
+    implements $RenderingLayersCopyWith<$Res> {
+  factory _$$RenderingLayersImplCopyWith(_$RenderingLayersImpl value,
+          $Res Function(_$RenderingLayersImpl) then) =
+      __$$RenderingLayersImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({BackgroundLayer background, List<ContentElement> content});
+
+  @override
+  $BackgroundLayerCopyWith<$Res> get background;
+}
+
+/// @nodoc
+class __$$RenderingLayersImplCopyWithImpl<$Res>
+    extends _$RenderingLayersCopyWithImpl<$Res, _$RenderingLayersImpl>
+    implements _$$RenderingLayersImplCopyWith<$Res> {
+  __$$RenderingLayersImplCopyWithImpl(
+      _$RenderingLayersImpl _value, $Res Function(_$RenderingLayersImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of RenderingLayers
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? background = null,
+    Object? content = null,
+  }) {
+    return _then(_$RenderingLayersImpl(
+      background: null == background
+          ? _value.background
+          : background // ignore: cast_nullable_to_non_nullable
+              as BackgroundLayer,
+      content: null == content
+          ? _value._content
+          : content // ignore: cast_nullable_to_non_nullable
+              as List<ContentElement>,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$RenderingLayersImpl implements _RenderingLayers {
+  const _$RenderingLayersImpl(
+      {this.background = const BackgroundLayer(),
+      final List<ContentElement> content = const []})
+      : _content = content;
+
+  factory _$RenderingLayersImpl.fromJson(Map<String, dynamic> json) =>
+      _$$RenderingLayersImplFromJson(json);
+
+  @override
+  @JsonKey()
+  final BackgroundLayer background;
+  final List<ContentElement> _content;
+  @override
+  @JsonKey()
+  List<ContentElement> get content {
+    if (_content is EqualUnmodifiableListView) return _content;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_content);
+  }
+
+  @override
+  String toString() {
+    return 'RenderingLayers(background: $background, content: $content)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$RenderingLayersImpl &&
+            (identical(other.background, background) ||
+                other.background == background) &&
+            const DeepCollectionEquality().equals(other._content, _content));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType, background, const DeepCollectionEquality().hash(_content));
+
+  /// Create a copy of RenderingLayers
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$RenderingLayersImplCopyWith<_$RenderingLayersImpl> get copyWith =>
+      __$$RenderingLayersImplCopyWithImpl<_$RenderingLayersImpl>(
+          this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$RenderingLayersImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _RenderingLayers implements RenderingLayers {
+  const factory _RenderingLayers(
+      {final BackgroundLayer background,
+      final List<ContentElement> content}) = _$RenderingLayersImpl;
+
+  factory _RenderingLayers.fromJson(Map<String, dynamic> json) =
+      _$RenderingLayersImpl.fromJson;
+
+  @override
+  BackgroundLayer get background;
+  @override
+  List<ContentElement> get content;
+
+  /// Create a copy of RenderingLayers
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$RenderingLayersImplCopyWith<_$RenderingLayersImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+BackgroundLayer _$BackgroundLayerFromJson(Map<String, dynamic> json) {
+  return _BackgroundLayer.fromJson(json);
+}
+
+/// @nodoc
+mixin _$BackgroundLayer {
+  String get type =>
+      throw _privateConstructorUsedError; // blank, lined, grid, dotted
+  int get color => throw _privateConstructorUsedError;
+  double get lineSpacing => throw _privateConstructorUsedError;
+  int get lineColor => throw _privateConstructorUsedError;
+  String? get pdfAsset =>
+      throw _privateConstructorUsedError; // path in assets/ se è un PDF annotato
+  int get pdfPage => throw _privateConstructorUsedError;
+
+  /// Serializes this BackgroundLayer to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of BackgroundLayer
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $BackgroundLayerCopyWith<BackgroundLayer> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $BackgroundLayerCopyWith<$Res> {
+  factory $BackgroundLayerCopyWith(
+          BackgroundLayer value, $Res Function(BackgroundLayer) then) =
+      _$BackgroundLayerCopyWithImpl<$Res, BackgroundLayer>;
+  @useResult
+  $Res call(
+      {String type,
+      int color,
+      double lineSpacing,
+      int lineColor,
+      String? pdfAsset,
+      int pdfPage});
+}
+
+/// @nodoc
+class _$BackgroundLayerCopyWithImpl<$Res, $Val extends BackgroundLayer>
+    implements $BackgroundLayerCopyWith<$Res> {
+  _$BackgroundLayerCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of BackgroundLayer
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? type = null,
+    Object? color = null,
+    Object? lineSpacing = null,
+    Object? lineColor = null,
+    Object? pdfAsset = freezed,
+    Object? pdfPage = null,
+  }) {
+    return _then(_value.copyWith(
+      type: null == type
+          ? _value.type
+          : type // ignore: cast_nullable_to_non_nullable
+              as String,
+      color: null == color
+          ? _value.color
+          : color // ignore: cast_nullable_to_non_nullable
+              as int,
+      lineSpacing: null == lineSpacing
+          ? _value.lineSpacing
+          : lineSpacing // ignore: cast_nullable_to_non_nullable
+              as double,
+      lineColor: null == lineColor
+          ? _value.lineColor
+          : lineColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      pdfAsset: freezed == pdfAsset
+          ? _value.pdfAsset
+          : pdfAsset // ignore: cast_nullable_to_non_nullable
+              as String?,
+      pdfPage: null == pdfPage
+          ? _value.pdfPage
+          : pdfPage // ignore: cast_nullable_to_non_nullable
+              as int,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$BackgroundLayerImplCopyWith<$Res>
+    implements $BackgroundLayerCopyWith<$Res> {
+  factory _$$BackgroundLayerImplCopyWith(_$BackgroundLayerImpl value,
+          $Res Function(_$BackgroundLayerImpl) then) =
+      __$$BackgroundLayerImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String type,
+      int color,
+      double lineSpacing,
+      int lineColor,
+      String? pdfAsset,
+      int pdfPage});
+}
+
+/// @nodoc
+class __$$BackgroundLayerImplCopyWithImpl<$Res>
+    extends _$BackgroundLayerCopyWithImpl<$Res, _$BackgroundLayerImpl>
+    implements _$$BackgroundLayerImplCopyWith<$Res> {
+  __$$BackgroundLayerImplCopyWithImpl(
+      _$BackgroundLayerImpl _value, $Res Function(_$BackgroundLayerImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of BackgroundLayer
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? type = null,
+    Object? color = null,
+    Object? lineSpacing = null,
+    Object? lineColor = null,
+    Object? pdfAsset = freezed,
+    Object? pdfPage = null,
+  }) {
+    return _then(_$BackgroundLayerImpl(
+      type: null == type
+          ? _value.type
+          : type // ignore: cast_nullable_to_non_nullable
+              as String,
+      color: null == color
+          ? _value.color
+          : color // ignore: cast_nullable_to_non_nullable
+              as int,
+      lineSpacing: null == lineSpacing
+          ? _value.lineSpacing
+          : lineSpacing // ignore: cast_nullable_to_non_nullable
+              as double,
+      lineColor: null == lineColor
+          ? _value.lineColor
+          : lineColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      pdfAsset: freezed == pdfAsset
+          ? _value.pdfAsset
+          : pdfAsset // ignore: cast_nullable_to_non_nullable
+              as String?,
+      pdfPage: null == pdfPage
+          ? _value.pdfPage
+          : pdfPage // ignore: cast_nullable_to_non_nullable
+              as int,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$BackgroundLayerImpl implements _BackgroundLayer {
+  const _$BackgroundLayerImpl(
+      {this.type = 'lined',
+      this.color = 0xFFFFFFFF,
+      this.lineSpacing = 30.0,
+      this.lineColor = 0xFFB0B8C0,
+      this.pdfAsset,
+      this.pdfPage = 0});
+
+  factory _$BackgroundLayerImpl.fromJson(Map<String, dynamic> json) =>
+      _$$BackgroundLayerImplFromJson(json);
+
+  @override
+  @JsonKey()
+  final String type;
+// blank, lined, grid, dotted
+  @override
+  @JsonKey()
+  final int color;
+  @override
+  @JsonKey()
+  final double lineSpacing;
+  @override
+  @JsonKey()
+  final int lineColor;
+  @override
+  final String? pdfAsset;
+// path in assets/ se è un PDF annotato
+  @override
+  @JsonKey()
+  final int pdfPage;
+
+  @override
+  String toString() {
+    return 'BackgroundLayer(type: $type, color: $color, lineSpacing: $lineSpacing, lineColor: $lineColor, pdfAsset: $pdfAsset, pdfPage: $pdfPage)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$BackgroundLayerImpl &&
+            (identical(other.type, type) || other.type == type) &&
+            (identical(other.color, color) || other.color == color) &&
+            (identical(other.lineSpacing, lineSpacing) ||
+                other.lineSpacing == lineSpacing) &&
+            (identical(other.lineColor, lineColor) ||
+                other.lineColor == lineColor) &&
+            (identical(other.pdfAsset, pdfAsset) ||
+                other.pdfAsset == pdfAsset) &&
+            (identical(other.pdfPage, pdfPage) || other.pdfPage == pdfPage));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType, type, color, lineSpacing, lineColor, pdfAsset, pdfPage);
+
+  /// Create a copy of BackgroundLayer
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$BackgroundLayerImplCopyWith<_$BackgroundLayerImpl> get copyWith =>
+      __$$BackgroundLayerImplCopyWithImpl<_$BackgroundLayerImpl>(
+          this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$BackgroundLayerImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _BackgroundLayer implements BackgroundLayer {
+  const factory _BackgroundLayer(
+      {final String type,
+      final int color,
+      final double lineSpacing,
+      final int lineColor,
+      final String? pdfAsset,
+      final int pdfPage}) = _$BackgroundLayerImpl;
+
+  factory _BackgroundLayer.fromJson(Map<String, dynamic> json) =
+      _$BackgroundLayerImpl.fromJson;
+
+  @override
+  String get type; // blank, lined, grid, dotted
+  @override
+  int get color;
+  @override
+  double get lineSpacing;
+  @override
+  int get lineColor;
+  @override
+  String? get pdfAsset; // path in assets/ se è un PDF annotato
+  @override
+  int get pdfPage;
+
+  /// Create a copy of BackgroundLayer
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$BackgroundLayerImplCopyWith<_$BackgroundLayerImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+ContentElement _$ContentElementFromJson(Map<String, dynamic> json) {
+  switch (json['type']) {
+    case 'stroke':
+      return StrokeElement.fromJson(json);
+    case 'text':
+      return TextElement.fromJson(json);
+    case 'image':
+      return ImageElement.fromJson(json);
+    case 'shape':
+      return ShapeElement.fromJson(json);
+
+    default:
+      throw CheckedFromJsonException(json, 'type', 'ContentElement',
+          'Invalid union type "${json['type']}"!');
+  }
+}
+
+/// @nodoc
+mixin _$ContentElement {
+  String get id => throw _privateConstructorUsedError;
+  int get zIndex => throw _privateConstructorUsedError;
+  Object get data => throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String id, int zIndex, StrokeData data) stroke,
+    required TResult Function(String id, int zIndex, TextData data) text,
+    required TResult Function(String id, int zIndex, ImageData data) image,
+    required TResult Function(String id, int zIndex, ShapeData data) shape,
+  }) =>
+      throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult? Function(String id, int zIndex, TextData data)? text,
+    TResult? Function(String id, int zIndex, ImageData data)? image,
+    TResult? Function(String id, int zIndex, ShapeData data)? shape,
+  }) =>
+      throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult Function(String id, int zIndex, TextData data)? text,
+    TResult Function(String id, int zIndex, ImageData data)? image,
+    TResult Function(String id, int zIndex, ShapeData data)? shape,
+    required TResult orElse(),
+  }) =>
+      throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(StrokeElement value) stroke,
+    required TResult Function(TextElement value) text,
+    required TResult Function(ImageElement value) image,
+    required TResult Function(ShapeElement value) shape,
+  }) =>
+      throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(StrokeElement value)? stroke,
+    TResult? Function(TextElement value)? text,
+    TResult? Function(ImageElement value)? image,
+    TResult? Function(ShapeElement value)? shape,
+  }) =>
+      throw _privateConstructorUsedError;
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(StrokeElement value)? stroke,
+    TResult Function(TextElement value)? text,
+    TResult Function(ImageElement value)? image,
+    TResult Function(ShapeElement value)? shape,
+    required TResult orElse(),
+  }) =>
+      throw _privateConstructorUsedError;
+
+  /// Serializes this ContentElement to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $ContentElementCopyWith<ContentElement> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $ContentElementCopyWith<$Res> {
+  factory $ContentElementCopyWith(
+          ContentElement value, $Res Function(ContentElement) then) =
+      _$ContentElementCopyWithImpl<$Res, ContentElement>;
+  @useResult
+  $Res call({String id, int zIndex});
+}
+
+/// @nodoc
+class _$ContentElementCopyWithImpl<$Res, $Val extends ContentElement>
+    implements $ContentElementCopyWith<$Res> {
+  _$ContentElementCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? zIndex = null,
+  }) {
+    return _then(_value.copyWith(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      zIndex: null == zIndex
+          ? _value.zIndex
+          : zIndex // ignore: cast_nullable_to_non_nullable
+              as int,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$StrokeElementImplCopyWith<$Res>
+    implements $ContentElementCopyWith<$Res> {
+  factory _$$StrokeElementImplCopyWith(
+          _$StrokeElementImpl value, $Res Function(_$StrokeElementImpl) then) =
+      __$$StrokeElementImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({String id, int zIndex, StrokeData data});
+
+  $StrokeDataCopyWith<$Res> get data;
+}
+
+/// @nodoc
+class __$$StrokeElementImplCopyWithImpl<$Res>
+    extends _$ContentElementCopyWithImpl<$Res, _$StrokeElementImpl>
+    implements _$$StrokeElementImplCopyWith<$Res> {
+  __$$StrokeElementImplCopyWithImpl(
+      _$StrokeElementImpl _value, $Res Function(_$StrokeElementImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? zIndex = null,
+    Object? data = null,
+  }) {
+    return _then(_$StrokeElementImpl(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      zIndex: null == zIndex
+          ? _value.zIndex
+          : zIndex // ignore: cast_nullable_to_non_nullable
+              as int,
+      data: null == data
+          ? _value.data
+          : data // ignore: cast_nullable_to_non_nullable
+              as StrokeData,
+    ));
+  }
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $StrokeDataCopyWith<$Res> get data {
+    return $StrokeDataCopyWith<$Res>(_value.data, (value) {
+      return _then(_value.copyWith(data: value));
+    });
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$StrokeElementImpl implements StrokeElement {
+  const _$StrokeElementImpl(
+      {required this.id,
+      required this.zIndex,
+      required this.data,
+      final String? $type})
+      : $type = $type ?? 'stroke';
+
+  factory _$StrokeElementImpl.fromJson(Map<String, dynamic> json) =>
+      _$$StrokeElementImplFromJson(json);
+
+  @override
+  final String id;
+  @override
+  final int zIndex;
+  @override
+  final StrokeData data;
+
+  @JsonKey(name: 'type')
+  final String $type;
+
+  @override
+  String toString() {
+    return 'ContentElement.stroke(id: $id, zIndex: $zIndex, data: $data)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$StrokeElementImpl &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.zIndex, zIndex) || other.zIndex == zIndex) &&
+            (identical(other.data, data) || other.data == data));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, id, zIndex, data);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$StrokeElementImplCopyWith<_$StrokeElementImpl> get copyWith =>
+      __$$StrokeElementImplCopyWithImpl<_$StrokeElementImpl>(this, _$identity);
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String id, int zIndex, StrokeData data) stroke,
+    required TResult Function(String id, int zIndex, TextData data) text,
+    required TResult Function(String id, int zIndex, ImageData data) image,
+    required TResult Function(String id, int zIndex, ShapeData data) shape,
+  }) {
+    return stroke(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult? Function(String id, int zIndex, TextData data)? text,
+    TResult? Function(String id, int zIndex, ImageData data)? image,
+    TResult? Function(String id, int zIndex, ShapeData data)? shape,
+  }) {
+    return stroke?.call(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult Function(String id, int zIndex, TextData data)? text,
+    TResult Function(String id, int zIndex, ImageData data)? image,
+    TResult Function(String id, int zIndex, ShapeData data)? shape,
+    required TResult orElse(),
+  }) {
+    if (stroke != null) {
+      return stroke(id, zIndex, data);
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(StrokeElement value) stroke,
+    required TResult Function(TextElement value) text,
+    required TResult Function(ImageElement value) image,
+    required TResult Function(ShapeElement value) shape,
+  }) {
+    return stroke(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(StrokeElement value)? stroke,
+    TResult? Function(TextElement value)? text,
+    TResult? Function(ImageElement value)? image,
+    TResult? Function(ShapeElement value)? shape,
+  }) {
+    return stroke?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(StrokeElement value)? stroke,
+    TResult Function(TextElement value)? text,
+    TResult Function(ImageElement value)? image,
+    TResult Function(ShapeElement value)? shape,
+    required TResult orElse(),
+  }) {
+    if (stroke != null) {
+      return stroke(this);
+    }
+    return orElse();
+  }
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$StrokeElementImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class StrokeElement implements ContentElement {
+  const factory StrokeElement(
+      {required final String id,
+      required final int zIndex,
+      required final StrokeData data}) = _$StrokeElementImpl;
+
+  factory StrokeElement.fromJson(Map<String, dynamic> json) =
+      _$StrokeElementImpl.fromJson;
+
+  @override
+  String get id;
+  @override
+  int get zIndex;
+  @override
+  StrokeData get data;
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$StrokeElementImplCopyWith<_$StrokeElementImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class _$$TextElementImplCopyWith<$Res>
+    implements $ContentElementCopyWith<$Res> {
+  factory _$$TextElementImplCopyWith(
+          _$TextElementImpl value, $Res Function(_$TextElementImpl) then) =
+      __$$TextElementImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({String id, int zIndex, TextData data});
+
+  $TextDataCopyWith<$Res> get data;
+}
+
+/// @nodoc
+class __$$TextElementImplCopyWithImpl<$Res>
+    extends _$ContentElementCopyWithImpl<$Res, _$TextElementImpl>
+    implements _$$TextElementImplCopyWith<$Res> {
+  __$$TextElementImplCopyWithImpl(
+      _$TextElementImpl _value, $Res Function(_$TextElementImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? zIndex = null,
+    Object? data = null,
+  }) {
+    return _then(_$TextElementImpl(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      zIndex: null == zIndex
+          ? _value.zIndex
+          : zIndex // ignore: cast_nullable_to_non_nullable
+              as int,
+      data: null == data
+          ? _value.data
+          : data // ignore: cast_nullable_to_non_nullable
+              as TextData,
+    ));
+  }
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $TextDataCopyWith<$Res> get data {
+    return $TextDataCopyWith<$Res>(_value.data, (value) {
+      return _then(_value.copyWith(data: value));
+    });
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$TextElementImpl implements TextElement {
+  const _$TextElementImpl(
+      {required this.id,
+      required this.zIndex,
+      required this.data,
+      final String? $type})
+      : $type = $type ?? 'text';
+
+  factory _$TextElementImpl.fromJson(Map<String, dynamic> json) =>
+      _$$TextElementImplFromJson(json);
+
+  @override
+  final String id;
+  @override
+  final int zIndex;
+  @override
+  final TextData data;
+
+  @JsonKey(name: 'type')
+  final String $type;
+
+  @override
+  String toString() {
+    return 'ContentElement.text(id: $id, zIndex: $zIndex, data: $data)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$TextElementImpl &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.zIndex, zIndex) || other.zIndex == zIndex) &&
+            (identical(other.data, data) || other.data == data));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, id, zIndex, data);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$TextElementImplCopyWith<_$TextElementImpl> get copyWith =>
+      __$$TextElementImplCopyWithImpl<_$TextElementImpl>(this, _$identity);
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String id, int zIndex, StrokeData data) stroke,
+    required TResult Function(String id, int zIndex, TextData data) text,
+    required TResult Function(String id, int zIndex, ImageData data) image,
+    required TResult Function(String id, int zIndex, ShapeData data) shape,
+  }) {
+    return text(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult? Function(String id, int zIndex, TextData data)? text,
+    TResult? Function(String id, int zIndex, ImageData data)? image,
+    TResult? Function(String id, int zIndex, ShapeData data)? shape,
+  }) {
+    return text?.call(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult Function(String id, int zIndex, TextData data)? text,
+    TResult Function(String id, int zIndex, ImageData data)? image,
+    TResult Function(String id, int zIndex, ShapeData data)? shape,
+    required TResult orElse(),
+  }) {
+    if (text != null) {
+      return text(id, zIndex, data);
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(StrokeElement value) stroke,
+    required TResult Function(TextElement value) text,
+    required TResult Function(ImageElement value) image,
+    required TResult Function(ShapeElement value) shape,
+  }) {
+    return text(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(StrokeElement value)? stroke,
+    TResult? Function(TextElement value)? text,
+    TResult? Function(ImageElement value)? image,
+    TResult? Function(ShapeElement value)? shape,
+  }) {
+    return text?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(StrokeElement value)? stroke,
+    TResult Function(TextElement value)? text,
+    TResult Function(ImageElement value)? image,
+    TResult Function(ShapeElement value)? shape,
+    required TResult orElse(),
+  }) {
+    if (text != null) {
+      return text(this);
+    }
+    return orElse();
+  }
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$TextElementImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class TextElement implements ContentElement {
+  const factory TextElement(
+      {required final String id,
+      required final int zIndex,
+      required final TextData data}) = _$TextElementImpl;
+
+  factory TextElement.fromJson(Map<String, dynamic> json) =
+      _$TextElementImpl.fromJson;
+
+  @override
+  String get id;
+  @override
+  int get zIndex;
+  @override
+  TextData get data;
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$TextElementImplCopyWith<_$TextElementImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class _$$ImageElementImplCopyWith<$Res>
+    implements $ContentElementCopyWith<$Res> {
+  factory _$$ImageElementImplCopyWith(
+          _$ImageElementImpl value, $Res Function(_$ImageElementImpl) then) =
+      __$$ImageElementImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({String id, int zIndex, ImageData data});
+
+  $ImageDataCopyWith<$Res> get data;
+}
+
+/// @nodoc
+class __$$ImageElementImplCopyWithImpl<$Res>
+    extends _$ContentElementCopyWithImpl<$Res, _$ImageElementImpl>
+    implements _$$ImageElementImplCopyWith<$Res> {
+  __$$ImageElementImplCopyWithImpl(
+      _$ImageElementImpl _value, $Res Function(_$ImageElementImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? zIndex = null,
+    Object? data = null,
+  }) {
+    return _then(_$ImageElementImpl(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      zIndex: null == zIndex
+          ? _value.zIndex
+          : zIndex // ignore: cast_nullable_to_non_nullable
+              as int,
+      data: null == data
+          ? _value.data
+          : data // ignore: cast_nullable_to_non_nullable
+              as ImageData,
+    ));
+  }
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $ImageDataCopyWith<$Res> get data {
+    return $ImageDataCopyWith<$Res>(_value.data, (value) {
+      return _then(_value.copyWith(data: value));
+    });
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$ImageElementImpl implements ImageElement {
+  const _$ImageElementImpl(
+      {required this.id,
+      required this.zIndex,
+      required this.data,
+      final String? $type})
+      : $type = $type ?? 'image';
+
+  factory _$ImageElementImpl.fromJson(Map<String, dynamic> json) =>
+      _$$ImageElementImplFromJson(json);
+
+  @override
+  final String id;
+  @override
+  final int zIndex;
+  @override
+  final ImageData data;
+
+  @JsonKey(name: 'type')
+  final String $type;
+
+  @override
+  String toString() {
+    return 'ContentElement.image(id: $id, zIndex: $zIndex, data: $data)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$ImageElementImpl &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.zIndex, zIndex) || other.zIndex == zIndex) &&
+            (identical(other.data, data) || other.data == data));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, id, zIndex, data);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$ImageElementImplCopyWith<_$ImageElementImpl> get copyWith =>
+      __$$ImageElementImplCopyWithImpl<_$ImageElementImpl>(this, _$identity);
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String id, int zIndex, StrokeData data) stroke,
+    required TResult Function(String id, int zIndex, TextData data) text,
+    required TResult Function(String id, int zIndex, ImageData data) image,
+    required TResult Function(String id, int zIndex, ShapeData data) shape,
+  }) {
+    return image(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult? Function(String id, int zIndex, TextData data)? text,
+    TResult? Function(String id, int zIndex, ImageData data)? image,
+    TResult? Function(String id, int zIndex, ShapeData data)? shape,
+  }) {
+    return image?.call(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult Function(String id, int zIndex, TextData data)? text,
+    TResult Function(String id, int zIndex, ImageData data)? image,
+    TResult Function(String id, int zIndex, ShapeData data)? shape,
+    required TResult orElse(),
+  }) {
+    if (image != null) {
+      return image(id, zIndex, data);
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(StrokeElement value) stroke,
+    required TResult Function(TextElement value) text,
+    required TResult Function(ImageElement value) image,
+    required TResult Function(ShapeElement value) shape,
+  }) {
+    return image(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(StrokeElement value)? stroke,
+    TResult? Function(TextElement value)? text,
+    TResult? Function(ImageElement value)? image,
+    TResult? Function(ShapeElement value)? shape,
+  }) {
+    return image?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(StrokeElement value)? stroke,
+    TResult Function(TextElement value)? text,
+    TResult Function(ImageElement value)? image,
+    TResult Function(ShapeElement value)? shape,
+    required TResult orElse(),
+  }) {
+    if (image != null) {
+      return image(this);
+    }
+    return orElse();
+  }
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$ImageElementImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class ImageElement implements ContentElement {
+  const factory ImageElement(
+      {required final String id,
+      required final int zIndex,
+      required final ImageData data}) = _$ImageElementImpl;
+
+  factory ImageElement.fromJson(Map<String, dynamic> json) =
+      _$ImageElementImpl.fromJson;
+
+  @override
+  String get id;
+  @override
+  int get zIndex;
+  @override
+  ImageData get data;
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$ImageElementImplCopyWith<_$ImageElementImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class _$$ShapeElementImplCopyWith<$Res>
+    implements $ContentElementCopyWith<$Res> {
+  factory _$$ShapeElementImplCopyWith(
+          _$ShapeElementImpl value, $Res Function(_$ShapeElementImpl) then) =
+      __$$ShapeElementImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({String id, int zIndex, ShapeData data});
+
+  $ShapeDataCopyWith<$Res> get data;
+}
+
+/// @nodoc
+class __$$ShapeElementImplCopyWithImpl<$Res>
+    extends _$ContentElementCopyWithImpl<$Res, _$ShapeElementImpl>
+    implements _$$ShapeElementImplCopyWith<$Res> {
+  __$$ShapeElementImplCopyWithImpl(
+      _$ShapeElementImpl _value, $Res Function(_$ShapeElementImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? zIndex = null,
+    Object? data = null,
+  }) {
+    return _then(_$ShapeElementImpl(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      zIndex: null == zIndex
+          ? _value.zIndex
+          : zIndex // ignore: cast_nullable_to_non_nullable
+              as int,
+      data: null == data
+          ? _value.data
+          : data // ignore: cast_nullable_to_non_nullable
+              as ShapeData,
+    ));
+  }
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @pragma('vm:prefer-inline')
+  $ShapeDataCopyWith<$Res> get data {
+    return $ShapeDataCopyWith<$Res>(_value.data, (value) {
+      return _then(_value.copyWith(data: value));
+    });
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$ShapeElementImpl implements ShapeElement {
+  const _$ShapeElementImpl(
+      {required this.id,
+      required this.zIndex,
+      required this.data,
+      final String? $type})
+      : $type = $type ?? 'shape';
+
+  factory _$ShapeElementImpl.fromJson(Map<String, dynamic> json) =>
+      _$$ShapeElementImplFromJson(json);
+
+  @override
+  final String id;
+  @override
+  final int zIndex;
+  @override
+  final ShapeData data;
+
+  @JsonKey(name: 'type')
+  final String $type;
+
+  @override
+  String toString() {
+    return 'ContentElement.shape(id: $id, zIndex: $zIndex, data: $data)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$ShapeElementImpl &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.zIndex, zIndex) || other.zIndex == zIndex) &&
+            (identical(other.data, data) || other.data == data));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, id, zIndex, data);
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$ShapeElementImplCopyWith<_$ShapeElementImpl> get copyWith =>
+      __$$ShapeElementImplCopyWithImpl<_$ShapeElementImpl>(this, _$identity);
+
+  @override
+  @optionalTypeArgs
+  TResult when<TResult extends Object?>({
+    required TResult Function(String id, int zIndex, StrokeData data) stroke,
+    required TResult Function(String id, int zIndex, TextData data) text,
+    required TResult Function(String id, int zIndex, ImageData data) image,
+    required TResult Function(String id, int zIndex, ShapeData data) shape,
+  }) {
+    return shape(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? whenOrNull<TResult extends Object?>({
+    TResult? Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult? Function(String id, int zIndex, TextData data)? text,
+    TResult? Function(String id, int zIndex, ImageData data)? image,
+    TResult? Function(String id, int zIndex, ShapeData data)? shape,
+  }) {
+    return shape?.call(id, zIndex, data);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeWhen<TResult extends Object?>({
+    TResult Function(String id, int zIndex, StrokeData data)? stroke,
+    TResult Function(String id, int zIndex, TextData data)? text,
+    TResult Function(String id, int zIndex, ImageData data)? image,
+    TResult Function(String id, int zIndex, ShapeData data)? shape,
+    required TResult orElse(),
+  }) {
+    if (shape != null) {
+      return shape(id, zIndex, data);
+    }
+    return orElse();
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult map<TResult extends Object?>({
+    required TResult Function(StrokeElement value) stroke,
+    required TResult Function(TextElement value) text,
+    required TResult Function(ImageElement value) image,
+    required TResult Function(ShapeElement value) shape,
+  }) {
+    return shape(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult? mapOrNull<TResult extends Object?>({
+    TResult? Function(StrokeElement value)? stroke,
+    TResult? Function(TextElement value)? text,
+    TResult? Function(ImageElement value)? image,
+    TResult? Function(ShapeElement value)? shape,
+  }) {
+    return shape?.call(this);
+  }
+
+  @override
+  @optionalTypeArgs
+  TResult maybeMap<TResult extends Object?>({
+    TResult Function(StrokeElement value)? stroke,
+    TResult Function(TextElement value)? text,
+    TResult Function(ImageElement value)? image,
+    TResult Function(ShapeElement value)? shape,
+    required TResult orElse(),
+  }) {
+    if (shape != null) {
+      return shape(this);
+    }
+    return orElse();
+  }
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$ShapeElementImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class ShapeElement implements ContentElement {
+  const factory ShapeElement(
+      {required final String id,
+      required final int zIndex,
+      required final ShapeData data}) = _$ShapeElementImpl;
+
+  factory ShapeElement.fromJson(Map<String, dynamic> json) =
+      _$ShapeElementImpl.fromJson;
+
+  @override
+  String get id;
+  @override
+  int get zIndex;
+  @override
+  ShapeData get data;
+
+  /// Create a copy of ContentElement
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$ShapeElementImplCopyWith<_$ShapeElementImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+StrokeData _$StrokeDataFromJson(Map<String, dynamic> json) {
+  return _StrokeData.fromJson(json);
+}
+
+/// @nodoc
+mixin _$StrokeData {
+  List<StrokePoint> get points => throw _privateConstructorUsedError;
+  String get toolType =>
+      throw _privateConstructorUsedError; // pen, ballpoint, brush, highlighter
+  int get color => throw _privateConstructorUsedError;
+  double get baseWidth => throw _privateConstructorUsedError;
+  bool get isHighlighter => throw _privateConstructorUsedError;
+  double get opacity => throw _privateConstructorUsedError;
+  DateTime? get timestamp => throw _privateConstructorUsedError;
+
+  /// Serializes this StrokeData to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of StrokeData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $StrokeDataCopyWith<StrokeData> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $StrokeDataCopyWith<$Res> {
+  factory $StrokeDataCopyWith(
+          StrokeData value, $Res Function(StrokeData) then) =
+      _$StrokeDataCopyWithImpl<$Res, StrokeData>;
+  @useResult
+  $Res call(
+      {List<StrokePoint> points,
+      String toolType,
+      int color,
+      double baseWidth,
+      bool isHighlighter,
+      double opacity,
+      DateTime? timestamp});
+}
+
+/// @nodoc
+class _$StrokeDataCopyWithImpl<$Res, $Val extends StrokeData>
+    implements $StrokeDataCopyWith<$Res> {
+  _$StrokeDataCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of StrokeData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? points = null,
+    Object? toolType = null,
+    Object? color = null,
+    Object? baseWidth = null,
+    Object? isHighlighter = null,
+    Object? opacity = null,
+    Object? timestamp = freezed,
+  }) {
+    return _then(_value.copyWith(
+      points: null == points
+          ? _value.points
+          : points // ignore: cast_nullable_to_non_nullable
+              as List<StrokePoint>,
+      toolType: null == toolType
+          ? _value.toolType
+          : toolType // ignore: cast_nullable_to_non_nullable
+              as String,
+      color: null == color
+          ? _value.color
+          : color // ignore: cast_nullable_to_non_nullable
+              as int,
+      baseWidth: null == baseWidth
+          ? _value.baseWidth
+          : baseWidth // ignore: cast_nullable_to_non_nullable
+              as double,
+      isHighlighter: null == isHighlighter
+          ? _value.isHighlighter
+          : isHighlighter // ignore: cast_nullable_to_non_nullable
+              as bool,
+      opacity: null == opacity
+          ? _value.opacity
+          : opacity // ignore: cast_nullable_to_non_nullable
+              as double,
+      timestamp: freezed == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$StrokeDataImplCopyWith<$Res>
+    implements $StrokeDataCopyWith<$Res> {
+  factory _$$StrokeDataImplCopyWith(
+          _$StrokeDataImpl value, $Res Function(_$StrokeDataImpl) then) =
+      __$$StrokeDataImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {List<StrokePoint> points,
+      String toolType,
+      int color,
+      double baseWidth,
+      bool isHighlighter,
+      double opacity,
+      DateTime? timestamp});
+}
+
+/// @nodoc
+class __$$StrokeDataImplCopyWithImpl<$Res>
+    extends _$StrokeDataCopyWithImpl<$Res, _$StrokeDataImpl>
+    implements _$$StrokeDataImplCopyWith<$Res> {
+  __$$StrokeDataImplCopyWithImpl(
+      _$StrokeDataImpl _value, $Res Function(_$StrokeDataImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of StrokeData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? points = null,
+    Object? toolType = null,
+    Object? color = null,
+    Object? baseWidth = null,
+    Object? isHighlighter = null,
+    Object? opacity = null,
+    Object? timestamp = freezed,
+  }) {
+    return _then(_$StrokeDataImpl(
+      points: null == points
+          ? _value._points
+          : points // ignore: cast_nullable_to_non_nullable
+              as List<StrokePoint>,
+      toolType: null == toolType
+          ? _value.toolType
+          : toolType // ignore: cast_nullable_to_non_nullable
+              as String,
+      color: null == color
+          ? _value.color
+          : color // ignore: cast_nullable_to_non_nullable
+              as int,
+      baseWidth: null == baseWidth
+          ? _value.baseWidth
+          : baseWidth // ignore: cast_nullable_to_non_nullable
+              as double,
+      isHighlighter: null == isHighlighter
+          ? _value.isHighlighter
+          : isHighlighter // ignore: cast_nullable_to_non_nullable
+              as bool,
+      opacity: null == opacity
+          ? _value.opacity
+          : opacity // ignore: cast_nullable_to_non_nullable
+              as double,
+      timestamp: freezed == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$StrokeDataImpl implements _StrokeData {
+  const _$StrokeDataImpl(
+      {required final List<StrokePoint> points,
+      this.toolType = 'pen',
+      this.color = 0xFF000000,
+      this.baseWidth = 2.0,
+      this.isHighlighter = false,
+      this.opacity = 1.0,
+      this.timestamp})
+      : _points = points;
+
+  factory _$StrokeDataImpl.fromJson(Map<String, dynamic> json) =>
+      _$$StrokeDataImplFromJson(json);
+
+  final List<StrokePoint> _points;
+  @override
+  List<StrokePoint> get points {
+    if (_points is EqualUnmodifiableListView) return _points;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_points);
+  }
+
+  @override
+  @JsonKey()
+  final String toolType;
+// pen, ballpoint, brush, highlighter
+  @override
+  @JsonKey()
+  final int color;
+  @override
+  @JsonKey()
+  final double baseWidth;
+  @override
+  @JsonKey()
+  final bool isHighlighter;
+  @override
+  @JsonKey()
+  final double opacity;
+  @override
+  final DateTime? timestamp;
+
+  @override
+  String toString() {
+    return 'StrokeData(points: $points, toolType: $toolType, color: $color, baseWidth: $baseWidth, isHighlighter: $isHighlighter, opacity: $opacity, timestamp: $timestamp)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$StrokeDataImpl &&
+            const DeepCollectionEquality().equals(other._points, _points) &&
+            (identical(other.toolType, toolType) ||
+                other.toolType == toolType) &&
+            (identical(other.color, color) || other.color == color) &&
+            (identical(other.baseWidth, baseWidth) ||
+                other.baseWidth == baseWidth) &&
+            (identical(other.isHighlighter, isHighlighter) ||
+                other.isHighlighter == isHighlighter) &&
+            (identical(other.opacity, opacity) || other.opacity == opacity) &&
+            (identical(other.timestamp, timestamp) ||
+                other.timestamp == timestamp));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType,
+      const DeepCollectionEquality().hash(_points),
+      toolType,
+      color,
+      baseWidth,
+      isHighlighter,
+      opacity,
+      timestamp);
+
+  /// Create a copy of StrokeData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$StrokeDataImplCopyWith<_$StrokeDataImpl> get copyWith =>
+      __$$StrokeDataImplCopyWithImpl<_$StrokeDataImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$StrokeDataImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _StrokeData implements StrokeData {
+  const factory _StrokeData(
+      {required final List<StrokePoint> points,
+      final String toolType,
+      final int color,
+      final double baseWidth,
+      final bool isHighlighter,
+      final double opacity,
+      final DateTime? timestamp}) = _$StrokeDataImpl;
+
+  factory _StrokeData.fromJson(Map<String, dynamic> json) =
+      _$StrokeDataImpl.fromJson;
+
+  @override
+  List<StrokePoint> get points;
+  @override
+  String get toolType; // pen, ballpoint, brush, highlighter
+  @override
+  int get color;
+  @override
+  double get baseWidth;
+  @override
+  bool get isHighlighter;
+  @override
+  double get opacity;
+  @override
+  DateTime? get timestamp;
+
+  /// Create a copy of StrokeData
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$StrokeDataImplCopyWith<_$StrokeDataImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+StrokePoint _$StrokePointFromJson(Map<String, dynamic> json) {
+  return _StrokePoint.fromJson(json);
+}
+
+/// @nodoc
+mixin _$StrokePoint {
+  double get x => throw _privateConstructorUsedError;
+  double get y => throw _privateConstructorUsedError;
+  double get pressure => throw _privateConstructorUsedError; // 0.0 - 1.0
+  double get tilt => throw _privateConstructorUsedError; // radianti
+  int get timestamp => throw _privateConstructorUsedError;
+
+  /// Serializes this StrokePoint to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of StrokePoint
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $StrokePointCopyWith<StrokePoint> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $StrokePointCopyWith<$Res> {
+  factory $StrokePointCopyWith(
+          StrokePoint value, $Res Function(StrokePoint) then) =
+      _$StrokePointCopyWithImpl<$Res, StrokePoint>;
+  @useResult
+  $Res call({double x, double y, double pressure, double tilt, int timestamp});
+}
+
+/// @nodoc
+class _$StrokePointCopyWithImpl<$Res, $Val extends StrokePoint>
+    implements $StrokePointCopyWith<$Res> {
+  _$StrokePointCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of StrokePoint
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? x = null,
+    Object? y = null,
+    Object? pressure = null,
+    Object? tilt = null,
+    Object? timestamp = null,
+  }) {
+    return _then(_value.copyWith(
+      x: null == x
+          ? _value.x
+          : x // ignore: cast_nullable_to_non_nullable
+              as double,
+      y: null == y
+          ? _value.y
+          : y // ignore: cast_nullable_to_non_nullable
+              as double,
+      pressure: null == pressure
+          ? _value.pressure
+          : pressure // ignore: cast_nullable_to_non_nullable
+              as double,
+      tilt: null == tilt
+          ? _value.tilt
+          : tilt // ignore: cast_nullable_to_non_nullable
+              as double,
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as int,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$StrokePointImplCopyWith<$Res>
+    implements $StrokePointCopyWith<$Res> {
+  factory _$$StrokePointImplCopyWith(
+          _$StrokePointImpl value, $Res Function(_$StrokePointImpl) then) =
+      __$$StrokePointImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({double x, double y, double pressure, double tilt, int timestamp});
+}
+
+/// @nodoc
+class __$$StrokePointImplCopyWithImpl<$Res>
+    extends _$StrokePointCopyWithImpl<$Res, _$StrokePointImpl>
+    implements _$$StrokePointImplCopyWith<$Res> {
+  __$$StrokePointImplCopyWithImpl(
+      _$StrokePointImpl _value, $Res Function(_$StrokePointImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of StrokePoint
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? x = null,
+    Object? y = null,
+    Object? pressure = null,
+    Object? tilt = null,
+    Object? timestamp = null,
+  }) {
+    return _then(_$StrokePointImpl(
+      x: null == x
+          ? _value.x
+          : x // ignore: cast_nullable_to_non_nullable
+              as double,
+      y: null == y
+          ? _value.y
+          : y // ignore: cast_nullable_to_non_nullable
+              as double,
+      pressure: null == pressure
+          ? _value.pressure
+          : pressure // ignore: cast_nullable_to_non_nullable
+              as double,
+      tilt: null == tilt
+          ? _value.tilt
+          : tilt // ignore: cast_nullable_to_non_nullable
+              as double,
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as int,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$StrokePointImpl implements _StrokePoint {
+  const _$StrokePointImpl(
+      {required this.x,
+      required this.y,
+      this.pressure = 0.5,
+      this.tilt = 0.0,
+      this.timestamp = 0});
+
+  factory _$StrokePointImpl.fromJson(Map<String, dynamic> json) =>
+      _$$StrokePointImplFromJson(json);
+
+  @override
+  final double x;
+  @override
+  final double y;
+  @override
+  @JsonKey()
+  final double pressure;
+// 0.0 - 1.0
+  @override
+  @JsonKey()
+  final double tilt;
+// radianti
+  @override
+  @JsonKey()
+  final int timestamp;
+
+  @override
+  String toString() {
+    return 'StrokePoint(x: $x, y: $y, pressure: $pressure, tilt: $tilt, timestamp: $timestamp)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$StrokePointImpl &&
+            (identical(other.x, x) || other.x == x) &&
+            (identical(other.y, y) || other.y == y) &&
+            (identical(other.pressure, pressure) ||
+                other.pressure == pressure) &&
+            (identical(other.tilt, tilt) || other.tilt == tilt) &&
+            (identical(other.timestamp, timestamp) ||
+                other.timestamp == timestamp));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, x, y, pressure, tilt, timestamp);
+
+  /// Create a copy of StrokePoint
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$StrokePointImplCopyWith<_$StrokePointImpl> get copyWith =>
+      __$$StrokePointImplCopyWithImpl<_$StrokePointImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$StrokePointImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _StrokePoint implements StrokePoint {
+  const factory _StrokePoint(
+      {required final double x,
+      required final double y,
+      final double pressure,
+      final double tilt,
+      final int timestamp}) = _$StrokePointImpl;
+
+  factory _StrokePoint.fromJson(Map<String, dynamic> json) =
+      _$StrokePointImpl.fromJson;
+
+  @override
+  double get x;
+  @override
+  double get y;
+  @override
+  double get pressure; // 0.0 - 1.0
+  @override
+  double get tilt; // radianti
+  @override
+  int get timestamp;
+
+  /// Create a copy of StrokePoint
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$StrokePointImplCopyWith<_$StrokePointImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+TextData _$TextDataFromJson(Map<String, dynamic> json) {
+  return _TextData.fromJson(json);
+}
+
+/// @nodoc
+mixin _$TextData {
+  double get x => throw _privateConstructorUsedError;
+  double get y => throw _privateConstructorUsedError;
+  double get width => throw _privateConstructorUsedError;
+  double get height => throw _privateConstructorUsedError;
+  String get content => throw _privateConstructorUsedError;
+  String get fontFamily => throw _privateConstructorUsedError;
+  double get fontSize => throw _privateConstructorUsedError;
+  int get color => throw _privateConstructorUsedError;
+  bool get bold => throw _privateConstructorUsedError;
+  bool get italic => throw _privateConstructorUsedError;
+  String get alignment => throw _privateConstructorUsedError;
+
+  /// Serializes this TextData to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of TextData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $TextDataCopyWith<TextData> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $TextDataCopyWith<$Res> {
+  factory $TextDataCopyWith(TextData value, $Res Function(TextData) then) =
+      _$TextDataCopyWithImpl<$Res, TextData>;
+  @useResult
+  $Res call(
+      {double x,
+      double y,
+      double width,
+      double height,
+      String content,
+      String fontFamily,
+      double fontSize,
+      int color,
+      bool bold,
+      bool italic,
+      String alignment});
+}
+
+/// @nodoc
+class _$TextDataCopyWithImpl<$Res, $Val extends TextData>
+    implements $TextDataCopyWith<$Res> {
+  _$TextDataCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of TextData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? x = null,
+    Object? y = null,
+    Object? width = null,
+    Object? height = null,
+    Object? content = null,
+    Object? fontFamily = null,
+    Object? fontSize = null,
+    Object? color = null,
+    Object? bold = null,
+    Object? italic = null,
+    Object? alignment = null,
+  }) {
+    return _then(_value.copyWith(
+      x: null == x
+          ? _value.x
+          : x // ignore: cast_nullable_to_non_nullable
+              as double,
+      y: null == y
+          ? _value.y
+          : y // ignore: cast_nullable_to_non_nullable
+              as double,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      content: null == content
+          ? _value.content
+          : content // ignore: cast_nullable_to_non_nullable
+              as String,
+      fontFamily: null == fontFamily
+          ? _value.fontFamily
+          : fontFamily // ignore: cast_nullable_to_non_nullable
+              as String,
+      fontSize: null == fontSize
+          ? _value.fontSize
+          : fontSize // ignore: cast_nullable_to_non_nullable
+              as double,
+      color: null == color
+          ? _value.color
+          : color // ignore: cast_nullable_to_non_nullable
+              as int,
+      bold: null == bold
+          ? _value.bold
+          : bold // ignore: cast_nullable_to_non_nullable
+              as bool,
+      italic: null == italic
+          ? _value.italic
+          : italic // ignore: cast_nullable_to_non_nullable
+              as bool,
+      alignment: null == alignment
+          ? _value.alignment
+          : alignment // ignore: cast_nullable_to_non_nullable
+              as String,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$TextDataImplCopyWith<$Res>
+    implements $TextDataCopyWith<$Res> {
+  factory _$$TextDataImplCopyWith(
+          _$TextDataImpl value, $Res Function(_$TextDataImpl) then) =
+      __$$TextDataImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {double x,
+      double y,
+      double width,
+      double height,
+      String content,
+      String fontFamily,
+      double fontSize,
+      int color,
+      bool bold,
+      bool italic,
+      String alignment});
+}
+
+/// @nodoc
+class __$$TextDataImplCopyWithImpl<$Res>
+    extends _$TextDataCopyWithImpl<$Res, _$TextDataImpl>
+    implements _$$TextDataImplCopyWith<$Res> {
+  __$$TextDataImplCopyWithImpl(
+      _$TextDataImpl _value, $Res Function(_$TextDataImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of TextData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? x = null,
+    Object? y = null,
+    Object? width = null,
+    Object? height = null,
+    Object? content = null,
+    Object? fontFamily = null,
+    Object? fontSize = null,
+    Object? color = null,
+    Object? bold = null,
+    Object? italic = null,
+    Object? alignment = null,
+  }) {
+    return _then(_$TextDataImpl(
+      x: null == x
+          ? _value.x
+          : x // ignore: cast_nullable_to_non_nullable
+              as double,
+      y: null == y
+          ? _value.y
+          : y // ignore: cast_nullable_to_non_nullable
+              as double,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      content: null == content
+          ? _value.content
+          : content // ignore: cast_nullable_to_non_nullable
+              as String,
+      fontFamily: null == fontFamily
+          ? _value.fontFamily
+          : fontFamily // ignore: cast_nullable_to_non_nullable
+              as String,
+      fontSize: null == fontSize
+          ? _value.fontSize
+          : fontSize // ignore: cast_nullable_to_non_nullable
+              as double,
+      color: null == color
+          ? _value.color
+          : color // ignore: cast_nullable_to_non_nullable
+              as int,
+      bold: null == bold
+          ? _value.bold
+          : bold // ignore: cast_nullable_to_non_nullable
+              as bool,
+      italic: null == italic
+          ? _value.italic
+          : italic // ignore: cast_nullable_to_non_nullable
+              as bool,
+      alignment: null == alignment
+          ? _value.alignment
+          : alignment // ignore: cast_nullable_to_non_nullable
+              as String,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$TextDataImpl implements _TextData {
+  const _$TextDataImpl(
+      {required this.x,
+      required this.y,
+      required this.width,
+      required this.height,
+      required this.content,
+      this.fontFamily = 'sans-serif',
+      this.fontSize = 16.0,
+      this.color = 0xFF000000,
+      this.bold = false,
+      this.italic = false,
+      this.alignment = 'left'});
+
+  factory _$TextDataImpl.fromJson(Map<String, dynamic> json) =>
+      _$$TextDataImplFromJson(json);
+
+  @override
+  final double x;
+  @override
+  final double y;
+  @override
+  final double width;
+  @override
+  final double height;
+  @override
+  final String content;
+  @override
+  @JsonKey()
+  final String fontFamily;
+  @override
+  @JsonKey()
+  final double fontSize;
+  @override
+  @JsonKey()
+  final int color;
+  @override
+  @JsonKey()
+  final bool bold;
+  @override
+  @JsonKey()
+  final bool italic;
+  @override
+  @JsonKey()
+  final String alignment;
+
+  @override
+  String toString() {
+    return 'TextData(x: $x, y: $y, width: $width, height: $height, content: $content, fontFamily: $fontFamily, fontSize: $fontSize, color: $color, bold: $bold, italic: $italic, alignment: $alignment)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$TextDataImpl &&
+            (identical(other.x, x) || other.x == x) &&
+            (identical(other.y, y) || other.y == y) &&
+            (identical(other.width, width) || other.width == width) &&
+            (identical(other.height, height) || other.height == height) &&
+            (identical(other.content, content) || other.content == content) &&
+            (identical(other.fontFamily, fontFamily) ||
+                other.fontFamily == fontFamily) &&
+            (identical(other.fontSize, fontSize) ||
+                other.fontSize == fontSize) &&
+            (identical(other.color, color) || other.color == color) &&
+            (identical(other.bold, bold) || other.bold == bold) &&
+            (identical(other.italic, italic) || other.italic == italic) &&
+            (identical(other.alignment, alignment) ||
+                other.alignment == alignment));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, x, y, width, height, content,
+      fontFamily, fontSize, color, bold, italic, alignment);
+
+  /// Create a copy of TextData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$TextDataImplCopyWith<_$TextDataImpl> get copyWith =>
+      __$$TextDataImplCopyWithImpl<_$TextDataImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$TextDataImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _TextData implements TextData {
+  const factory _TextData(
+      {required final double x,
+      required final double y,
+      required final double width,
+      required final double height,
+      required final String content,
+      final String fontFamily,
+      final double fontSize,
+      final int color,
+      final bool bold,
+      final bool italic,
+      final String alignment}) = _$TextDataImpl;
+
+  factory _TextData.fromJson(Map<String, dynamic> json) =
+      _$TextDataImpl.fromJson;
+
+  @override
+  double get x;
+  @override
+  double get y;
+  @override
+  double get width;
+  @override
+  double get height;
+  @override
+  String get content;
+  @override
+  String get fontFamily;
+  @override
+  double get fontSize;
+  @override
+  int get color;
+  @override
+  bool get bold;
+  @override
+  bool get italic;
+  @override
+  String get alignment;
+
+  /// Create a copy of TextData
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$TextDataImplCopyWith<_$TextDataImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+ImageData _$ImageDataFromJson(Map<String, dynamic> json) {
+  return _ImageData.fromJson(json);
+}
+
+/// @nodoc
+mixin _$ImageData {
+  double get x => throw _privateConstructorUsedError;
+  double get y => throw _privateConstructorUsedError;
+  double get width => throw _privateConstructorUsedError;
+  double get height => throw _privateConstructorUsedError;
+  String get assetPath =>
+      throw _privateConstructorUsedError; // path relativo in assets/images/
+  double get rotation => throw _privateConstructorUsedError; // radianti
+  double get opacity => throw _privateConstructorUsedError;
+
+  /// Serializes this ImageData to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of ImageData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $ImageDataCopyWith<ImageData> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $ImageDataCopyWith<$Res> {
+  factory $ImageDataCopyWith(ImageData value, $Res Function(ImageData) then) =
+      _$ImageDataCopyWithImpl<$Res, ImageData>;
+  @useResult
+  $Res call(
+      {double x,
+      double y,
+      double width,
+      double height,
+      String assetPath,
+      double rotation,
+      double opacity});
+}
+
+/// @nodoc
+class _$ImageDataCopyWithImpl<$Res, $Val extends ImageData>
+    implements $ImageDataCopyWith<$Res> {
+  _$ImageDataCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of ImageData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? x = null,
+    Object? y = null,
+    Object? width = null,
+    Object? height = null,
+    Object? assetPath = null,
+    Object? rotation = null,
+    Object? opacity = null,
+  }) {
+    return _then(_value.copyWith(
+      x: null == x
+          ? _value.x
+          : x // ignore: cast_nullable_to_non_nullable
+              as double,
+      y: null == y
+          ? _value.y
+          : y // ignore: cast_nullable_to_non_nullable
+              as double,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      assetPath: null == assetPath
+          ? _value.assetPath
+          : assetPath // ignore: cast_nullable_to_non_nullable
+              as String,
+      rotation: null == rotation
+          ? _value.rotation
+          : rotation // ignore: cast_nullable_to_non_nullable
+              as double,
+      opacity: null == opacity
+          ? _value.opacity
+          : opacity // ignore: cast_nullable_to_non_nullable
+              as double,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$ImageDataImplCopyWith<$Res>
+    implements $ImageDataCopyWith<$Res> {
+  factory _$$ImageDataImplCopyWith(
+          _$ImageDataImpl value, $Res Function(_$ImageDataImpl) then) =
+      __$$ImageDataImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {double x,
+      double y,
+      double width,
+      double height,
+      String assetPath,
+      double rotation,
+      double opacity});
+}
+
+/// @nodoc
+class __$$ImageDataImplCopyWithImpl<$Res>
+    extends _$ImageDataCopyWithImpl<$Res, _$ImageDataImpl>
+    implements _$$ImageDataImplCopyWith<$Res> {
+  __$$ImageDataImplCopyWithImpl(
+      _$ImageDataImpl _value, $Res Function(_$ImageDataImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of ImageData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? x = null,
+    Object? y = null,
+    Object? width = null,
+    Object? height = null,
+    Object? assetPath = null,
+    Object? rotation = null,
+    Object? opacity = null,
+  }) {
+    return _then(_$ImageDataImpl(
+      x: null == x
+          ? _value.x
+          : x // ignore: cast_nullable_to_non_nullable
+              as double,
+      y: null == y
+          ? _value.y
+          : y // ignore: cast_nullable_to_non_nullable
+              as double,
+      width: null == width
+          ? _value.width
+          : width // ignore: cast_nullable_to_non_nullable
+              as double,
+      height: null == height
+          ? _value.height
+          : height // ignore: cast_nullable_to_non_nullable
+              as double,
+      assetPath: null == assetPath
+          ? _value.assetPath
+          : assetPath // ignore: cast_nullable_to_non_nullable
+              as String,
+      rotation: null == rotation
+          ? _value.rotation
+          : rotation // ignore: cast_nullable_to_non_nullable
+              as double,
+      opacity: null == opacity
+          ? _value.opacity
+          : opacity // ignore: cast_nullable_to_non_nullable
+              as double,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$ImageDataImpl implements _ImageData {
+  const _$ImageDataImpl(
+      {required this.x,
+      required this.y,
+      required this.width,
+      required this.height,
+      required this.assetPath,
+      this.rotation = 0.0,
+      this.opacity = 1.0});
+
+  factory _$ImageDataImpl.fromJson(Map<String, dynamic> json) =>
+      _$$ImageDataImplFromJson(json);
+
+  @override
+  final double x;
+  @override
+  final double y;
+  @override
+  final double width;
+  @override
+  final double height;
+  @override
+  final String assetPath;
+// path relativo in assets/images/
+  @override
+  @JsonKey()
+  final double rotation;
+// radianti
+  @override
+  @JsonKey()
+  final double opacity;
+
+  @override
+  String toString() {
+    return 'ImageData(x: $x, y: $y, width: $width, height: $height, assetPath: $assetPath, rotation: $rotation, opacity: $opacity)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$ImageDataImpl &&
+            (identical(other.x, x) || other.x == x) &&
+            (identical(other.y, y) || other.y == y) &&
+            (identical(other.width, width) || other.width == width) &&
+            (identical(other.height, height) || other.height == height) &&
+            (identical(other.assetPath, assetPath) ||
+                other.assetPath == assetPath) &&
+            (identical(other.rotation, rotation) ||
+                other.rotation == rotation) &&
+            (identical(other.opacity, opacity) || other.opacity == opacity));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType, x, y, width, height, assetPath, rotation, opacity);
+
+  /// Create a copy of ImageData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$ImageDataImplCopyWith<_$ImageDataImpl> get copyWith =>
+      __$$ImageDataImplCopyWithImpl<_$ImageDataImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$ImageDataImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _ImageData implements ImageData {
+  const factory _ImageData(
+      {required final double x,
+      required final double y,
+      required final double width,
+      required final double height,
+      required final String assetPath,
+      final double rotation,
+      final double opacity}) = _$ImageDataImpl;
+
+  factory _ImageData.fromJson(Map<String, dynamic> json) =
+      _$ImageDataImpl.fromJson;
+
+  @override
+  double get x;
+  @override
+  double get y;
+  @override
+  double get width;
+  @override
+  double get height;
+  @override
+  String get assetPath; // path relativo in assets/images/
+  @override
+  double get rotation; // radianti
+  @override
+  double get opacity;
+
+  /// Create a copy of ImageData
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$ImageDataImplCopyWith<_$ImageDataImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+ShapeData _$ShapeDataFromJson(Map<String, dynamic> json) {
+  return _ShapeData.fromJson(json);
+}
+
+/// @nodoc
+mixin _$ShapeData {
+  String get shapeType =>
+      throw _privateConstructorUsedError; // rectangle, circle, line, arrow, triangle
+  double get x1 => throw _privateConstructorUsedError;
+  double get y1 => throw _privateConstructorUsedError;
+  double get x2 => throw _privateConstructorUsedError;
+  double get y2 => throw _privateConstructorUsedError;
+  int get strokeColor => throw _privateConstructorUsedError;
+  double get strokeWidth => throw _privateConstructorUsedError;
+  int? get fillColor => throw _privateConstructorUsedError;
+  double get rotation => throw _privateConstructorUsedError;
+
+  /// Serializes this ShapeData to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of ShapeData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $ShapeDataCopyWith<ShapeData> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $ShapeDataCopyWith<$Res> {
+  factory $ShapeDataCopyWith(ShapeData value, $Res Function(ShapeData) then) =
+      _$ShapeDataCopyWithImpl<$Res, ShapeData>;
+  @useResult
+  $Res call(
+      {String shapeType,
+      double x1,
+      double y1,
+      double x2,
+      double y2,
+      int strokeColor,
+      double strokeWidth,
+      int? fillColor,
+      double rotation});
+}
+
+/// @nodoc
+class _$ShapeDataCopyWithImpl<$Res, $Val extends ShapeData>
+    implements $ShapeDataCopyWith<$Res> {
+  _$ShapeDataCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of ShapeData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? shapeType = null,
+    Object? x1 = null,
+    Object? y1 = null,
+    Object? x2 = null,
+    Object? y2 = null,
+    Object? strokeColor = null,
+    Object? strokeWidth = null,
+    Object? fillColor = freezed,
+    Object? rotation = null,
+  }) {
+    return _then(_value.copyWith(
+      shapeType: null == shapeType
+          ? _value.shapeType
+          : shapeType // ignore: cast_nullable_to_non_nullable
+              as String,
+      x1: null == x1
+          ? _value.x1
+          : x1 // ignore: cast_nullable_to_non_nullable
+              as double,
+      y1: null == y1
+          ? _value.y1
+          : y1 // ignore: cast_nullable_to_non_nullable
+              as double,
+      x2: null == x2
+          ? _value.x2
+          : x2 // ignore: cast_nullable_to_non_nullable
+              as double,
+      y2: null == y2
+          ? _value.y2
+          : y2 // ignore: cast_nullable_to_non_nullable
+              as double,
+      strokeColor: null == strokeColor
+          ? _value.strokeColor
+          : strokeColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      strokeWidth: null == strokeWidth
+          ? _value.strokeWidth
+          : strokeWidth // ignore: cast_nullable_to_non_nullable
+              as double,
+      fillColor: freezed == fillColor
+          ? _value.fillColor
+          : fillColor // ignore: cast_nullable_to_non_nullable
+              as int?,
+      rotation: null == rotation
+          ? _value.rotation
+          : rotation // ignore: cast_nullable_to_non_nullable
+              as double,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$ShapeDataImplCopyWith<$Res>
+    implements $ShapeDataCopyWith<$Res> {
+  factory _$$ShapeDataImplCopyWith(
+          _$ShapeDataImpl value, $Res Function(_$ShapeDataImpl) then) =
+      __$$ShapeDataImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String shapeType,
+      double x1,
+      double y1,
+      double x2,
+      double y2,
+      int strokeColor,
+      double strokeWidth,
+      int? fillColor,
+      double rotation});
+}
+
+/// @nodoc
+class __$$ShapeDataImplCopyWithImpl<$Res>
+    extends _$ShapeDataCopyWithImpl<$Res, _$ShapeDataImpl>
+    implements _$$ShapeDataImplCopyWith<$Res> {
+  __$$ShapeDataImplCopyWithImpl(
+      _$ShapeDataImpl _value, $Res Function(_$ShapeDataImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of ShapeData
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? shapeType = null,
+    Object? x1 = null,
+    Object? y1 = null,
+    Object? x2 = null,
+    Object? y2 = null,
+    Object? strokeColor = null,
+    Object? strokeWidth = null,
+    Object? fillColor = freezed,
+    Object? rotation = null,
+  }) {
+    return _then(_$ShapeDataImpl(
+      shapeType: null == shapeType
+          ? _value.shapeType
+          : shapeType // ignore: cast_nullable_to_non_nullable
+              as String,
+      x1: null == x1
+          ? _value.x1
+          : x1 // ignore: cast_nullable_to_non_nullable
+              as double,
+      y1: null == y1
+          ? _value.y1
+          : y1 // ignore: cast_nullable_to_non_nullable
+              as double,
+      x2: null == x2
+          ? _value.x2
+          : x2 // ignore: cast_nullable_to_non_nullable
+              as double,
+      y2: null == y2
+          ? _value.y2
+          : y2 // ignore: cast_nullable_to_non_nullable
+              as double,
+      strokeColor: null == strokeColor
+          ? _value.strokeColor
+          : strokeColor // ignore: cast_nullable_to_non_nullable
+              as int,
+      strokeWidth: null == strokeWidth
+          ? _value.strokeWidth
+          : strokeWidth // ignore: cast_nullable_to_non_nullable
+              as double,
+      fillColor: freezed == fillColor
+          ? _value.fillColor
+          : fillColor // ignore: cast_nullable_to_non_nullable
+              as int?,
+      rotation: null == rotation
+          ? _value.rotation
+          : rotation // ignore: cast_nullable_to_non_nullable
+              as double,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$ShapeDataImpl implements _ShapeData {
+  const _$ShapeDataImpl(
+      {required this.shapeType,
+      required this.x1,
+      required this.y1,
+      required this.x2,
+      required this.y2,
+      this.strokeColor = 0xFF000000,
+      this.strokeWidth = 2.0,
+      this.fillColor,
+      this.rotation = 0.0});
+
+  factory _$ShapeDataImpl.fromJson(Map<String, dynamic> json) =>
+      _$$ShapeDataImplFromJson(json);
+
+  @override
+  final String shapeType;
+// rectangle, circle, line, arrow, triangle
+  @override
+  final double x1;
+  @override
+  final double y1;
+  @override
+  final double x2;
+  @override
+  final double y2;
+  @override
+  @JsonKey()
+  final int strokeColor;
+  @override
+  @JsonKey()
+  final double strokeWidth;
+  @override
+  final int? fillColor;
+  @override
+  @JsonKey()
+  final double rotation;
+
+  @override
+  String toString() {
+    return 'ShapeData(shapeType: $shapeType, x1: $x1, y1: $y1, x2: $x2, y2: $y2, strokeColor: $strokeColor, strokeWidth: $strokeWidth, fillColor: $fillColor, rotation: $rotation)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$ShapeDataImpl &&
+            (identical(other.shapeType, shapeType) ||
+                other.shapeType == shapeType) &&
+            (identical(other.x1, x1) || other.x1 == x1) &&
+            (identical(other.y1, y1) || other.y1 == y1) &&
+            (identical(other.x2, x2) || other.x2 == x2) &&
+            (identical(other.y2, y2) || other.y2 == y2) &&
+            (identical(other.strokeColor, strokeColor) ||
+                other.strokeColor == strokeColor) &&
+            (identical(other.strokeWidth, strokeWidth) ||
+                other.strokeWidth == strokeWidth) &&
+            (identical(other.fillColor, fillColor) ||
+                other.fillColor == fillColor) &&
+            (identical(other.rotation, rotation) ||
+                other.rotation == rotation));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(runtimeType, shapeType, x1, y1, x2, y2,
+      strokeColor, strokeWidth, fillColor, rotation);
+
+  /// Create a copy of ShapeData
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$ShapeDataImplCopyWith<_$ShapeDataImpl> get copyWith =>
+      __$$ShapeDataImplCopyWithImpl<_$ShapeDataImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$ShapeDataImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _ShapeData implements ShapeData {
+  const factory _ShapeData(
+      {required final String shapeType,
+      required final double x1,
+      required final double y1,
+      required final double x2,
+      required final double y2,
+      final int strokeColor,
+      final double strokeWidth,
+      final int? fillColor,
+      final double rotation}) = _$ShapeDataImpl;
+
+  factory _ShapeData.fromJson(Map<String, dynamic> json) =
+      _$ShapeDataImpl.fromJson;
+
+  @override
+  String get shapeType; // rectangle, circle, line, arrow, triangle
+  @override
+  double get x1;
+  @override
+  double get y1;
+  @override
+  double get x2;
+  @override
+  double get y2;
+  @override
+  int get strokeColor;
+  @override
+  double get strokeWidth;
+  @override
+  int? get fillColor;
+  @override
+  double get rotation;
+
+  /// Create a copy of ShapeData
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$ShapeDataImplCopyWith<_$ShapeDataImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+SyncMetadata _$SyncMetadataFromJson(Map<String, dynamic> json) {
+  return _SyncMetadata.fromJson(json);
+}
+
+/// @nodoc
+mixin _$SyncMetadata {
+  String get notebookId => throw _privateConstructorUsedError;
+  String get remotePath => throw _privateConstructorUsedError;
+  String? get localPath => throw _privateConstructorUsedError;
+  String? get etag => throw _privateConstructorUsedError;
+  DateTime? get lastSynced => throw _privateConstructorUsedError;
+  String get status =>
+      throw _privateConstructorUsedError; // synced, modified, conflict, new
+  List<String> get dirtyPages => throw _privateConstructorUsedError;
+
+  /// Serializes this SyncMetadata to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of SyncMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $SyncMetadataCopyWith<SyncMetadata> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $SyncMetadataCopyWith<$Res> {
+  factory $SyncMetadataCopyWith(
+          SyncMetadata value, $Res Function(SyncMetadata) then) =
+      _$SyncMetadataCopyWithImpl<$Res, SyncMetadata>;
+  @useResult
+  $Res call(
+      {String notebookId,
+      String remotePath,
+      String? localPath,
+      String? etag,
+      DateTime? lastSynced,
+      String status,
+      List<String> dirtyPages});
+}
+
+/// @nodoc
+class _$SyncMetadataCopyWithImpl<$Res, $Val extends SyncMetadata>
+    implements $SyncMetadataCopyWith<$Res> {
+  _$SyncMetadataCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of SyncMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? notebookId = null,
+    Object? remotePath = null,
+    Object? localPath = freezed,
+    Object? etag = freezed,
+    Object? lastSynced = freezed,
+    Object? status = null,
+    Object? dirtyPages = null,
+  }) {
+    return _then(_value.copyWith(
+      notebookId: null == notebookId
+          ? _value.notebookId
+          : notebookId // ignore: cast_nullable_to_non_nullable
+              as String,
+      remotePath: null == remotePath
+          ? _value.remotePath
+          : remotePath // ignore: cast_nullable_to_non_nullable
+              as String,
+      localPath: freezed == localPath
+          ? _value.localPath
+          : localPath // ignore: cast_nullable_to_non_nullable
+              as String?,
+      etag: freezed == etag
+          ? _value.etag
+          : etag // ignore: cast_nullable_to_non_nullable
+              as String?,
+      lastSynced: freezed == lastSynced
+          ? _value.lastSynced
+          : lastSynced // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+      status: null == status
+          ? _value.status
+          : status // ignore: cast_nullable_to_non_nullable
+              as String,
+      dirtyPages: null == dirtyPages
+          ? _value.dirtyPages
+          : dirtyPages // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$SyncMetadataImplCopyWith<$Res>
+    implements $SyncMetadataCopyWith<$Res> {
+  factory _$$SyncMetadataImplCopyWith(
+          _$SyncMetadataImpl value, $Res Function(_$SyncMetadataImpl) then) =
+      __$$SyncMetadataImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String notebookId,
+      String remotePath,
+      String? localPath,
+      String? etag,
+      DateTime? lastSynced,
+      String status,
+      List<String> dirtyPages});
+}
+
+/// @nodoc
+class __$$SyncMetadataImplCopyWithImpl<$Res>
+    extends _$SyncMetadataCopyWithImpl<$Res, _$SyncMetadataImpl>
+    implements _$$SyncMetadataImplCopyWith<$Res> {
+  __$$SyncMetadataImplCopyWithImpl(
+      _$SyncMetadataImpl _value, $Res Function(_$SyncMetadataImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of SyncMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? notebookId = null,
+    Object? remotePath = null,
+    Object? localPath = freezed,
+    Object? etag = freezed,
+    Object? lastSynced = freezed,
+    Object? status = null,
+    Object? dirtyPages = null,
+  }) {
+    return _then(_$SyncMetadataImpl(
+      notebookId: null == notebookId
+          ? _value.notebookId
+          : notebookId // ignore: cast_nullable_to_non_nullable
+              as String,
+      remotePath: null == remotePath
+          ? _value.remotePath
+          : remotePath // ignore: cast_nullable_to_non_nullable
+              as String,
+      localPath: freezed == localPath
+          ? _value.localPath
+          : localPath // ignore: cast_nullable_to_non_nullable
+              as String?,
+      etag: freezed == etag
+          ? _value.etag
+          : etag // ignore: cast_nullable_to_non_nullable
+              as String?,
+      lastSynced: freezed == lastSynced
+          ? _value.lastSynced
+          : lastSynced // ignore: cast_nullable_to_non_nullable
+              as DateTime?,
+      status: null == status
+          ? _value.status
+          : status // ignore: cast_nullable_to_non_nullable
+              as String,
+      dirtyPages: null == dirtyPages
+          ? _value._dirtyPages
+          : dirtyPages // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$SyncMetadataImpl implements _SyncMetadata {
+  const _$SyncMetadataImpl(
+      {required this.notebookId,
+      required this.remotePath,
+      this.localPath,
+      this.etag,
+      this.lastSynced,
+      this.status = 'synced',
+      final List<String> dirtyPages = const []})
+      : _dirtyPages = dirtyPages;
+
+  factory _$SyncMetadataImpl.fromJson(Map<String, dynamic> json) =>
+      _$$SyncMetadataImplFromJson(json);
+
+  @override
+  final String notebookId;
+  @override
+  final String remotePath;
+  @override
+  final String? localPath;
+  @override
+  final String? etag;
+  @override
+  final DateTime? lastSynced;
+  @override
+  @JsonKey()
+  final String status;
+// synced, modified, conflict, new
+  final List<String> _dirtyPages;
+// synced, modified, conflict, new
+  @override
+  @JsonKey()
+  List<String> get dirtyPages {
+    if (_dirtyPages is EqualUnmodifiableListView) return _dirtyPages;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_dirtyPages);
+  }
+
+  @override
+  String toString() {
+    return 'SyncMetadata(notebookId: $notebookId, remotePath: $remotePath, localPath: $localPath, etag: $etag, lastSynced: $lastSynced, status: $status, dirtyPages: $dirtyPages)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$SyncMetadataImpl &&
+            (identical(other.notebookId, notebookId) ||
+                other.notebookId == notebookId) &&
+            (identical(other.remotePath, remotePath) ||
+                other.remotePath == remotePath) &&
+            (identical(other.localPath, localPath) ||
+                other.localPath == localPath) &&
+            (identical(other.etag, etag) || other.etag == etag) &&
+            (identical(other.lastSynced, lastSynced) ||
+                other.lastSynced == lastSynced) &&
+            (identical(other.status, status) || other.status == status) &&
+            const DeepCollectionEquality()
+                .equals(other._dirtyPages, _dirtyPages));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType,
+      notebookId,
+      remotePath,
+      localPath,
+      etag,
+      lastSynced,
+      status,
+      const DeepCollectionEquality().hash(_dirtyPages));
+
+  /// Create a copy of SyncMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$SyncMetadataImplCopyWith<_$SyncMetadataImpl> get copyWith =>
+      __$$SyncMetadataImplCopyWithImpl<_$SyncMetadataImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$SyncMetadataImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _SyncMetadata implements SyncMetadata {
+  const factory _SyncMetadata(
+      {required final String notebookId,
+      required final String remotePath,
+      final String? localPath,
+      final String? etag,
+      final DateTime? lastSynced,
+      final String status,
+      final List<String> dirtyPages}) = _$SyncMetadataImpl;
+
+  factory _SyncMetadata.fromJson(Map<String, dynamic> json) =
+      _$SyncMetadataImpl.fromJson;
+
+  @override
+  String get notebookId;
+  @override
+  String get remotePath;
+  @override
+  String? get localPath;
+  @override
+  String? get etag;
+  @override
+  DateTime? get lastSynced;
+  @override
+  String get status; // synced, modified, conflict, new
+  @override
+  List<String> get dirtyPages;
+
+  /// Create a copy of SyncMetadata
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$SyncMetadataImplCopyWith<_$SyncMetadataImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}

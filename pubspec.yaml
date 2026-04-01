@@ -1,0 +1,66 @@
+name: handwriter
+description: Handwriting note-taking app with Nextcloud sync via WebDAV.
+version: 0.1.0
+publish_to: 'none'
+
+environment:
+  sdk: '>=3.2.0 <4.0.0'
+  flutter: '>=3.19.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # State Management
+  flutter_riverpod: ^2.5.1
+  riverpod_annotation: ^2.3.5
+  
+  # Immutable Data Models
+  freezed_annotation: ^2.4.1
+  json_annotation: ^4.8.1
+  
+  # Local Storage
+  sqflite: ^2.3.2
+  path_provider: ^2.1.2
+  path: ^1.9.0
+  
+  # File Handling
+  archive: ^3.6.1          # ZIP compression/decompression
+  
+  # Networking
+  http: ^1.2.1
+  xml: ^6.5.0              # WebDAV XML parsing
+  
+  # Persistent storage
+  shared_preferences: ^2.2.2
+  
+  # UI
+  cupertino_icons: ^1.0.8
+  uuid: ^4.3.3
+  intl: ^0.19.0
+  collection: ^1.18.0
+  
+  # Canvas utilities
+  vector_math: ^2.1.4
+  
+  # File picker for images/PDFs
+  file_picker: ^8.0.0
+  
+  # PDF rendering
+  printing: ^5.12.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  build_runner: ^2.4.8
+  freezed: ^2.4.7
+  json_serializable: ^6.7.1
+  riverpod_generator: ^2.4.0
+
+flutter:
+  uses-material-design: true
+  
+  assets:
+    - assets/
+    - assets/backgrounds/
