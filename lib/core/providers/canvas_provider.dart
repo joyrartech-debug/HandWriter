@@ -642,6 +642,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(activeStroke: List.of(points));
   }
 
+  /// Commit fast-notifier points and finalize the stroke in a single state update,
+  /// avoiding the intermediate frame that causes visible line stretching.
+  void commitAndEndStroke(List<StrokePoint> points) {
+    if (state == null) return;
+    if (points.length < 2) {
+      state = state!.copyWith(activeStroke: []);
+      return;
+    }
+    // Set the points, then immediately finalize
+    state = state!.copyWith(activeStroke: List.of(points));
+    _addStrokeElement(state!);
+  }
+
   void endStroke() {
     if (state == null) return;
     final tool = state!.currentTool;
@@ -1874,6 +1887,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void setPanOffset(Offset offset) {
     if (state == null) return;
     state = state!.copyWith(panOffset: offset);
+  }
+
+  /// Set zoom and pan in a single state update to avoid intermediate render frames.
+  void setZoomAndPan(double zoom, Offset pan) {
+    if (state == null) return;
+    state = state!.copyWith(zoom: zoom.clamp(0.25, 5.0), panOffset: pan);
   }
 
   // ── Text ──

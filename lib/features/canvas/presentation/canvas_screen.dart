@@ -379,14 +379,39 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    if (_shouldTouchPan(event.kind, tool)) {
-      _isTouchPanning = true;
-      _lastFocalPoint = event.position;
-      return;
-    }
-
     final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
     final pressure = event.pressure > 0 ? event.pressure : 0.5;
+
+    // Touch pan: only if no selected image is under the finger
+    if (_shouldTouchPan(event.kind, tool)) {
+      // If there's a selected element and we're touching it, let the overlay handle it
+      if (state.selectedElementId != null) {
+        final selBounds = _getSelectedElementBounds(state);
+        if (selBounds != null && selBounds.inflate(10).contains(pagePos)) {
+          // Fall through to selected element handling below
+        } else {
+          // Also check if tapping a different image to select it
+          final tappedImage = _findImageOrShapeAt(state, pagePos);
+          if (tappedImage != null) {
+            ref.read(canvasProvider.notifier).selectElement(tappedImage);
+            return;
+          }
+          _isTouchPanning = true;
+          _lastFocalPoint = event.position;
+          return;
+        }
+      } else {
+        // No selection — check if tapping on an image to select it
+        final tappedImage = _findImageOrShapeAt(state, pagePos);
+        if (tappedImage != null) {
+          ref.read(canvasProvider.notifier).selectElement(tappedImage);
+          return;
+        }
+        _isTouchPanning = true;
+        _lastFocalPoint = event.position;
+        return;
+      }
+    }
 
     // Pending symbol placement: tap to place symbol at this position
     if (state.pendingSymbol != null) {
@@ -674,12 +699,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    // Commit fast notifier points to Riverpod state before finalizing
+    // Commit fast notifier points and finalize in one go to avoid
+    // an intermediate render frame showing the raw points (line stretching).
     if (_activeStrokeNotifier.isActive && _activeStrokeNotifier.points.isNotEmpty) {
-      ref.read(canvasProvider.notifier).commitActiveStroke(_activeStrokeNotifier.points);
+      final points = List<StrokePoint>.from(_activeStrokeNotifier.points);
+      _activeStrokeNotifier.clear();
+      ref.read(canvasProvider.notifier).commitAndEndStroke(points);
+    } else {
+      _activeStrokeNotifier.clear();
+      ref.read(canvasProvider.notifier).endStroke();
     }
-    _activeStrokeNotifier.clear();
-    ref.read(canvasProvider.notifier).endStroke();
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
@@ -796,8 +825,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     final oldZoom = state.zoom;
     final newPan = focalPoint - (focalPoint - state.panOffset) * (newZoom / oldZoom);
 
-    notifier.setZoom(newZoom);
-    notifier.setPanOffset(newPan);
+    notifier.setZoomAndPan(newZoom, newPan);
     _lastFocalPoint = details.focalPoint;
   }
 
