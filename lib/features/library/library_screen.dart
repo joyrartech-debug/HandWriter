@@ -183,6 +183,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         document: result.document,
         pages: result.pages,
         remotePath: entry.remotePath,
+        assets: result.assets,
+        symbolLibraries: result.symbolLibraries.isNotEmpty
+            ? result.symbolLibraries.map((j) => SymbolLibrary.fromJson(j)).toList()
+            : null,
       );
 
       if (mounted) {
@@ -255,7 +259,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     );
 
     if (result != null && result.isNotEmpty && result != entry.metadata.title) {
-      await ref.read(notebookListProvider.notifier).renameNotebook(entry, result);
+      try {
+        await ref.read(notebookListProvider.notifier).renameNotebook(entry, result);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Errore rinomina: $e')),
+          );
+        }
+      }
     }
   }
 
@@ -278,7 +290,20 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     );
 
     if (confirm == true) {
-      await ref.read(notebookListProvider.notifier).deleteNotebook(entry);
+      try {
+        await ref.read(notebookListProvider.notifier).deleteNotebook(entry);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('"${entry.metadata.title}" eliminato')),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Errore eliminazione: $e')),
+          );
+        }
+      }
     }
   }
 
@@ -446,6 +471,9 @@ class _NotebookCard extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       onLongPress: onLongPress,
+      onSecondaryTapUp: (details) {
+        onLongPress();
+      },
       child: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
@@ -502,16 +530,32 @@ class _NotebookCard extends StatelessWidget {
                               ),
                             ),
                             const Spacer(),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.2),
-                                borderRadius: BorderRadius.circular(10),
-                              ),
-                              child: Text(
-                                '${meta.pageCount} pag.',
-                                style: const TextStyle(color: Colors.white, fontSize: 11),
-                              ),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: Text(
+                                    '${meta.pageCount} pag.',
+                                    style: const TextStyle(color: Colors.white, fontSize: 11),
+                                  ),
+                                ),
+                                GestureDetector(
+                                  onTap: onLongPress,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withOpacity(0.2),
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: const Icon(Icons.more_vert, color: Colors.white, size: 18),
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),

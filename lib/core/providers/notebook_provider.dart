@@ -192,23 +192,20 @@ class NotebookListNotifier
     final webdav = _ref.read(webdavServiceProvider);
     if (syncService == null || webdav == null) return;
 
-    // Scarica notebook, aggiorna metadata, ri-carica
-    final result = await syncService.downloadNotebook(entry.remotePath);
+    // Scarica notebook completo (una sola volta)
+    final result = await syncService.downloadNotebookFull(entry.remotePath);
     final updatedMeta = result.metadata.copyWith(
       title: newTitle,
       modifiedAt: DateTime.now(),
     );
 
-    // Per ora ri-upload con lo stesso path
-    // In futuro: rinominare il file remoto
-    final data = await webdav.downloadFile(entry.remotePath);
-    // Re-package con nuovi metadata
-    final pages = await _extractPages(syncService, data);
     await syncService.uploadNotebook(
       remotePath: entry.remotePath,
       metadata: updatedMeta,
       document: result.document,
-      pages: pages,
+      pages: result.pages,
+      assets: result.assets.isNotEmpty ? result.assets : null,
+      symbolLibraries: result.symbolLibraries.isNotEmpty ? result.symbolLibraries : null,
     );
 
     final current = state.valueOrNull ?? [];
@@ -223,9 +220,6 @@ class NotebookListNotifier
   /// Estrae tutte le pagine da un archivio .ncnote raw.
   Future<Map<String, PageData>> _extractPages(
       SyncService sync, Uint8List data) async {
-    // Decomprimi l'archivio e estrai le pagine
-    final archive =
-        await Future.value(sync.extractAllPages(data));
-    return archive;
+    return sync.extractAllPages(data);
   }
 }

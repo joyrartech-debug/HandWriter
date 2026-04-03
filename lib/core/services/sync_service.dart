@@ -211,6 +211,7 @@ class SyncService {
     required DocumentStructure document,
     required Map<String, PageData> pages,
     Map<String, Uint8List>? assets,
+    List<Map<String, dynamic>>? symbolLibraries,
   }) {
     final archive = Archive();
 
@@ -249,6 +250,16 @@ class SyncService {
           entry.value,
         ));
       }
+    }
+
+    // symbols.json
+    if (symbolLibraries != null && symbolLibraries.isNotEmpty) {
+      final symbolsJson = jsonEncode(symbolLibraries);
+      archive.addFile(ArchiveFile(
+        'symbols.json',
+        symbolsJson.length,
+        utf8.encode(symbolsJson),
+      ));
     }
 
     return Uint8List.fromList(ZipEncoder().encode(archive)!);
@@ -300,18 +311,33 @@ class SyncService {
   }
 
   /// Upload di un notebook completo sul server.
+  /// Extract symbol libraries from an .ncnote archive.
+  List<Map<String, dynamic>> extractSymbolLibraries(Uint8List data) {
+    final archive = ZipDecoder().decodeBytes(data);
+    final symbolsFile = archive.findFile('symbols.json');
+    if (symbolsFile == null) return [];
+    try {
+      final json = jsonDecode(utf8.decode(symbolsFile.content as List<int>));
+      return (json as List).cast<Map<String, dynamic>>();
+    } catch (_) {
+      return [];
+    }
+  }
+
   Future<String?> uploadNotebook({
     required String remotePath,
     required NotebookMetadata metadata,
     required DocumentStructure document,
     required Map<String, PageData> pages,
     Map<String, Uint8List>? assets,
+    List<Map<String, dynamic>>? symbolLibraries,
   }) async {
     final package = createNcnotePackage(
       metadata: metadata,
       document: document,
       pages: pages,
       assets: assets,
+      symbolLibraries: symbolLibraries,
     );
 
     final etag = await _webdav.uploadFile(remotePath, package);
@@ -339,16 +365,35 @@ class SyncService {
   }
 
   /// Scarica un notebook completo con tutte le pagine.
-  Future<({NotebookMetadata metadata, DocumentStructure document, Map<String, PageData> pages})>
+  Future<({NotebookMetadata metadata, DocumentStructure document, Map<String, PageData> pages, Map<String, Uint8List> assets, List<Map<String, dynamic>> symbolLibraries})>
       downloadNotebookFull(String remotePath) async {
     final data = await _webdav.downloadFile(remotePath);
     final result = _parseNcnoteArchive(data);
     final pages = extractAllPages(data);
+    final assets = extractAllAssets(data);
+    final symbols = extractSymbolLibraries(data);
     return (
       metadata: result.metadata,
       document: result.document,
       pages: pages,
+      assets: assets,
+      symbolLibraries: symbols,
     );
+  }
+
+  /// Estrae tutti gli asset binari (immagini) da un archivio .ncnote.
+  Map<String, Uint8List> extractAllAssets(Uint8List data) {
+    final archive = ZipDecoder().decodeBytes(data);
+    final assets = <String, Uint8List>{};
+    for (final file in archive.files) {
+      if (file.name.startsWith('${AppConfig.assetsDir}/') && file.isFile) {
+        final fileName = file.name.substring('${AppConfig.assetsDir}/'.length);
+        if (fileName.isNotEmpty) {
+          assets[fileName] = Uint8List.fromList(file.content as List<int>);
+        }
+      }
+    }
+    return assets;
   }
 
   void dispose() {

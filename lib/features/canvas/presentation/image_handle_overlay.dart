@@ -11,6 +11,13 @@ class ImageHandleOverlay extends StatefulWidget {
   final VoidCallback onDelete;
   final VoidCallback onDeselect;
   final VoidCallback? onDragStart;
+  final VoidCallback? onCrop;
+  final VoidCallback? onBringToFront;
+  final VoidCallback? onSendToBack;
+  final VoidCallback? onToggleLock;
+  final VoidCallback? onEditComment;
+  final bool isLocked;
+  final bool hasComment;
 
   const ImageHandleOverlay({
     super.key,
@@ -22,6 +29,13 @@ class ImageHandleOverlay extends StatefulWidget {
     required this.onDelete,
     required this.onDeselect,
     this.onDragStart,
+    this.onCrop,
+    this.onBringToFront,
+    this.onSendToBack,
+    this.onToggleLock,
+    this.onEditComment,
+    this.isLocked = false,
+    this.hasComment = false,
   });
 
   @override
@@ -41,10 +55,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
   Widget build(BuildContext context) {
     final bounds = widget.bounds;
     if (bounds.width < 1 || bounds.height < 1) return const SizedBox.shrink();
-
-    // Wrap all handles in a Transform.rotate around the element center
-    // so the selection rect visually follows the rotated element.
-    final center = bounds.center;
 
     Widget handleStack = Stack(
       children: [
@@ -69,12 +79,12 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           height: bounds.height,
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
-            onPanStart: (d) {
+            onPanStart: widget.isLocked ? null : (d) {
               _activeHandle = 'move';
               _dragStart = d.globalPosition;
               widget.onDragStart?.call();
             },
-            onPanUpdate: (d) {
+            onPanUpdate: widget.isLocked ? null : (d) {
               final delta = d.globalPosition - _dragStart;
               _dragStart = d.globalPosition;
               widget.onMove(delta);
@@ -83,20 +93,23 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           ),
         ),
 
-        // Corner resize handles
-        _buildCornerHandle(bounds.topLeft, 'tl'),
-        _buildCornerHandle(bounds.topRight, 'tr'),
-        _buildCornerHandle(bounds.bottomLeft, 'bl'),
-        _buildCornerHandle(bounds.bottomRight, 'br'),
+        // Corner/edge/rotate handles (hidden when locked)
+        if (!widget.isLocked) ...[
+          // Corner resize handles (aspect-ratio preserving)
+          _buildCornerHandle(bounds.topLeft, 'tl'),
+          _buildCornerHandle(bounds.topRight, 'tr'),
+          _buildCornerHandle(bounds.bottomLeft, 'bl'),
+          _buildCornerHandle(bounds.bottomRight, 'br'),
 
-        // Edge midpoint resize handles
-        _buildEdgeHandle(Offset(bounds.center.dx, bounds.top), 'tm'),
-        _buildEdgeHandle(Offset(bounds.center.dx, bounds.bottom), 'bm'),
-        _buildEdgeHandle(Offset(bounds.left, bounds.center.dy), 'ml'),
-        _buildEdgeHandle(Offset(bounds.right, bounds.center.dy), 'mr'),
+          // Edge midpoint resize handles (free deform)
+          _buildEdgeHandle(Offset(bounds.center.dx, bounds.top), 'tm'),
+          _buildEdgeHandle(Offset(bounds.center.dx, bounds.bottom), 'bm'),
+          _buildEdgeHandle(Offset(bounds.left, bounds.center.dy), 'ml'),
+          _buildEdgeHandle(Offset(bounds.right, bounds.center.dy), 'mr'),
 
-        // Rotate handle (above top center)
-        _buildRotateHandle(bounds),
+          // Rotate handle (above top center)
+          _buildRotateHandle(bounds),
+        ],
 
         // Action buttons bar (above the element)
         Positioned(
@@ -111,9 +124,8 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
     if (widget.rotation != 0) {
       handleStack = Transform.rotate(
         angle: widget.rotation,
-        alignment: Alignment.center,
-        origin: Offset(center.dx - MediaQuery.of(context).size.width / 2,
-                        center.dy - MediaQuery.of(context).size.height / 2),
+        alignment: Alignment.topLeft,
+        origin: bounds.center,
         child: handleStack,
       );
     }
@@ -130,6 +142,7 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           _activeHandle = handleId;
           _dragStart = d.globalPosition;
           _initialBounds = widget.bounds;
+          widget.onDragStart?.call();
         },
         onPanUpdate: (d) {
           final delta = d.globalPosition - _dragStart;
@@ -161,6 +174,7 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           _activeHandle = handleId;
           _dragStart = d.globalPosition;
           _initialBounds = widget.bounds;
+          widget.onDragStart?.call();
         },
         onPanUpdate: (d) {
           final delta = d.globalPosition - _dragStart;
@@ -194,11 +208,12 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               _activeHandle = 'rotate';
               _dragStart = d.globalPosition;
               _initialRotation = widget.rotation;
+              widget.onDragStart?.call();
             },
             onPanUpdate: (d) {
-              final center = widget.bounds.center;
-              final startAngle = atan2(_dragStart.dy - center.dy, _dragStart.dx - center.dx);
-              final currentAngle = atan2(d.globalPosition.dy - center.dy, d.globalPosition.dx - center.dx);
+              final centerGlobal = _centerToGlobal(widget.bounds.center);
+              final startAngle = atan2(_dragStart.dy - centerGlobal.dy, _dragStart.dx - centerGlobal.dx);
+              final currentAngle = atan2(d.globalPosition.dy - centerGlobal.dy, d.globalPosition.dx - centerGlobal.dx);
               final deltaAngle = currentAngle - startAngle;
               _dragStart = d.globalPosition;
               widget.onRotate(deltaAngle);
@@ -229,6 +244,14 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
     );
   }
 
+  Offset _centerToGlobal(Offset localCenter) {
+    final renderObject = context.findRenderObject();
+    if (renderObject is RenderBox) {
+      return renderObject.localToGlobal(localCenter);
+    }
+    return localCenter;
+  }
+
   Widget _buildActionBar() {
     return Container(
       decoration: BoxDecoration(
@@ -239,13 +262,47 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _actionBtn(Icons.delete_outline_rounded, Colors.red, widget.onDelete, 'Elimina'),
-          Container(width: 1, height: 24, color: Colors.grey.shade200),
+          if (widget.onCrop != null && !widget.isLocked) ...[
+            _actionBtn(Icons.crop_rounded, Colors.blueGrey, widget.onCrop!, 'Ritaglia'),
+            _divider(),
+          ],
+          if (widget.onBringToFront != null) ...[
+            _actionBtn(Icons.flip_to_front_rounded, Colors.indigo, widget.onBringToFront!, 'In primo piano'),
+            _divider(),
+          ],
+          if (widget.onSendToBack != null) ...[
+            _actionBtn(Icons.flip_to_back_rounded, Colors.indigo, widget.onSendToBack!, 'Dietro a tutto'),
+            _divider(),
+          ],
+          if (widget.onToggleLock != null) ...[
+            _actionBtn(
+              widget.isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
+              widget.isLocked ? Colors.orange : Colors.grey.shade600,
+              widget.onToggleLock!,
+              widget.isLocked ? 'Sblocca' : 'Blocca',
+            ),
+            _divider(),
+          ],
+          if (widget.onEditComment != null) ...[
+            _actionBtn(
+              widget.hasComment ? Icons.comment_rounded : Icons.comment_outlined,
+              widget.hasComment ? Colors.green : Colors.grey.shade600,
+              widget.onEditComment!,
+              'Commento',
+            ),
+            _divider(),
+          ],
+          if (!widget.isLocked) ...[
+            _actionBtn(Icons.delete_outline_rounded, Colors.red, widget.onDelete, 'Elimina'),
+            _divider(),
+          ],
           _actionBtn(Icons.close_rounded, Colors.grey.shade700, widget.onDeselect, 'Deseleziona'),
         ],
       ),
     );
   }
+
+  Widget _divider() => Container(width: 1, height: 24, color: Colors.grey.shade200);
 
   Widget _actionBtn(IconData icon, Color color, VoidCallback onTap, String tooltip) {
     return Tooltip(
@@ -263,19 +320,57 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
 
   void _handleCornerResize(String handle, Offset delta) {
     final b = widget.bounds;
+    final aspectRatio = b.width / b.height;
+
+    // Use the dominant drag axis to compute the other, preserving ratio
+    double dx = delta.dx;
+    double dy = delta.dy;
+    // Pick the larger movement and derive the other from aspect ratio
+    if (dx.abs() * b.height >= dy.abs() * b.width) {
+      dy = dx / aspectRatio;
+      // Invert for handles where axes oppose
+      if (handle == 'tl' || handle == 'bl') dy = -dy;
+      if (handle == 'tr' || handle == 'br') { /* same sign */ }
+      // Top handles: dy moves top edge
+      if (handle == 'tl') dy = -(dx.abs() / aspectRatio);
+      if (handle == 'tr') dy = -(dx.abs() / aspectRatio) * dx.sign * -1;
+    } else {
+      dx = dy * aspectRatio;
+      if (handle == 'tl' || handle == 'tr') dx = -dx;
+      if (handle == 'bl' || handle == 'br') { /* same sign */ }
+      if (handle == 'tl') dx = -(dy.abs() * aspectRatio);
+      if (handle == 'bl') dx = -(dy.abs() * aspectRatio) * dy.sign;
+    }
+
+    // Simpler approach: use diagonal distance to scale uniformly
+    final diag = (delta.dx + delta.dy);
+    final scale = diag / (b.width + b.height);
+
     Rect newBounds;
     switch (handle) {
       case 'tl':
-        newBounds = Rect.fromLTRB(b.left + delta.dx, b.top + delta.dy, b.right, b.bottom);
+        final newW = b.width - b.width * scale;
+        final newH = newW / aspectRatio;
+        newBounds = Rect.fromLTRB(b.right - newW, b.bottom - newH, b.right, b.bottom);
         break;
       case 'tr':
-        newBounds = Rect.fromLTRB(b.left, b.top + delta.dy, b.right + delta.dx, b.bottom);
+        final dxVal = delta.dx - delta.dy;
+        final scaleTr = dxVal / (b.width + b.height);
+        final newW = b.width + b.width * scaleTr;
+        final newH = newW / aspectRatio;
+        newBounds = Rect.fromLTRB(b.left, b.bottom - newH, b.left + newW, b.bottom);
         break;
       case 'bl':
-        newBounds = Rect.fromLTRB(b.left + delta.dx, b.top, b.right, b.bottom + delta.dy);
+        final dxVal = -delta.dx + delta.dy;
+        final scaleBl = dxVal / (b.width + b.height);
+        final newW = b.width + b.width * scaleBl;
+        final newH = newW / aspectRatio;
+        newBounds = Rect.fromLTRB(b.right - newW, b.top, b.right, b.top + newH);
         break;
       case 'br':
-        newBounds = Rect.fromLTRB(b.left, b.top, b.right + delta.dx, b.bottom + delta.dy);
+        final newW = b.width + b.width * scale;
+        final newH = newW / aspectRatio;
+        newBounds = Rect.fromLTRB(b.left, b.top, b.left + newW, b.top + newH);
         break;
       default:
         return;

@@ -1,9 +1,14 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io' as io;
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
+import 'package:printing/printing.dart';
+import 'package:pdf/pdf.dart' as pw_pdf;
+import 'package:pdf/widgets.dart' as pw;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -12,6 +17,7 @@ import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
+import 'package:handwriter/features/canvas/presentation/symbol_library_panel.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 
 class CanvasScreen extends ConsumerStatefulWidget {
@@ -23,6 +29,8 @@ class CanvasScreen extends ConsumerStatefulWidget {
 
 class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   bool _isSaving = false;
+  late bool _stylusOnlyDrawing;
+  bool _isTouchPanning = false;
 
   // Pinch-to-zoom state
   int _activePointers = 0;
@@ -36,10 +44,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   // Hold-to-recognize shape (GoodNotes style)
   Timer? _holdRecognizeTimer;
   bool _shapeRecognizedDuringHold = false;
-  Offset _lastHoldPos = Offset.zero;
+  Offset _lastHoldCheckPos = Offset.zero;
+
+  // Drag-left to create new page
+  Timer? _newPageHoldTimer;
+  bool _showNewPageHint = false;
+
+  // Stylus barrel button temporary eraser
+  bool _barrelButtonErasing = false;
+  CanvasTool? _barrelButtonPreviousTool;
 
   // ── High-performance active stroke notifier ──
   final _activeStrokeNotifier = _ActiveStrokeNotifier();
+  // ── High-performance lasso path notifier (avoids Riverpod rebuild per point) ──
+  final _lassoPathNotifier = _LassoPathNotifier();
 
   // ── Auto-save timer ──
   Timer? _autoSaveTimer;
@@ -51,6 +69,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   @override
   void initState() {
     super.initState();
+    _stylusOnlyDrawing = !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.iOS ||
+         defaultTargetPlatform == TargetPlatform.android);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _startAutoSave();
   }
@@ -58,8 +79,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   @override
   void dispose() {
     _activeStrokeNotifier.dispose();
+    _lassoPathNotifier.dispose();
     _autoSaveTimer?.cancel();
     _holdRecognizeTimer?.cancel();
+    _newPageHoldTimer?.cancel();
     _focusNode.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -151,10 +174,51 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       }
     }
 
-    // Escape — deselect
+    // Escape — deselect / cancel pending symbol
     if (event.logicalKey == LogicalKeyboardKey.escape) {
+      final state = ref.read(canvasProvider);
+      if (state?.pendingSymbol != null) {
+        ref.read(canvasProvider.notifier).clearPendingSymbol();
+        return KeyEventResult.handled;
+      }
       ref.read(canvasProvider.notifier).clearSelection();
       ref.read(canvasProvider.notifier).deselectElement();
+      return KeyEventResult.handled;
+    }
+
+    // P — pen tool
+    if (event.logicalKey == LogicalKeyboardKey.keyP && !ctrl) {
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.pen);
+      return KeyEventResult.handled;
+    }
+    // E — eraser
+    if (event.logicalKey == LogicalKeyboardKey.keyE && !ctrl) {
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.eraserStroke);
+      return KeyEventResult.handled;
+    }
+    // L — lasso select
+    if (event.logicalKey == LogicalKeyboardKey.keyL && !ctrl) {
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.lasso);
+      return KeyEventResult.handled;
+    }
+    // H — hand/pan tool
+    if (event.logicalKey == LogicalKeyboardKey.keyH && !ctrl) {
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.pan);
+      return KeyEventResult.handled;
+    }
+    // T — text tool
+    if (event.logicalKey == LogicalKeyboardKey.keyT && !ctrl) {
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.text);
+      return KeyEventResult.handled;
+    }
+    // B — brush tool
+    if (event.logicalKey == LogicalKeyboardKey.keyB && !ctrl) {
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.brush);
+      return KeyEventResult.handled;
+    }
+    // S (without Ctrl) — shape tool
+    if (event.logicalKey == LogicalKeyboardKey.keyS && !ctrl) {
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.shape);
       return KeyEventResult.handled;
     }
 
@@ -181,6 +245,43 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     }
     ref.read(canvasProvider.notifier).closeNotebook();
     return true;
+  }
+
+  // ── Drag-left to create new page ──
+
+  void _checkNewPageDragLeft(CanvasState state, Size canvasSize) {
+    final pageW = state.currentPage?.width ?? 595;
+    final pageH = state.currentPage?.height ?? 842;
+    final renderScale = min(canvasSize.width / pageW, canvasSize.height / pageH);
+    final scaledW = pageW * renderScale;
+    final centerOffsetX = (canvasSize.width - scaledW) / 2;
+
+    // Right edge of the page in screen coords
+    final pageRightScreen = (scaledW * state.zoom) + state.panOffset.dx + (centerOffsetX * state.zoom);
+
+    // If the right edge of the page is past 30% from the left of screen, trigger
+    if (pageRightScreen < canvasSize.width * 0.3) {
+      if (_newPageHoldTimer == null) {
+        setState(() => _showNewPageHint = true);
+        _newPageHoldTimer = Timer(const Duration(milliseconds: 800), () {
+          _newPageHoldTimer = null;
+          setState(() => _showNewPageHint = false);
+          ref.read(canvasProvider.notifier).addPage();
+        });
+      }
+    } else {
+      _cancelNewPageTimer();
+    }
+  }
+
+  void _cancelNewPageTimer() {
+    if (_newPageHoldTimer != null || _showNewPageHint) {
+      _newPageHoldTimer?.cancel();
+      _newPageHoldTimer = null;
+      if (_showNewPageHint) {
+        setState(() => _showNewPageHint = false);
+      }
+    }
   }
 
   // ── Coordinate conversion ──
@@ -218,6 +319,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
   // ── Pointer handling ──
 
+  bool _isDrawLikeTool(CanvasTool tool) {
+    return tool == CanvasTool.pen ||
+        tool == CanvasTool.ballpoint ||
+        tool == CanvasTool.brush ||
+        tool == CanvasTool.highlighter ||
+        tool == CanvasTool.eraserStandard ||
+        tool == CanvasTool.eraserStroke ||
+        tool == CanvasTool.lasso ||
+        tool == CanvasTool.shape;
+  }
+
+  bool _shouldTouchPan(PointerDeviceKind kind, CanvasTool tool) {
+    return _stylusOnlyDrawing && kind == PointerDeviceKind.touch && _isDrawLikeTool(tool);
+  }
+
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
     _activePointers++;
     if (_activePointers >= 2) {
@@ -230,8 +346,53 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     }
 
     final tool = state.currentTool;
+
+    // Middle mouse button → always pan
+    if (event.kind == PointerDeviceKind.mouse && event.buttons == kMiddleMouseButton) {
+      _isTouchPanning = true;
+      _lastFocalPoint = event.position;
+      return;
+    }
+
+    // Stylus barrel button (secondary button on stylus) → cancel or erase
+    if (event.kind == PointerDeviceKind.stylus && event.buttons == kSecondaryButton) {
+      // If pending symbol, cancel placement
+      if (state.pendingSymbol != null) {
+        ref.read(canvasProvider.notifier).clearPendingSymbol();
+        return;
+      }
+      // If there's a selection, deselect
+      if (state.selectedElementId != null) {
+        ref.read(canvasProvider.notifier).deselectElement();
+        return;
+      }
+      if (state.lassoSelection != null) {
+        ref.read(canvasProvider.notifier).clearSelection();
+        return;
+      }
+      // Otherwise use barrel button as temporary stroke eraser
+      final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
+      _barrelButtonErasing = true;
+      _barrelButtonPreviousTool = state.currentTool;
+      ref.read(canvasProvider.notifier).setTool(CanvasTool.eraserStroke);
+      ref.read(canvasProvider.notifier).startStroke(pagePos, 0.5);
+      return;
+    }
+
+    if (_shouldTouchPan(event.kind, tool)) {
+      _isTouchPanning = true;
+      _lastFocalPoint = event.position;
+      return;
+    }
+
     final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
     final pressure = event.pressure > 0 ? event.pressure : 0.5;
+
+    // Pending symbol placement: tap to place symbol at this position
+    if (state.pendingSymbol != null) {
+      ref.read(canvasProvider.notifier).insertSymbol(state.pendingSymbol!, pagePos);
+      return;
+    }
 
     // If we're in shape adjustment mode, user is adjusting the recognized shape
     if (state.isAdjustingRecognized && state.recognizedShape != null) {
@@ -254,16 +415,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    // If there's a selected element and we're tapping on it, start dragging it
-    // regardless of the active tool (don't draw over it).
+    // If there's a selected element, handle tap interactions.
+    // For draw tools: stylus ignores selection and draws through; mouse/touch can interact.
+    // For non-draw tools: all input devices can interact.
     if (state.selectedElementId != null) {
-      final selBounds = _getSelectedElementBounds(state);
-      if (selBounds != null && selBounds.inflate(10).contains(pagePos)) {
-        // Let ImageHandleOverlay handle this interaction
-        return;
+      final isNonStylusInDrawMode = _isDrawLikeTool(tool) && event.kind != PointerDeviceKind.stylus;
+      if (!_isDrawLikeTool(tool) || isNonStylusInDrawMode) {
+        final selBounds = _getSelectedElementBounds(state);
+        if (selBounds != null && selBounds.inflate(10).contains(pagePos)) {
+          // Let ImageHandleOverlay or selection tool handle this interaction
+          return;
+        }
+        // Tapped outside selection — deselect
+        ref.read(canvasProvider.notifier).deselectElement();
       }
-      // Tapped outside selection — deselect
-      ref.read(canvasProvider.notifier).deselectElement();
     }
 
     // Check if tapping an image/shape to select it
@@ -277,13 +442,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           _lastLassoDragPos = pagePos;
           return;
         }
-      }
-
-      // Check if tapping on an image element — select it
-      final tappedElement = _findElementAt(state, pagePos);
-      if (tappedElement != null) {
-        ref.read(canvasProvider.notifier).selectElement(tappedElement);
-        return;
       }
     }
 
@@ -301,17 +459,52 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
     // Lasso tool: only track via provider (no visual pen stroke)
     if (tool == CanvasTool.lasso) {
-      ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
+      _lassoPathNotifier.start(pagePos);
+      ref.read(canvasProvider.notifier).clearLassoPath(); // reset provider path
       return;
+    }
+
+    // Check if tapping on an image/shape → select it.
+    // For non-draw tools (lasso/pan/text): always check.
+    // For draw tools: only select if input is mouse or touch (not stylus),
+    // so stylus always draws and mouse/finger can tap to select images.
+    {
+      final bool shouldCheckImageTap;
+      if (tool == CanvasTool.lasso || tool == CanvasTool.pan || tool == CanvasTool.text) {
+        shouldCheckImageTap = true;
+      } else if (_isDrawLikeTool(tool) && event.kind != PointerDeviceKind.stylus) {
+        shouldCheckImageTap = true;
+      } else {
+        shouldCheckImageTap = false;
+      }
+      if (shouldCheckImageTap) {
+        final tappedImageOrShape = _findImageOrShapeAt(state, pagePos);
+        if (tappedImageOrShape != null) {
+          ref.read(canvasProvider.notifier).selectElement(tappedImageOrShape);
+          return;
+        }
+      }
     }
 
     ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
     // Also push first point to fast notifier (only for pen/brush/highlighter)
     _activeStrokeNotifier.start(pagePos, pressure);
+    _lastHoldCheckPos = pagePos;
   }
 
   void _onPointerMove(PointerMoveEvent event, CanvasState state, Size canvasSize) {
     if (_activePointers >= 2) return;
+
+    if (_isTouchPanning) {
+      final delta = event.position - _lastFocalPoint;
+      _lastFocalPoint = event.position;
+      final latest = ref.read(canvasProvider);
+      if (latest != null) {
+        ref.read(canvasProvider.notifier).setPanOffset(latest.panOffset + delta);
+        _checkNewPageDragLeft(latest.copyWith(panOffset: latest.panOffset + delta), canvasSize);
+      }
+      return;
+    }
 
     final tool = state.currentTool;
 
@@ -325,7 +518,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     if (tool == CanvasTool.pan) {
       final delta = event.position - _lastFocalPoint;
       _lastFocalPoint = event.position;
-      ref.read(canvasProvider.notifier).setPanOffset(state.panOffset + delta);
+      final latest = ref.read(canvasProvider);
+      if (latest != null) {
+        ref.read(canvasProvider.notifier).setPanOffset(latest.panOffset + delta);
+        _checkNewPageDragLeft(latest.copyWith(panOffset: latest.panOffset + delta), canvasSize);
+      }
       return;
     }
 
@@ -337,37 +534,60 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    // If a selected element exists and pointer is within it, don't draw
-    if (state.selectedElementId != null) return;
-
     final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
     final pressure = event.pressure > 0 ? event.pressure : 0.5;
+
+    if (tool == CanvasTool.lasso) {
+      _onLassoPointerMove(pagePos);
+      return;
+    }
+
+    // If a selected element exists and pointer is within it, don't draw
+    if (state.selectedElementId != null) return;
 
     // Fast path: during pen/brush drawing, only update the notifier (no Riverpod rebuild).
     // Riverpod is only updated for eraser/lasso/shape tools that need state tracking.
     if (_activeStrokeNotifier.isActive) {
-      // Shape recognized during hold → drag the shape around
+      // Shape recognized during hold:
+      // - line: fix start point, drag moves endpoint
+      // - circle/rectangle/triangle: fix top-left, drag resizes (bottom-right follows cursor)
       if (_shapeRecognizedDuringHold) {
-        final delta = pagePos - _lastHoldPos;
-        _lastHoldPos = pagePos;
-        ref.read(canvasProvider.notifier).moveRecognizedShape(delta);
+        final recognizedShape = ref.read(canvasProvider)?.recognizedShape;
+        if (recognizedShape != null && recognizedShape.shapeType == 'line') {
+          ref.read(canvasProvider.notifier).setRecognizedLineEndpoint(pagePos);
+        } else {
+          ref.read(canvasProvider.notifier).resizeRecognizedShape(pagePos);
+        }
         return;
       }
 
       _activeStrokeNotifier.addPoint(pagePos, pressure);
-      _lastHoldPos = pagePos;
 
       // Reset hold-to-recognize timer (GoodNotes-style: recognize when user pauses)
-      _holdRecognizeTimer?.cancel();
-      final currentState = ref.read(canvasProvider);
-      if (currentState != null && currentState.toolSettings.shapeRecognition) {
-        _holdRecognizeTimer = Timer(const Duration(milliseconds: 400), () {
-          _tryRecognizeHeldStroke();
-        });
+      // Tolerate micro-jitter from stylus: only reset timer if movement > 3px
+      final holdDx = pagePos.dx - _lastHoldCheckPos.dx;
+      final holdDy = pagePos.dy - _lastHoldCheckPos.dy;
+      final holdDistSq = holdDx * holdDx + holdDy * holdDy;
+      const holdThresholdSq = 3.0 * 3.0; // 3px tolerance for stylus jitter
+
+      if (holdDistSq > holdThresholdSq) {
+        _lastHoldCheckPos = pagePos;
+        _holdRecognizeTimer?.cancel();
+        final currentState = ref.read(canvasProvider);
+        if (currentState != null && currentState.toolSettings.shapeRecognition) {
+          _holdRecognizeTimer = Timer(const Duration(milliseconds: 200), () {
+            _tryRecognizeHeldStroke();
+          });
+        }
       }
       return;
     }
     ref.read(canvasProvider.notifier).continueStroke(pagePos, pressure);
+  }
+
+  void _onLassoPointerMove(Offset pagePos) {
+    if (!_lassoPathNotifier.isActive) return;
+    _lassoPathNotifier.addPoint(pagePos);
   }
 
   /// Try to recognize a shape when user holds still during drawing.
@@ -397,6 +617,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     // Don't commit anything if this was a multi-touch gesture (pinch-to-zoom)
     if (wasMultiTouch || _activePointers >= 1) return;
 
+    // Barrel button erase: restore previous tool on lift
+    if (_barrelButtonErasing) {
+      _barrelButtonErasing = false;
+      ref.read(canvasProvider.notifier).endStroke();
+      if (_barrelButtonPreviousTool != null) {
+        ref.read(canvasProvider.notifier).setTool(_barrelButtonPreviousTool!);
+        _barrelButtonPreviousTool = null;
+      }
+      return;
+    }
+
+    if (_isTouchPanning) {
+      _isTouchPanning = false;
+      _cancelNewPageTimer();
+      return;
+    }
+
     _holdRecognizeTimer?.cancel();
 
     if (_isDraggingSelection) {
@@ -423,8 +660,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    if (state.currentTool == CanvasTool.pan) return;
+    if (state.currentTool == CanvasTool.pan) {
+      _cancelNewPageTimer();
+      return;
+    }
     if (state.currentTool == CanvasTool.image) return;
+
+    // Lasso: commit the locally-tracked path to Riverpod and trigger selection
+    if (state.currentTool == CanvasTool.lasso && _lassoPathNotifier.isActive) {
+      final pts = List<Offset>.from(_lassoPathNotifier.points); // copy before clear
+      _lassoPathNotifier.clear();
+      ref.read(canvasProvider.notifier).commitLassoPath(pts);
+      return;
+    }
+
     // Commit fast notifier points to Riverpod state before finalizing
     if (_activeStrokeNotifier.isActive && _activeStrokeNotifier.points.isNotEmpty) {
       ref.read(canvasProvider.notifier).commitActiveStroke(_activeStrokeNotifier.points);
@@ -435,6 +684,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
   void _onPointerCancel(PointerCancelEvent event) {
     _activePointers = max(0, _activePointers - 1);
+    _isTouchPanning = false;
   }
 
   String? _findElementAt(CanvasState state, Offset pagePos) {
@@ -459,6 +709,33 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           id = t.id;
           bounds = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
         },
+        image: (img) {
+          id = img.id;
+          bounds = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
+        },
+        shape: (s) {
+          id = s.id;
+          bounds = Rect.fromPoints(Offset(s.data.x1, s.data.y1), Offset(s.data.x2, s.data.y2));
+        },
+      );
+      if (bounds != null && bounds!.inflate(5).contains(pagePos) && id != null) {
+        return id;
+      }
+    }
+    return null;
+  }
+
+  /// Find an image or shape element at the given page position (ignoring strokes/text).
+  String? _findImageOrShapeAt(CanvasState state, Offset pagePos) {
+    final page = state.currentPage;
+    if (page == null) return null;
+    for (int i = page.layers.content.length - 1; i >= 0; i--) {
+      final element = page.layers.content[i];
+      Rect? bounds;
+      String? id;
+      element.map(
+        stroke: (_) {},
+        text: (_) {},
         image: (img) {
           id = img.id;
           bounds = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
@@ -570,7 +847,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
     final ext = file.name.split('.').last.toLowerCase();
     if (ext == 'pdf') {
-      _insertPdf(bytes, file.name, pagePos);
+      await _insertPdf(bytes, file.name, pagePos);
     } else {
       _insertImage(bytes, file.name, pagePos);
     }
@@ -589,12 +866,97 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     ref.read(canvasProvider.notifier).addImageElement(pagePos, name, bytes, w, h);
   }
 
-  void _insertPdf(Uint8List bytes, String name, Offset pagePos) {
-    ref.read(canvasProvider.notifier).addImageElement(pagePos, name, bytes, 400, 560);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('PDF inserito come elemento')),
+  /// Estimate the number of pages in a PDF from its raw bytes.
+  /// Searches for /Type /Page (not /Pages) entries in the byte stream.
+  int _countPdfPages(Uint8List bytes) {
+    try {
+      final str = latin1.decode(bytes, allowInvalid: true);
+      return RegExp(r'/Type\s*/Page[^s]').allMatches(str).length;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  Future<void> _insertPdf(Uint8List bytes, String name, Offset pagePos) async {
+    if (!mounted) return;
+
+    // Estimate page count for pre-confirmation
+    final estimated = _countPdfPages(bytes);
+    const kPageConfirmThreshold = 5;
+
+    if (estimated > kPageConfirmThreshold) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('PDF con molte pagine'),
+          content: Text(
+            'Questo PDF ha circa $estimated pagine.\n'
+            'Verranno create $estimated nuove pagine nel notebook.\n\n'
+            'Continuare?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annulla'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: Text('Importa $estimated pagine'),
+            ),
+          ],
+        ),
       );
+      if (confirmed != true) return;
+    }
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Rasterizzazione PDF in corso…'), duration: Duration(seconds: 30)),
+    );
+
+    try {
+      final rasters = <PdfRaster>[];
+      await for (final r in Printing.raster(bytes, dpi: 150)) {
+        rasters.add(r);
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).clearSnackBars();
+
+      if (rasters.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Impossibile leggere il PDF: nessuna pagina trovata')),
+        );
+        return;
+      }
+
+      final notifier = ref.read(canvasProvider.notifier);
+      for (int i = 0; i < rasters.length; i++) {
+        final png = await rasters[i].toPng();
+        if (!mounted) return;
+
+        if (i > 0) notifier.addPage();
+
+        final st = ref.read(canvasProvider);
+        final pageW = st?.currentPage?.width ?? 595.0;
+        final pageH = st?.currentPage?.height ?? 842.0;
+        // Place first page at tap position, subsequent pages centred
+        final insertPos = i == 0 ? pagePos : Offset(pageW / 2, pageH / 2);
+        notifier.addImageElement(insertPos, '${name}_p${i + 1}.png', png, pageW, pageH);
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('PDF importato: ${rasters.length} ${rasters.length == 1 ? 'pagina' : 'pagine'}')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Errore importazione PDF: $e')),
+        );
+      }
     }
   }
 
@@ -685,7 +1047,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                   _showSymbolsDialog(insertPos);
                 },
                 onCreateSymbol: canvasState.lassoSelection != null ? () => _promptCreateSymbolFromSelection() : null,
-                symbolCount: canvasState.symbols.length,
+                symbolCount: canvasState.symbolLibraries.fold(0, (sum, l) => sum + l.symbols.length),
               ),
               Expanded(child: _buildCanvas(canvasState, currentPage)),
               _buildPageNav(canvasState),
@@ -740,6 +1102,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
               style: TextStyle(color: Colors.grey.shade700, fontSize: 12, fontWeight: FontWeight.w500),
             ),
           ),
+          IconButton(
+            tooltip: 'Disegna solo con penna',
+            icon: Icon(
+              _stylusOnlyDrawing ? Icons.create_rounded : Icons.touch_app_rounded,
+              color: _stylusOnlyDrawing ? Colors.blue : Colors.grey.shade600,
+              size: 20,
+            ),
+            onPressed: () {
+              setState(() => _stylusOnlyDrawing = !_stylusOnlyDrawing);
+            },
+          ),
           const SizedBox(width: 4),
           // Auto-save indicator
           if (_isSaving)
@@ -774,8 +1147,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                 child: Listener(
                   behavior: HitTestBehavior.opaque,
                   onPointerDown: (e) {
-                    // Right-click → context menu
+                    // Right-click → cancel pending symbol or show context menu
                     if (e.kind == PointerDeviceKind.mouse && e.buttons == kSecondaryMouseButton) {
+                      if (canvasState.pendingSymbol != null) {
+                        ref.read(canvasProvider.notifier).clearPendingSymbol();
+                        return;
+                      }
                       _showContextMenu(e.position, e.localPosition, canvasState, canvasSize);
                       return;
                     }
@@ -798,7 +1175,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                   child: GestureDetector(
                     onScaleStart: _onScaleStart,
                     onScaleUpdate: _onScaleUpdate,
-                    onDoubleTap: () => ref.read(canvasProvider.notifier).resetZoom(),
                     child: ClipRect(
                       child: RepaintBoundary(
                         child: CustomPaint(
@@ -811,7 +1187,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                             activeColor: canvasState.toolSettings.color,
                             activeWidth: canvasState.toolSettings.strokeWidth,
                             lassoSelection: canvasState.lassoSelection,
-                            lassoPath: canvasState.lassoPath.isNotEmpty ? canvasState.lassoPath : null,
+                            lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
+                                ? _lassoPathNotifier.points.toList()
+                                : (canvasState.lassoPath.isNotEmpty ? canvasState.lassoPath : null),
+                            lassoPathGetter: _lassoPathNotifier.isActive
+                                ? () => List<Offset>.from(_lassoPathNotifier.points)
+                                : null,
                             shapePreview: (canvasState.shapeStartPos != null && canvasState.shapeEndPos != null)
                                 ? (canvasState.shapeStartPos!, canvasState.shapeEndPos!, canvasState.toolSettings.shapeType)
                                 : null,
@@ -819,7 +1200,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                             zoom: canvasState.zoom,
                             panOffset: canvasState.panOffset,
                             imageCache: canvasState.imageCache,
-                            repaintNotifier: _activeStrokeNotifier,
+                            repaintNotifier: Listenable.merge([_activeStrokeNotifier, _lassoPathNotifier]),
                           ),
                           isComplex: true,
                           willChange: true,
@@ -837,6 +1218,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
               // Transform handles for selected elements
               ..._buildTransformHandles(canvasState, canvasSize),
+
+              // Lasso selection rotation handle
+              ..._buildLassoRotateHandle(canvasState, canvasSize),
 
               // Recognized shape adjustment indicator (only for shape tool adjustment mode)
               if (canvasState.isAdjustingRecognized && canvasState.recognizedShape != null)
@@ -884,6 +1268,64 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                               child: const Text('Annulla', style: TextStyle(color: Colors.white, fontSize: 11)),
                             ),
                           ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              // Pending symbol placement hint
+              if (canvasState.pendingSymbol != null)
+                Positioned(
+                  top: 16,
+                  left: 0, right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade700,
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.place, color: Colors.white, size: 16),
+                          const SizedBox(width: 8),
+                          Text(
+                            'Tocca per posizionare: ${canvasState.pendingSymbol!.name}',
+                            style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(width: 8),
+                          GestureDetector(
+                            onTap: () => ref.read(canvasProvider.notifier).clearPendingSymbol(),
+                            child: const Icon(Icons.close, color: Colors.white70, size: 16),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              // New page drag-left hint
+              if (_showNewPageHint)
+                Positioned(
+                  right: 16,
+                  top: 0, bottom: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.green.shade700.withValues(alpha: 0.9),
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                      ),
+                      child: const Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.add_circle_outline, color: Colors.white, size: 32),
+                          SizedBox(height: 4),
+                          Text('Nuova pagina', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
                         ],
                       ),
                     ),
@@ -948,31 +1390,215 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     final screenBR = _toScreenCoords(pageBounds!.bottomRight, state, canvasSize);
     final screenRect = Rect.fromPoints(screenTL, screenBR);
 
+    // Determine if the selected element is an image (to show crop button)
+    final isImage = element.map(
+      stroke: (_) => false,
+      text: (_) => false,
+      image: (_) => true,
+      shape: (_) => false,
+    );
+
+    final isLocked = element.map(
+      stroke: (_) => false,
+      text: (_) => false,
+      image: (e) => e.data.locked,
+      shape: (_) => false,
+    );
+
+    final hasComment = element.map(
+      stroke: (_) => false,
+      text: (_) => false,
+      image: (e) => e.data.comment != null && e.data.comment!.isNotEmpty,
+      shape: (_) => false,
+    );
+
+    final elementId = state.selectedElementId!;
+
     return [
       ImageHandleOverlay(
         bounds: screenRect,
         rotation: rotation,
+        isLocked: isLocked,
+        hasComment: hasComment,
         onDragStart: () {
-          ref.read(canvasProvider.notifier).startDragElement(state.selectedElementId!);
+          ref.read(canvasProvider.notifier).startDragElement(elementId);
         },
         onMove: (delta) {
           final pageDelta = delta / (state.zoom * _getRenderScale(state, canvasSize));
-          ref.read(canvasProvider.notifier).moveElement(state.selectedElementId!, pageDelta);
+          ref.read(canvasProvider.notifier).moveElement(elementId, pageDelta);
         },
         onResize: (newBounds) {
           final pageTL = _toPageCoords(newBounds.topLeft, state, canvasSize);
           final pageBR = _toPageCoords(newBounds.bottomRight, state, canvasSize);
-          ref.read(canvasProvider.notifier).resizeElement(state.selectedElementId!, Rect.fromPoints(pageTL, pageBR));
+          ref.read(canvasProvider.notifier).resizeElement(elementId, Rect.fromPoints(pageTL, pageBR));
         },
         onRotate: (angle) {
-          ref.read(canvasProvider.notifier).rotateElement(state.selectedElementId!, angle);
+          ref.read(canvasProvider.notifier).rotateElement(elementId, angle);
         },
         onDelete: () {
-          ref.read(canvasProvider.notifier).deleteElement(state.selectedElementId!);
+          ref.read(canvasProvider.notifier).deleteElement(elementId);
         },
         onDeselect: () {
           ref.read(canvasProvider.notifier).deselectElement();
         },
+        onCrop: isImage ? () => _showCropDialog(elementId) : null,
+        onBringToFront: () {
+          ref.read(canvasProvider.notifier).bringToFront(elementId);
+        },
+        onSendToBack: () {
+          ref.read(canvasProvider.notifier).sendToBack(elementId);
+        },
+        onToggleLock: isImage ? () {
+          ref.read(canvasProvider.notifier).toggleImageLock(elementId);
+        } : null,
+        onEditComment: isImage ? () {
+          _showCommentDialog(elementId);
+        } : null,
+      ),
+    ];
+  }
+
+  Future<void> _showCommentDialog(String elementId) async {
+    // Find current comment
+    final st = ref.read(canvasProvider);
+    if (st == null) return;
+    String? currentComment;
+    final pg = st.currentPage;
+    if (pg != null) {
+      for (final el in pg.layers.content) {
+        final id = el.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+        if (id == elementId) {
+          el.map(
+            stroke: (_) {},
+            text: (_) {},
+            image: (e) => currentComment = e.data.comment,
+            shape: (_) {},
+          );
+          break;
+        }
+      }
+    }
+
+    final controller = TextEditingController(text: currentComment ?? '');
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Commento immagine'),
+        content: TextField(
+          controller: controller,
+          decoration: const InputDecoration(hintText: 'Aggiungi un commento...'),
+          maxLines: 3,
+          autofocus: true,
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Annulla'),
+          ),
+          if (currentComment != null && currentComment!.isNotEmpty)
+            TextButton(
+              onPressed: () {
+                ref.read(canvasProvider.notifier).setImageComment(elementId, null);
+                Navigator.of(ctx).pop(null);
+              },
+              child: const Text('Rimuovi', style: TextStyle(color: Colors.red)),
+            ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(controller.text),
+            child: const Text('Salva'),
+          ),
+        ],
+      ),
+    );
+    if (result != null) {
+      ref.read(canvasProvider.notifier).setImageComment(elementId, result.isEmpty ? null : result);
+    }
+  }
+
+  // ── Crop dialog ──
+
+  void _showCropDialog(String elementId) {
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    final page = state.currentPage;
+    if (page == null) return;
+
+    final element = page.layers.content.where((e) {
+      return e.map(stroke: (s) => s.id, text: (t) => t.id, image: (i) => i.id, shape: (s) => s.id) == elementId;
+    }).firstOrNull;
+    if (element == null) return;
+
+    ImageData? imageData;
+    element.map(stroke: (_) {}, text: (_) {}, image: (i) => imageData = i.data, shape: (_) {});
+    if (imageData == null) return;
+    final imgData = imageData!;
+
+    final cachedImage = state.imageCache[imgData.assetPath];
+    if (cachedImage == null) return;
+
+    // Show a dialog with crop handles
+    showDialog(
+      context: context,
+      builder: (ctx) => _CropDialog(
+        image: cachedImage,
+        imageData: imgData,
+        onCrop: (cropRect) {
+          // cropRect is in normalized 0..1 coordinates
+          ref.read(canvasProvider.notifier).cropImageElement(elementId, cropRect);
+        },
+      ),
+    );
+  }
+
+  // ── Lasso selection rotation handle ──
+
+  List<Widget> _buildLassoRotateHandle(CanvasState state, Size canvasSize) {
+    final sel = state.lassoSelection;
+    if (sel == null) return [];
+
+    final bounds = sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy);
+    final screenTL = _toScreenCoords(bounds.topLeft, state, canvasSize);
+    final screenBR = _toScreenCoords(bounds.bottomRight, state, canvasSize);
+    final screenRect = Rect.fromPoints(screenTL, screenBR);
+    final centerTop = Offset(screenRect.center.dx, screenRect.top - 40);
+
+    return [
+      // Rotation handle
+      Positioned(
+        left: centerTop.dx - 14,
+        top: centerTop.dy - 14,
+        child: Column(
+          children: [
+            GestureDetector(
+              onPanStart: (_) {
+                // Push undo at start
+              },
+              onPanUpdate: (d) {
+                final centerGlobal = screenRect.center;
+                final prev = d.globalPosition - d.delta;
+                final startAngle = atan2(prev.dy - centerGlobal.dy, prev.dx - centerGlobal.dx);
+                final currentAngle = atan2(d.globalPosition.dy - centerGlobal.dy, d.globalPosition.dx - centerGlobal.dx);
+                final deltaAngle = currentAngle - startAngle;
+                ref.read(canvasProvider.notifier).rotateSelection(deltaAngle);
+              },
+              onPanEnd: (_) {
+                ref.read(canvasProvider.notifier).applySelectionRotation();
+              },
+              child: Container(
+                width: 28, height: 28,
+                decoration: BoxDecoration(
+                  color: Colors.white, shape: BoxShape.circle,
+                  border: Border.all(color: Colors.blue, width: 2),
+                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 3)],
+                ),
+                child: const Icon(Icons.rotate_right_rounded, size: 16, color: Colors.blue),
+              ),
+            ),
+            IgnorePointer(
+              child: Container(width: 1.5, height: 26, color: Colors.blue.withValues(alpha: 0.5)),
+            ),
+          ],
+        ),
       ),
     ];
   }
@@ -1084,112 +1710,125 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   }
 
   void _promptCreateSymbolFromSelection() async {
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    final libs = state.symbolLibraries;
+
     final controller = TextEditingController();
-    final name = await showDialog<String>(
+    String? selectedLibId = libs.isNotEmpty ? libs.first.id : null;
+
+    final result = await showDialog<(String, String?)>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Crea simbolo riutilizzabile'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Nome del simbolo',
-            border: OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          title: const Text('Crea simbolo riutilizzabile'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Nome simbolo', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              if (libs.isNotEmpty) ...[
+                const Text('Libreria:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 4),
+                DropdownButton<String>(
+                  value: selectedLibId,
+                  isExpanded: true,
+                  items: libs.map((l) => DropdownMenuItem(value: l.id, child: Text(l.name))).toList(),
+                  onChanged: (v) => setS(() => selectedLibId = v),
+                ),
+              ] else
+                Text('Nessuna libreria esistente. Verrà creata una libreria "Simboli".',
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
+            ],
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annulla')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, (controller.text, selectedLibId)),
+              child: const Text('Crea'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annulla')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text('Crea')),
-        ],
       ),
     );
-    if (name != null && name.isNotEmpty) {
-      ref.read(canvasProvider.notifier).createSymbolFromSelection(name);
+    if (result != null && result.$1.isNotEmpty) {
+      ref.read(canvasProvider.notifier).createSymbolFromSelection(result.$1, targetLibId: result.$2);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Simbolo "$name" creato!'), duration: const Duration(seconds: 2)),
+          SnackBar(content: Text('Simbolo "${result.$1}" creato!'), duration: const Duration(seconds: 2)),
         );
       }
     }
   }
 
   void _promptCreateSymbolFromElement(String elementId) async {
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    final libs = state.symbolLibraries;
     final controller = TextEditingController();
-    final name = await showDialog<String>(
+    String? selectedLibId = libs.isNotEmpty ? libs.first.id : null;
+
+    final result = await showDialog<(String, String?)>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Crea simbolo riutilizzabile'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(
-            labelText: 'Nome del simbolo',
-            border: OutlineInputBorder(),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) => AlertDialog(
+          title: const Text('Crea simbolo riutilizzabile'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: 'Nome simbolo', border: OutlineInputBorder()),
+              ),
+              const SizedBox(height: 12),
+              if (libs.isNotEmpty) ...[
+                const Text('Libreria:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                const SizedBox(height: 4),
+                DropdownButton<String>(
+                  value: selectedLibId,
+                  isExpanded: true,
+                  items: libs.map((l) => DropdownMenuItem(value: l.id, child: Text(l.name))).toList(),
+                  onChanged: (v) => setS(() => selectedLibId = v),
+                ),
+              ],
+            ],
           ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annulla')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, (controller.text, selectedLibId)),
+              child: const Text('Crea'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Annulla')),
-          FilledButton(onPressed: () => Navigator.pop(ctx, controller.text), child: const Text('Crea')),
-        ],
       ),
     );
-    if (name != null && name.isNotEmpty) {
-      ref.read(canvasProvider.notifier).createSymbolFromElement(elementId, name);
+    if (result != null && result.$1.isNotEmpty) {
+      ref.read(canvasProvider.notifier).createSymbolFromElement(elementId, result.$1);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Simbolo "$name" creato!'), duration: const Duration(seconds: 2)),
+          SnackBar(content: Text('Simbolo "${result.$1}" creato!'), duration: const Duration(seconds: 2)),
         );
       }
     }
   }
 
   void _showSymbolsDialog(Offset insertPos) {
-    final state = ref.read(canvasProvider);
-    if (state == null || state.symbols.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Nessun simbolo salvato. Seleziona elementi con il lazo e crea un simbolo.'), duration: Duration(seconds: 2)),
-        );
-      }
-      return;
-    }
-
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Inserisci simbolo'),
-        content: SizedBox(
-          width: 300,
-          child: ListView.builder(
-            shrinkWrap: true,
-            itemCount: state.symbols.length,
-            itemBuilder: (ctx, i) {
-              final symbol = state.symbols[i];
-              return ListTile(
-                leading: const Icon(Icons.star_rounded, color: Colors.amber),
-                title: Text(symbol.name),
-                subtitle: Text('${symbol.elements.length} elementi'),
-                trailing: IconButton(
-                  icon: const Icon(Icons.delete_outline, size: 18),
-                  onPressed: () {
-                    ref.read(canvasProvider.notifier).deleteSymbol(symbol.id);
-                    Navigator.pop(ctx);
-                  },
-                ),
-                onTap: () {
-                  Navigator.pop(ctx);
-                  ref.read(canvasProvider.notifier).insertSymbol(symbol, insertPos);
-                  if (mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Simbolo "${symbol.name}" inserito'), duration: const Duration(seconds: 1)),
-                    );
-                  }
-                },
-              );
-            },
-          ),
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: SymbolLibraryPanel(
+          insertPos: insertPos,
+          onClose: () => Navigator.pop(ctx),
         ),
-        actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Chiudi'))],
       ),
     );
   }
@@ -1262,15 +1901,30 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
       if (savePath == null) return;
 
-      // Render all pages to images, then compose a PDF
-      final pageImages = <ui.Image>[];
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Generazione PDF in corso...')),
+        );
+      }
+
+      // Render each page at 2x resolution for sharpness
+      const scale = 2.0;
+      final doc = pw.Document();
+
       for (final entry in state.document.pages) {
         final page = state.pages[entry.fileName];
         if (page == null) continue;
 
+        final width = page.width;
+        final height = page.height;
+        final renderW = (width * scale).toInt();
+        final renderH = (height * scale).toInt();
+
+        // Render the page to a bitmap at 2x scale
         final recorder = ui.PictureRecorder();
-        final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, page.width, page.height));
-        canvas.drawRect(Rect.fromLTWH(0, 0, page.width, page.height), Paint()..color = Colors.white);
+        final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, width * scale, height * scale));
+        canvas.scale(scale);
+        canvas.drawRect(Rect.fromLTWH(0, 0, width, height), Paint()..color = Colors.white);
 
         final engine = CanvasRenderEngine(
           pageData: page,
@@ -1278,30 +1932,39 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           panOffset: Offset.zero,
           imageCache: state.imageCache,
         );
-        engine.paintPage(canvas, Size(page.width, page.height), 1.0, Offset.zero);
+        engine.paintPage(canvas, Size(width, height), 1.0, Offset.zero);
 
         final picture = recorder.endRecording();
-        final img = await picture.toImage(page.width.toInt(), page.height.toInt());
-        pageImages.add(img);
+        final img = await picture.toImage(renderW, renderH);
+        final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+        img.dispose();
+        if (byteData == null) continue;
+
+        final pngBytes = byteData.buffer.asUint8List();
+        final pdfImage = pw.MemoryImage(pngBytes);
+
+        doc.addPage(
+          pw.Page(
+            pageFormat: pw_pdf.PdfPageFormat(width * pw_pdf.PdfPageFormat.point, height * pw_pdf.PdfPageFormat.point),
+            margin: pw.EdgeInsets.zero,
+            build: (ctx) => pw.Image(pdfImage, fit: pw.BoxFit.fill),
+          ),
+        );
       }
 
-      // Convert images to PNG bytes and write as a simple multi-page image export
-      // For a proper PDF, we'd use the `printing` package, but for now export each page as PNG
-      for (int i = 0; i < pageImages.length; i++) {
-        final byteData = await pageImages[i].toByteData(format: ui.ImageByteFormat.png);
-        if (byteData == null) continue;
-        final pagePath = savePath.replaceAll('.pdf', '_p${i + 1}.png');
-        await _writeFile(pagePath, byteData.buffer.asUint8List());
-      }
+      final pdfBytes = await doc.save();
+      await _writeFile(savePath, Uint8List.fromList(pdfBytes));
 
       if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('${pageImages.length} pagine esportate come PNG!')),
+          SnackBar(content: Text('PDF esportato: ${state.document.pages.length} ${state.document.pages.length == 1 ? 'pagina' : 'pagine'}')),
         );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Errore export: $e')));
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Errore export PDF: $e')));
       }
     }
   }
@@ -1316,54 +1979,172 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   }
 
   Widget _buildPageNav(CanvasState canvasState) {
-    return Container(
-      height: 44,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(top: BorderSide(color: Colors.grey.shade300, width: 0.5)),
-      ),
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      child: Row(
-        children: [
-          // Page thumbnails button
-          IconButton(
-            icon: Icon(Icons.view_carousel_outlined, color: Colors.grey.shade700, size: 20),
-            onPressed: () => _showPageManager(canvasState),
-            tooltip: 'Gestione pagine',
-          ),
-          const Spacer(),
-          IconButton(
-            icon: Icon(Icons.chevron_left_rounded, color: Colors.grey.shade800, size: 22),
-            onPressed: canvasState.currentPageIndex > 0
-                ? () => ref.read(canvasProvider.notifier).prevPage()
-                : null,
-            splashRadius: 18,
-          ),
+    final filteredPos = canvasState.currentFilteredIndex;
+    final filteredCount = canvasState.filteredPageCount;
+    final hasChapters = canvasState.metadata.chapters.isNotEmpty;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // ── Chapter tabs (only if chapters exist) ──
+        if (hasChapters)
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
-            child: Text(
-              '${canvasState.currentPageIndex + 1} / ${canvasState.pageCount}',
-              style: TextStyle(color: Colors.grey.shade800, fontSize: 13, fontWeight: FontWeight.w500),
+            height: 36,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade50,
+              border: Border(top: BorderSide(color: Colors.grey.shade300, width: 0.5)),
+            ),
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                  child: ChoiceChip(
+                    label: const Text('Tutto', style: TextStyle(fontSize: 12)),
+                    selected: canvasState.activeChapterId == null,
+                    onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(null),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+                ...canvasState.metadata.chapters.map((chapter) {
+                  final isActive = canvasState.activeChapterId == chapter.id;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                    child: ChoiceChip(
+                      label: Text(chapter.title, style: const TextStyle(fontSize: 12)),
+                      selected: isActive,
+                      onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(chapter.id),
+                      visualDensity: VisualDensity.compact,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    ),
+                  );
+                }),
+              ],
             ),
           ),
-          IconButton(
-            icon: Icon(Icons.chevron_right_rounded, color: Colors.grey.shade800, size: 22),
-            onPressed: canvasState.currentPageIndex < canvasState.pageCount - 1
-                ? () => ref.read(canvasProvider.notifier).nextPage()
-                : null,
-            splashRadius: 18,
+        // ── Page navigation bar ──
+        Container(
+          height: 44,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border(top: BorderSide(color: Colors.grey.shade300, width: 0.5)),
           ),
-          const Spacer(),
-          IconButton(
-            icon: Icon(Icons.add_rounded, color: Colors.blue.shade600, size: 20),
-            onPressed: () => ref.read(canvasProvider.notifier).addPage(),
-            splashRadius: 18,
-            tooltip: 'Aggiungi pagina',
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          child: Row(
+            children: [
+              IconButton(
+                icon: Icon(Icons.view_carousel_outlined, color: Colors.grey.shade700, size: 20),
+                onPressed: () => _showPageManager(canvasState),
+                tooltip: 'Gestione pagine',
+              ),
+              const Spacer(),
+              IconButton(
+                icon: Icon(Icons.chevron_left_rounded, color: Colors.grey.shade800, size: 22),
+                onPressed: filteredPos > 0
+                    ? () => ref.read(canvasProvider.notifier).prevPage()
+                    : null,
+                splashRadius: 18,
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
+                child: Text(
+                  filteredCount > 0 && filteredPos >= 0
+                      ? '${filteredPos + 1} / $filteredCount'
+                      : '— / $filteredCount',
+                  style: TextStyle(color: Colors.grey.shade800, fontSize: 13, fontWeight: FontWeight.w500),
+                ),
+              ),
+              IconButton(
+                icon: Icon(Icons.chevron_right_rounded, color: Colors.grey.shade800, size: 22),
+                onPressed: filteredPos >= 0 && filteredPos < filteredCount - 1
+                    ? () => ref.read(canvasProvider.notifier).nextPage()
+                    : null,
+                splashRadius: 18,
+              ),
+              const Spacer(),
+              IconButton(
+                icon: Icon(Icons.add_rounded, color: Colors.blue.shade600, size: 20),
+                onPressed: () => ref.read(canvasProvider.notifier).addPage(),
+                splashRadius: 18,
+                tooltip: 'Aggiungi pagina',
+              ),
+            ],
           ),
+        ),
+      ],
+    );
+  }
+
+  Future<String?> _promptForText(BuildContext context, String title, String hintText) async {
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+          controller: controller,
+          decoration: InputDecoration(hintText: hintText),
+          autofocus: true,
+          textInputAction: TextInputAction.done,
+          onSubmitted: (_) => Navigator.of(ctx).pop(controller.text),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.of(ctx).pop(), child: const Text('Annulla')),
+          TextButton(onPressed: () => Navigator.of(ctx).pop(controller.text), child: const Text('OK')),
         ],
       ),
     );
+    controller.dispose();
+    return result;
+  }
+
+  Future<void> _showChapterPicker(BuildContext context, CanvasState canvasState, int pageIndex) async {
+    if (canvasState.metadata.chapters.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Crea prima almeno un capitolo.')),
+      );
+      return;
+    }
+
+    // Use a sentinel value to distinguish "remove chapter" from "dismissed"
+    const removeChapter = '__remove__';
+
+    final selectedId = await showModalBottomSheet<String>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(title: const Text('Assegna capitolo')),
+            ListTile(
+              leading: const Icon(Icons.clear),
+              title: const Text('Nessuno'),
+              onTap: () => Navigator.of(ctx).pop(removeChapter),
+            ),
+            ...canvasState.metadata.chapters.map((chapter) {
+              return ListTile(
+                leading: const Icon(Icons.folder_open),
+                title: Text(chapter.title),
+                selected: canvasState.document.pages[pageIndex].chapterId == chapter.id,
+                onTap: () => Navigator.of(ctx).pop(chapter.id),
+              );
+            }).toList(),
+          ],
+        );
+      },
+    );
+
+    if (selectedId == removeChapter) {
+      ref.read(canvasProvider.notifier).assignPageToChapter(pageIndex, null);
+    } else if (selectedId != null) {
+      ref.read(canvasProvider.notifier).assignPageToChapter(pageIndex, selectedId);
+    }
   }
 
   void _showPageManager(CanvasState canvasState) {
@@ -1375,112 +2156,190 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) {
-        return DraggableScrollableSheet(
-          initialChildSize: 0.4,
-          maxChildSize: 0.7,
-          minChildSize: 0.25,
-          expand: false,
-          builder: (ctx, scrollController) {
-            return Column(
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  child: Row(
-                    children: [
-                      const Text('Pagine', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
-                      const Spacer(),
-                      IconButton(
-                        icon: const Icon(Icons.add_rounded, color: Colors.blue),
-                        onPressed: () {
-                          ref.read(canvasProvider.notifier).addPage();
-                          Navigator.pop(ctx);
-                        },
-                        tooltip: 'Aggiungi pagina',
-                      ),
-                      IconButton(
-                        icon: const Icon(Icons.close_rounded),
-                        onPressed: () => Navigator.pop(ctx),
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(height: 1),
-                Expanded(
-                  child: ReorderableListView.builder(
-                    scrollController: scrollController,
-                    itemCount: canvasState.pageCount,
-                    onReorder: (oldIndex, newIndex) {
-                      if (newIndex > oldIndex) newIndex--;
-                      ref.read(canvasProvider.notifier).reorderPage(oldIndex, newIndex);
-                    },
-                    itemBuilder: (ctx, index) {
-                      final isCurrentPage = index == canvasState.currentPageIndex;
-                      final entry = canvasState.document.pages[index];
-                      final page = canvasState.pages[entry.fileName];
-                      final elementCount = page?.layers.content.length ?? 0;
-
-                      return ListTile(
-                        key: ValueKey(entry.pageId),
-                        selected: isCurrentPage,
-                        selectedTileColor: const Color(0xFFE3F2FD),
-                        leading: Container(
-                          width: 36, height: 48,
-                          decoration: BoxDecoration(
-                            color: Colors.white,
-                            border: Border.all(
-                              color: isCurrentPage ? Colors.blue : Colors.grey.shade300,
-                              width: isCurrentPage ? 2 : 1,
-                            ),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          child: Center(
-                            child: Text(
-                              '${index + 1}',
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: isCurrentPage ? FontWeight.bold : FontWeight.normal,
-                                color: isCurrentPage ? Colors.blue : Colors.grey.shade600,
+        return Consumer(
+          builder: (context, ref, _) {
+            final liveState = ref.watch(canvasProvider) ?? canvasState;
+            return DraggableScrollableSheet(
+              initialChildSize: 0.4,
+              maxChildSize: 0.7,
+              minChildSize: 0.25,
+              expand: false,
+              builder: (ctx, scrollController) {
+                return Column(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Text('Pagine', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                              const Spacer(),
+                              IconButton(
+                                icon: const Icon(Icons.add_rounded, color: Colors.blue),
+                                onPressed: () {
+                                  ref.read(canvasProvider.notifier).addPage();
+                                  Navigator.pop(ctx);
+                                },
+                                tooltip: 'Aggiungi pagina',
                               ),
-                            ),
+                              IconButton(
+                                icon: const Icon(Icons.close_rounded),
+                                onPressed: () => Navigator.pop(ctx),
+                              ),
+                            ],
                           ),
-                        ),
-                        title: Text('Pagina ${index + 1}'),
-                        subtitle: Text('$elementCount elementi', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
-                        trailing: PopupMenuButton<String>(
-                          icon: const Icon(Icons.more_vert_rounded, size: 20),
-                          onSelected: (action) {
-                            switch (action) {
-                              case 'goto':
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              const Text('Capitoli', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                              const SizedBox(width: 12),
+                              TextButton.icon(
+                                onPressed: () async {
+                                  final title = await _promptForText(ctx, 'Nuovo capitolo', 'Nome capitolo');
+                                  if (title != null && title.trim().isNotEmpty) {
+                                    ref.read(canvasProvider.notifier).addChapter(title.trim());
+                                  }
+                                },
+                                icon: const Icon(Icons.add_rounded, size: 18),
+                                label: const Text('Aggiungi'),
+                              ),
+                            ],
+                          ),
+                          if (liveState.metadata.chapters.isNotEmpty)
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              children: liveState.metadata.chapters.map((chapter) {
+                                final isActive = liveState.activeChapterId == chapter.id;
+                                return InputChip(
+                                  label: Text(chapter.title),
+                                  selected: isActive,
+                                  deleteIcon: Icon(Icons.close, size: 18, color: Colors.grey.shade700),
+                                  onDeleted: () {
+                                    ref.read(canvasProvider.notifier).deleteChapter(chapter.id);
+                                  },
+                                  onPressed: () {
+                                    ref.read(canvasProvider.notifier).setActiveChapter(
+                                      isActive ? null : chapter.id,
+                                    );
+                                  },
+                                );
+                              }).toList(),
+                            )
+                          else
+                            const Text('Nessun capitolo. Aggiungi un capitolo per organizzare le pagine.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: Builder(builder: (ctx) {
+                        final visibleIndices = liveState.filteredPageIndices;
+                        return ReorderableListView.builder(
+                          scrollController: scrollController,
+                          itemCount: visibleIndices.length,
+                          onReorder: (oldPos, newPos) {
+                            if (newPos > oldPos) newPos--;
+                            final oldIndex = visibleIndices[oldPos];
+                            final newIndex = visibleIndices[newPos];
+                            ref.read(canvasProvider.notifier).reorderPage(oldIndex, newIndex);
+                          },
+                          itemBuilder: (ctx, visIdx) {
+                            final index = visibleIndices[visIdx];
+                            final isCurrentPage = index == liveState.currentPageIndex;
+                            final entry = liveState.document.pages[index];
+                            final page = liveState.pages[entry.fileName];
+                            final elementCount = page?.layers.content.length ?? 0;
+
+                            final chapterName = () {
+                              for (final c in liveState.metadata.chapters) {
+                                if (c.id == entry.chapterId) return c.title;
+                              }
+                              return null;
+                            }();
+
+                            return ListTile(
+                              key: ValueKey(entry.pageId),
+                              selected: isCurrentPage,
+                              selectedTileColor: const Color(0xFFE3F2FD),
+                              leading: Container(
+                                width: 36,
+                                height: 48,
+                                decoration: BoxDecoration(
+                                  color: Colors.white,
+                                  border: Border.all(
+                                    color: isCurrentPage ? Colors.blue : Colors.grey.shade300,
+                                    width: isCurrentPage ? 2 : 1,
+                                  ),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Center(
+                                  child: Text(
+                                    '${visIdx + 1}',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: isCurrentPage ? FontWeight.bold : FontWeight.normal,
+                                      color: isCurrentPage ? Colors.blue : Colors.grey.shade600,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                              title: Text('Pagina ${visIdx + 1}'),
+                              subtitle: Text(
+                                chapterName != null && liveState.activeChapterId == null
+                                    ? '$elementCount elementi • Capitolo: $chapterName'
+                                    : '$elementCount elementi',
+                                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                              ),
+                              trailing: PopupMenuButton<String>(
+                                icon: const Icon(Icons.more_vert_rounded, size: 20),
+                                onSelected: (action) {
+                                  switch (action) {
+                                    case 'goto':
+                                      ref.read(canvasProvider.notifier).goToPage(index);
+                                      Navigator.pop(ctx);
+                                      break;
+                                    case 'duplicate':
+                                      ref.read(canvasProvider.notifier).duplicatePage(index);
+                                      Navigator.pop(ctx);
+                                      break;
+                                    case 'delete':
+                                      if (liveState.pageCount > 1) {
+                                        ref.read(canvasProvider.notifier).deletePage(index);
+                                      }
+                                      break;
+                                    case 'assign':
+                                      _showChapterPicker(ctx, liveState, index);
+                                      break;
+                                    case 'clear':
+                                      ref.read(canvasProvider.notifier).assignPageToChapter(index, null);
+                                      break;
+                                  }
+                                },
+                                itemBuilder: (_) => [
+                                  const PopupMenuItem(value: 'goto', child: Text('Vai a pagina')),
+                                  const PopupMenuItem(value: 'duplicate', child: Text('Duplica')),
+                                  const PopupMenuItem(value: 'assign', child: Text('Assegna capitolo')),
+                                  if (chapterName != null)
+                                    const PopupMenuItem(value: 'clear', child: Text('Rimuovi capitolo')),
+                                  if (liveState.pageCount > 1)
+                                    const PopupMenuItem(value: 'delete', child: Text('Elimina', style: TextStyle(color: Colors.red))),
+                                ],
+                              ),
+                              onTap: () {
                                 ref.read(canvasProvider.notifier).goToPage(index);
                                 Navigator.pop(ctx);
-                                break;
-                              case 'duplicate':
-                                ref.read(canvasProvider.notifier).duplicatePage(index);
-                                Navigator.pop(ctx);
-                                break;
-                              case 'delete':
-                                if (canvasState.pageCount > 1) {
-                                  ref.read(canvasProvider.notifier).deletePage(index);
-                                }
-                                break;
-                            }
+                              },
+                            );
                           },
-                          itemBuilder: (_) => [
-                            const PopupMenuItem(value: 'goto', child: Text('Vai a pagina')),
-                            const PopupMenuItem(value: 'duplicate', child: Text('Duplica')),
-                            if (canvasState.pageCount > 1)
-                              const PopupMenuItem(value: 'delete', child: Text('Elimina', style: TextStyle(color: Colors.red))),
-                          ],
-                        ),
-                        onTap: () {
-                          ref.read(canvasProvider.notifier).goToPage(index);
-                          Navigator.pop(ctx);
-                        },
-                      );
-                    },
-                  ),
-                ),
-              ],
+                        );
+                      }),
+                    ),
+                  ],
+                );
+              },
             );
           },
         );
@@ -1555,7 +2414,21 @@ class _ActiveStrokeNotifier extends ChangeNotifier {
   }
 
   void addPoint(Offset pos, double pressure) {
-    _points.add(StrokePoint(x: pos.dx, y: pos.dy, pressure: pressure,
+    // Lightweight real-time smoothing: weighted average with last 2 points
+    double sx = pos.dx, sy = pos.dy, sp = pressure;
+    if (_points.length >= 2) {
+      final p1 = _points[_points.length - 1];
+      final p0 = _points[_points.length - 2];
+      sx = (p0.x + p1.x * 2 + pos.dx * 4) / 7;
+      sy = (p0.y + p1.y * 2 + pos.dy * 4) / 7;
+      sp = (p0.pressure + p1.pressure * 2 + pressure * 4) / 7;
+    } else if (_points.length == 1) {
+      final p1 = _points.last;
+      sx = (p1.x + pos.dx * 2) / 3;
+      sy = (p1.y + pos.dy * 2) / 3;
+      sp = (p1.pressure + pressure * 2) / 3;
+    }
+    _points.add(StrokePoint(x: sx, y: sy, pressure: sp,
         timestamp: DateTime.now().millisecondsSinceEpoch));
     notifyListeners();
   }
@@ -1570,4 +2443,223 @@ class _ActiveStrokeNotifier extends ChangeNotifier {
     _active = false;
     notifyListeners();
   }
+}
+
+/// Local lasso path tracker — zero Riverpod rebuilds during drawing.
+/// At pointer-up the collected path is committed to the provider in one shot.
+class _LassoPathNotifier extends ChangeNotifier {
+  final List<Offset> _points = [];
+  bool _active = false;
+
+  List<Offset> get points => _points;
+  bool get isActive => _active;
+
+  void start(Offset pos) {
+    _points.clear();
+    _active = true;
+    _points.add(pos);
+    notifyListeners();
+  }
+
+  void addPoint(Offset pos) {
+    _points.add(pos);
+    notifyListeners();
+  }
+
+  void clear() {
+    _points.clear();
+    _active = false;
+    notifyListeners();
+  }
+}
+
+/// Image crop dialog with draggable crop rectangle.
+class _CropDialog extends StatefulWidget {
+  final ui.Image image;
+  final ImageData imageData;
+  final ValueChanged<Rect> onCrop;
+
+  const _CropDialog({required this.image, required this.imageData, required this.onCrop});
+
+  @override
+  State<_CropDialog> createState() => _CropDialogState();
+}
+
+class _CropDialogState extends State<_CropDialog> {
+  // Crop rect in normalized 0..1 coords
+  double _left = 0, _top = 0, _right = 1, _bottom = 1;
+  static const _minCrop = 0.05;
+
+  @override
+  Widget build(BuildContext context) {
+    final imgW = widget.image.width.toDouble();
+    final imgH = widget.image.height.toDouble();
+    // Fit image in dialog (max 500x500)
+    const maxSize = 500.0;
+    final scale = min(maxSize / imgW, maxSize / imgH);
+    final displayW = imgW * scale;
+    final displayH = imgH * scale;
+
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      child: Container(
+        width: displayW + 48,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Ritaglia immagine', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: displayW,
+              height: displayH,
+              child: GestureDetector(
+                onPanUpdate: (d) {
+                  setState(() {
+                    final dx = d.delta.dx / displayW;
+                    final dy = d.delta.dy / displayH;
+                    _left = (_left + dx).clamp(0.0, _right - _minCrop);
+                    _top = (_top + dy).clamp(0.0, _bottom - _minCrop);
+                    _right = (_right + dx).clamp(_left + _minCrop, 1.0);
+                    _bottom = (_bottom + dy).clamp(_top + _minCrop, 1.0);
+                  });
+                },
+                child: CustomPaint(
+                  painter: _CropPainter(
+                    image: widget.image,
+                    cropLeft: _left,
+                    cropTop: _top,
+                    cropRight: _right,
+                    cropBottom: _bottom,
+                  ),
+                  size: Size(displayW, displayH),
+                  child: Stack(
+                    children: [
+                      _cropHandle(displayW, displayH, 'tl'),
+                      _cropHandle(displayW, displayH, 'tr'),
+                      _cropHandle(displayW, displayH, 'bl'),
+                      _cropHandle(displayW, displayH, 'br'),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text('Annulla'),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton(
+                  onPressed: () {
+                    widget.onCrop(Rect.fromLTRB(_left, _top, _right, _bottom));
+                    Navigator.pop(context);
+                  },
+                  child: const Text('Ritaglia'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _cropHandle(double displayW, double displayH, String corner) {
+    double left, top;
+    switch (corner) {
+      case 'tl': left = _left * displayW - 8; top = _top * displayH - 8;
+      case 'tr': left = _right * displayW - 8; top = _top * displayH - 8;
+      case 'bl': left = _left * displayW - 8; top = _bottom * displayH - 8;
+      case 'br': left = _right * displayW - 8; top = _bottom * displayH - 8;
+      default: return const SizedBox.shrink();
+    }
+
+    return Positioned(
+      left: left,
+      top: top,
+      child: GestureDetector(
+        onPanUpdate: (d) {
+          setState(() {
+            final dx = d.delta.dx / displayW;
+            final dy = d.delta.dy / displayH;
+            switch (corner) {
+              case 'tl':
+                _left = (_left + dx).clamp(0.0, _right - _minCrop);
+                _top = (_top + dy).clamp(0.0, _bottom - _minCrop);
+              case 'tr':
+                _right = (_right + dx).clamp(_left + _minCrop, 1.0);
+                _top = (_top + dy).clamp(0.0, _bottom - _minCrop);
+              case 'bl':
+                _left = (_left + dx).clamp(0.0, _right - _minCrop);
+                _bottom = (_bottom + dy).clamp(_top + _minCrop, 1.0);
+              case 'br':
+                _right = (_right + dx).clamp(_left + _minCrop, 1.0);
+                _bottom = (_bottom + dy).clamp(_top + _minCrop, 1.0);
+            }
+          });
+        },
+        child: Container(
+          width: 16,
+          height: 16,
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border.all(color: Colors.blue, width: 2),
+            borderRadius: BorderRadius.circular(2),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CropPainter extends CustomPainter {
+  final ui.Image image;
+  final double cropLeft, cropTop, cropRight, cropBottom;
+
+  _CropPainter({
+    required this.image,
+    required this.cropLeft,
+    required this.cropTop,
+    required this.cropRight,
+    required this.cropBottom,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final srcRect = Rect.fromLTWH(0, 0, image.width.toDouble(), image.height.toDouble());
+    final dstRect = Rect.fromLTWH(0, 0, size.width, size.height);
+    canvas.drawImageRect(image, srcRect, dstRect, Paint()..filterQuality = FilterQuality.low);
+
+    // Dim outside crop area
+    final dimPaint = Paint()..color = Colors.black.withValues(alpha: 0.5);
+    final cropRect = Rect.fromLTRB(
+      cropLeft * size.width,
+      cropTop * size.height,
+      cropRight * size.width,
+      cropBottom * size.height,
+    );
+    canvas.drawRect(Rect.fromLTRB(0, 0, size.width, cropRect.top), dimPaint);
+    canvas.drawRect(Rect.fromLTRB(0, cropRect.bottom, size.width, size.height), dimPaint);
+    canvas.drawRect(Rect.fromLTRB(0, cropRect.top, cropRect.left, cropRect.bottom), dimPaint);
+    canvas.drawRect(Rect.fromLTRB(cropRect.right, cropRect.top, size.width, cropRect.bottom), dimPaint);
+
+    final borderPaint = Paint()
+      ..color = Colors.blue
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawRect(cropRect, borderPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _CropPainter old) =>
+      cropLeft != old.cropLeft || cropTop != old.cropTop ||
+      cropRight != old.cropRight || cropBottom != old.cropBottom;
 }

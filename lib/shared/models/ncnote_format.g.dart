@@ -6,6 +6,23 @@ part of 'ncnote_format.dart';
 // JsonSerializableGenerator
 // **************************************************************************
 
+_$ChapterImpl _$$ChapterImplFromJson(Map<String, dynamic> json) =>
+    _$ChapterImpl(
+      id: json['id'] as String,
+      title: json['title'] as String,
+      pageIds: (json['pageIds'] as List<dynamic>?)
+              ?.map((e) => e as String)
+              .toList() ??
+          const [],
+    );
+
+Map<String, dynamic> _$$ChapterImplToJson(_$ChapterImpl instance) =>
+    <String, dynamic>{
+      'id': instance.id,
+      'title': instance.title,
+      'pageIds': instance.pageIds,
+    };
+
 _$NotebookMetadataImpl _$$NotebookMetadataImplFromJson(
         Map<String, dynamic> json) =>
     _$NotebookMetadataImpl(
@@ -22,6 +39,10 @@ _$NotebookMetadataImpl _$$NotebookMetadataImplFromJson(
       tags:
           (json['tags'] as List<dynamic>?)?.map((e) => e as String).toList() ??
               const [],
+      chapters: (json['chapters'] as List<dynamic>?)
+              ?.map((e) => Chapter.fromJson(e as Map<String, dynamic>))
+              .toList() ??
+          const [],
       author: json['author'] as String?,
       description: json['description'] as String?,
     );
@@ -40,6 +61,7 @@ Map<String, dynamic> _$$NotebookMetadataImplToJson(
       'paperColor': instance.paperColor,
       'pageCount': instance.pageCount,
       'tags': instance.tags,
+      'chapters': instance.chapters,
       'author': instance.author,
       'description': instance.description,
     };
@@ -70,6 +92,7 @@ _$PageEntryImpl _$$PageEntryImplFromJson(Map<String, dynamic> json) =>
       width: (json['width'] as num?)?.toDouble() ?? 595.0,
       height: (json['height'] as num?)?.toDouble() ?? 842.0,
       thumbnailFile: json['thumbnailFile'] as String?,
+      chapterId: json['chapterId'] as String?,
       lastModified: json['lastModified'] == null
           ? null
           : DateTime.parse(json['lastModified'] as String),
@@ -83,6 +106,7 @@ Map<String, dynamic> _$$PageEntryImplToJson(_$PageEntryImpl instance) =>
       'width': instance.width,
       'height': instance.height,
       'thumbnailFile': instance.thumbnailFile,
+      'chapterId': instance.chapterId,
       'lastModified': instance.lastModified?.toIso8601String(),
     };
 
@@ -306,6 +330,8 @@ _$ImageDataImpl _$$ImageDataImplFromJson(Map<String, dynamic> json) =>
       assetPath: json['assetPath'] as String,
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0.0,
       opacity: (json['opacity'] as num?)?.toDouble() ?? 1.0,
+      locked: json['locked'] as bool? ?? false,
+      comment: json['comment'] as String?,
     );
 
 Map<String, dynamic> _$$ImageDataImplToJson(_$ImageDataImpl instance) =>
@@ -317,6 +343,8 @@ Map<String, dynamic> _$$ImageDataImplToJson(_$ImageDataImpl instance) =>
       'assetPath': instance.assetPath,
       'rotation': instance.rotation,
       'opacity': instance.opacity,
+      'locked': instance.locked,
+      'comment': instance.comment,
     };
 
 _$ShapeDataImpl _$$ShapeDataImplFromJson(Map<String, dynamic> json) =>

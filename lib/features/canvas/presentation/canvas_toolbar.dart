@@ -79,12 +79,11 @@ class CanvasToolbar extends StatelessWidget {
               _Sep(),
 
               // ── Drawing tools ──
-              _ToolIcon(Icons.edit_rounded, CanvasTool.pen, 'Penna',
-                  currentTool, onToolChanged, onToggleOptions),
-              _ToolIcon(Icons.create_rounded, CanvasTool.ballpoint, 'Sfera',
-                  currentTool, onToolChanged, onToggleOptions),
-              _ToolIcon(Icons.brush_rounded, CanvasTool.brush, 'Pennello',
-                  currentTool, onToolChanged, onToggleOptions),
+              _PenToolIcon(
+                currentTool: currentTool,
+                onToolChanged: onToolChanged,
+                onToggleOptions: onToggleOptions,
+              ),
               _ToolIcon(Icons.border_color_rounded, CanvasTool.highlighter, 'Evidenziatore',
                   currentTool, onToolChanged, onToggleOptions),
               _Sep(),
@@ -130,8 +129,8 @@ class CanvasToolbar extends StatelessWidget {
               // Paper type
               _TbBtn(Icons.grid_on_rounded, onTap: () => _showPaperPicker(context), tip: 'Sfondo'),
 
-              // Shape recognition toggle (only for pen/ballpoint)
-              if (currentTool == CanvasTool.pen || currentTool == CanvasTool.ballpoint)
+              // Shape recognition toggle (only for pen/brush)
+              if (currentTool == CanvasTool.pen || currentTool == CanvasTool.brush)
                 _ToggleIcon(
                   icon: Icons.auto_fix_high_rounded,
                   active: toolSettings.shapeRecognition,
@@ -272,6 +271,23 @@ class CanvasToolbar extends StatelessWidget {
   Widget _penOptions() {
     return Row(
       children: [
+        // ── Pen / Brush sub-toggle ──
+        _MiniChip(
+          icon: Icons.edit_rounded,
+          label: 'Penna',
+          active: currentTool == CanvasTool.pen,
+          onTap: () => onToolChanged(CanvasTool.pen),
+        ),
+        const SizedBox(width: 4),
+        _MiniChip(
+          icon: Icons.brush_rounded,
+          label: 'Pennello',
+          active: currentTool == CanvasTool.brush,
+          onTap: () => onToolChanged(CanvasTool.brush),
+        ),
+        const SizedBox(width: 10),
+        Container(width: 1, height: 28, color: Colors.grey.shade300),
+        const SizedBox(width: 10),
         const Text('Spessore:', style: TextStyle(fontSize: 12, color: Colors.grey)),
         const SizedBox(width: 8),
         ...[0.5, 1.0, 2.0, 4.0, 8.0, 12.0].map((w) => Padding(
@@ -357,6 +373,7 @@ class CanvasToolbar extends StatelessWidget {
       ('triangle', Icons.change_history, 'Triangolo'),
       ('line', Icons.remove, 'Linea'),
       ('arrow', Icons.arrow_forward, 'Freccia'),
+      ('xy_plane', Icons.grid_3x3_rounded, 'Piano XY'),
     ];
     return Row(
       children: shapes.map((s) => Padding(
@@ -468,6 +485,82 @@ class _TbBtn extends StatelessWidget {
         child: SizedBox(
           width: 34, height: 34,
           child: Icon(icon, size: 19, color: onTap != null ? Colors.grey.shade800 : Colors.grey.shade400),
+        ),
+      ),
+    );
+  }
+}
+
+class _PenToolIcon extends StatelessWidget {
+  final CanvasTool currentTool;
+  final ValueChanged<CanvasTool> onToolChanged;
+  final VoidCallback onToggleOptions;
+  const _PenToolIcon({
+    required this.currentTool,
+    required this.onToolChanged,
+    required this.onToggleOptions,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final active = currentTool == CanvasTool.pen || currentTool == CanvasTool.brush;
+    return Tooltip(
+      message: 'Penna / Pennello',
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: () => active ? onToggleOptions() : onToolChanged(CanvasTool.pen),
+        child: Container(
+          width: 34, height: 34,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            color: active ? const Color(0xFFE3F2FD) : Colors.transparent,
+          ),
+          child: Stack(
+            children: [
+              Center(child: Icon(
+                currentTool == CanvasTool.brush ? Icons.brush_rounded : Icons.edit_rounded,
+                size: 19,
+                color: active ? Colors.blue : Colors.grey.shade700,
+              )),
+              if (active)
+                Positioned(
+                  right: 2, bottom: 2,
+                  child: Icon(Icons.expand_more_rounded, size: 10, color: Colors.blue),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniChip extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+  const _MiniChip({required this.icon, required this.label, required this.active, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: label,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          height: 30,
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(6),
+            color: active ? const Color(0xFFE3F2FD) : Colors.transparent,
+            border: Border.all(color: active ? Colors.blue : Colors.grey.shade300),
+          ),
+          child: Row(mainAxisSize: MainAxisSize.min, children: [
+            Icon(icon, size: 15, color: active ? Colors.blue : Colors.grey.shade600),
+            const SizedBox(width: 4),
+            Text(label, style: TextStyle(fontSize: 11, color: active ? Colors.blue : Colors.grey.shade600)),
+          ]),
         ),
       ),
     );

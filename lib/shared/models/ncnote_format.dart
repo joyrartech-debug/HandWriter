@@ -8,6 +8,17 @@ part 'ncnote_format.g.dart';
 // ═══════════════════════════════════════════════════════════════
 
 @freezed
+class Chapter with _$Chapter {
+  const factory Chapter({
+    required String id,
+    required String title,
+    @Default([]) List<String> pageIds,
+  }) = _Chapter;
+
+  factory Chapter.fromJson(Map<String, dynamic> json) => _$ChapterFromJson(json);
+}
+
+@freezed
 class NotebookMetadata with _$NotebookMetadata {
   const factory NotebookMetadata({
     required String id,
@@ -21,6 +32,7 @@ class NotebookMetadata with _$NotebookMetadata {
     @Default(0xFFFFFFFF) int paperColor,
     @Default(0) int pageCount,
     @Default([]) List<String> tags,
+    @Default([]) List<Chapter> chapters,
     String? author,
     String? description,
   }) = _NotebookMetadata;
@@ -54,6 +66,7 @@ class PageEntry with _$PageEntry {
     @Default(595.0) double width,
     @Default(842.0) double height,
     String? thumbnailFile,
+    String? chapterId,
     DateTime? lastModified,
   }) = _PageEntry;
 
@@ -208,6 +221,8 @@ class ImageData with _$ImageData {
     required String assetPath, // path relativo in assets/images/
     @Default(0.0) double rotation, // radianti
     @Default(1.0) double opacity,
+    @Default(false) bool locked,
+    String? comment,
   }) = _ImageData;
 
   factory ImageData.fromJson(Map<String, dynamic> json) =>

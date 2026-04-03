@@ -30,9 +30,9 @@ enum EraserSize { small, medium, large }
 
 double eraserSizeToRadius(EraserSize size) {
   switch (size) {
-    case EraserSize.small: return 8.0;
-    case EraserSize.medium: return 20.0;
-    case EraserSize.large: return 40.0;
+    case EraserSize.small: return 4.0;
+    case EraserSize.medium: return 8.0;
+    case EraserSize.large: return 20.0;
   }
 }
 
@@ -126,21 +126,25 @@ class LassoSelection {
   final List<String> selectedIds;
   final Rect bounds;
   final Offset dragOffset;
+  final double rotation;
 
   const LassoSelection({
     required this.selectedIds,
     required this.bounds,
     this.dragOffset = Offset.zero,
+    this.rotation = 0.0,
   });
 
   LassoSelection copyWith({
     List<String>? selectedIds,
     Rect? bounds,
     Offset? dragOffset,
+    double? rotation,
   }) => LassoSelection(
     selectedIds: selectedIds ?? this.selectedIds,
     bounds: bounds ?? this.bounds,
     dragOffset: dragOffset ?? this.dragOffset,
+    rotation: rotation ?? this.rotation,
   );
 }
 
@@ -167,6 +171,52 @@ class ReusableSymbol {
     required this.bounds,
     required this.createdAt,
   });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'elements': elements.map((e) => e.toJson()).toList(),
+    'bounds': {'left': bounds.left, 'top': bounds.top, 'right': bounds.right, 'bottom': bounds.bottom},
+    'createdAt': createdAt.toIso8601String(),
+  };
+
+  factory ReusableSymbol.fromJson(Map<String, dynamic> json) => ReusableSymbol(
+    id: json['id'] as String,
+    name: json['name'] as String,
+    elements: (json['elements'] as List).map((e) => ContentElement.fromJson(e as Map<String, dynamic>)).toList(),
+    bounds: Rect.fromLTRB(
+      (json['bounds']['left'] as num).toDouble(),
+      (json['bounds']['top'] as num).toDouble(),
+      (json['bounds']['right'] as num).toDouble(),
+      (json['bounds']['bottom'] as num).toDouble(),
+    ),
+    createdAt: DateTime.parse(json['createdAt'] as String),
+  );
+}
+
+class SymbolLibrary {
+  final String id;
+  final String name;
+  final List<ReusableSymbol> symbols;
+  const SymbolLibrary({
+    required this.id,
+    required this.name,
+    this.symbols = const [],
+  });
+  SymbolLibrary copyWith({String? name, List<ReusableSymbol>? symbols}) =>
+      SymbolLibrary(id: id, name: name ?? this.name, symbols: symbols ?? this.symbols);
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'symbols': symbols.map((s) => s.toJson()).toList(),
+  };
+
+  factory SymbolLibrary.fromJson(Map<String, dynamic> json) => SymbolLibrary(
+    id: json['id'] as String,
+    name: json['name'] as String,
+    symbols: (json['symbols'] as List?)?.map((s) => ReusableSymbol.fromJson(s as Map<String, dynamic>)).toList() ?? [],
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -195,11 +245,32 @@ class CanvasState {
   final bool showToolOptions;
   final String? selectedElementId;
   final Map<String, ui.Image> imageCache;
+  final Map<String, Uint8List> assetBytes;
   final CanvasClipboard? clipboard;
-  final List<ReusableSymbol> symbols;
+  final List<SymbolLibrary> symbolLibraries;
+  // Legacy flat symbols list — computed for backward compatibility
+  List<ReusableSymbol> get symbols => symbolLibraries.expand((l) => l.symbols).toList();
   // Interactive shape recognition: holds recognized shape while user adjusts
   final ShapeData? recognizedShape;
   final bool isAdjustingRecognized;
+  final ReusableSymbol? pendingSymbol;
+  final String? activeChapterId;
+
+  /// Indices of pages visible under the active chapter filter (or all if null).
+  List<int> get filteredPageIndices {
+    if (activeChapterId == null) {
+      return List.generate(document.pages.length, (i) => i);
+    }
+    return [
+      for (int i = 0; i < document.pages.length; i++)
+        if (document.pages[i].chapterId == activeChapterId) i,
+    ];
+  }
+
+  int get filteredPageCount => filteredPageIndices.length;
+
+  /// Position of currentPageIndex within the filtered list (-1 if not found).
+  int get currentFilteredIndex => filteredPageIndices.indexOf(currentPageIndex);
 
   const CanvasState({
     required this.metadata,
@@ -223,10 +294,13 @@ class CanvasState {
     this.showToolOptions = false,
     this.selectedElementId,
     this.imageCache = const {},
+    this.assetBytes = const {},
     this.clipboard,
-    this.symbols = const [],
+    this.symbolLibraries = const [],
     this.recognizedShape,
     this.isAdjustingRecognized = false,
+    this.pendingSymbol,
+    this.activeChapterId,
   });
 
   PageData? get currentPage {
@@ -271,12 +345,17 @@ class CanvasState {
     String? selectedElementId,
     bool clearSelectedElement = false,
     Map<String, ui.Image>? imageCache,
+    Map<String, Uint8List>? assetBytes,
     CanvasClipboard? clipboard,
     bool clearClipboard = false,
-    List<ReusableSymbol>? symbols,
+    List<SymbolLibrary>? symbolLibraries,
     ShapeData? recognizedShape,
     bool clearRecognizedShape = false,
     bool? isAdjustingRecognized,
+    ReusableSymbol? pendingSymbol,
+    bool clearPendingSymbol = false,
+    String? activeChapterId,
+    bool clearActiveChapter = false,
   }) =>
       CanvasState(
         metadata: metadata ?? this.metadata,
@@ -300,10 +379,13 @@ class CanvasState {
         showToolOptions: showToolOptions ?? this.showToolOptions,
         selectedElementId: clearSelectedElement ? null : (selectedElementId ?? this.selectedElementId),
         imageCache: imageCache ?? this.imageCache,
+        assetBytes: assetBytes ?? this.assetBytes,
         clipboard: clearClipboard ? null : (clipboard ?? this.clipboard),
-        symbols: symbols ?? this.symbols,
+        symbolLibraries: symbolLibraries ?? this.symbolLibraries,
         recognizedShape: clearRecognizedShape ? null : (recognizedShape ?? this.recognizedShape),
         isAdjustingRecognized: isAdjustingRecognized ?? this.isAdjustingRecognized,
+        pendingSymbol: clearPendingSymbol ? null : (pendingSymbol ?? this.pendingSymbol),
+        activeChapterId: clearActiveChapter ? null : (activeChapterId ?? this.activeChapterId),
       );
 }
 
@@ -334,13 +416,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     required DocumentStructure document,
     required Map<String, PageData> pages,
     required String remotePath,
+    Map<String, Uint8List>? assets,
+    List<SymbolLibrary>? symbolLibraries,
   }) {
     state = CanvasState(
       metadata: metadata,
       document: document,
       pages: Map.of(pages),
       remotePath: remotePath,
+      assetBytes: assets != null ? Map.of(assets) : const {},
+      symbolLibraries: symbolLibraries ?? const [],
     );
+    // Decode all asset images into the render cache
+    if (assets != null) {
+      for (final entry in assets.entries) {
+        _decodeAndCacheImage(entry.key, entry.value);
+      }
+    }
   }
 
   void closeNotebook() => state = null;
@@ -640,15 +732,36 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(recognizedShape: updated);
   }
 
-  /// Translate the recognized shape by a delta (used during hold-to-recognize drag).
-  void moveRecognizedShape(Offset delta) {
+  /// For line shapes: keep x1,y1 fixed and move x2,y2 to [position].
+  /// This lets the user adjust angle and length after hold-to-recognize.
+  void setRecognizedLineEndpoint(Offset position) {
     if (state == null || state!.recognizedShape == null) return;
     final s = state!.recognizedShape!;
     state = state!.copyWith(
       recognizedShape: ShapeData(
         shapeType: s.shapeType,
-        x1: s.x1 + delta.dx, y1: s.y1 + delta.dy,
-        x2: s.x2 + delta.dx, y2: s.y2 + delta.dy,
+        x1: s.x1, y1: s.y1,
+        x2: position.dx, y2: position.dy,
+        strokeColor: s.strokeColor,
+        strokeWidth: s.strokeWidth,
+        fillColor: s.fillColor,
+        rotation: s.rotation,
+      ),
+    );
+  }
+
+  /// Fix top-left corner (x1,y1), resize by dragging bottom-right to [position].
+  void resizeRecognizedShape(Offset position) {
+    if (state == null || state!.recognizedShape == null) return;
+    final s = state!.recognizedShape!;
+    // Ensure x2 > x1 and y2 > y1 so the rect/circle is always valid
+    final x2 = position.dx > s.x1 + 5 ? position.dx : s.x1 + 5;
+    final y2 = position.dy > s.y1 + 5 ? position.dy : s.y1 + 5;
+    state = state!.copyWith(
+      recognizedShape: ShapeData(
+        shapeType: s.shapeType,
+        x1: s.x1, y1: s.y1,
+        x2: x2, y2: y2,
         strokeColor: s.strokeColor,
         strokeWidth: s.strokeWidth,
         fillColor: s.fillColor,
@@ -688,11 +801,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       default: toolType = 'pen';
     }
 
+    // Smooth the raw input points to reduce jitter/wigglyness
+    final smoothedPoints = _smoothStrokePoints(s.activeStroke);
+
     final newElement = ContentElement.stroke(
       id: const Uuid().v4(),
       zIndex: page.layers.content.length,
       data: StrokeData(
-        points: s.activeStroke,
+        points: smoothedPoints,
         toolType: toolType,
         color: s.toolSettings.color,
         baseWidth: s.toolSettings.strokeWidth,
@@ -713,6 +829,47 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       redoStack: [],
       isDirty: true,
     );
+  }
+
+  /// Smooth raw input points using a weighted moving average + point decimation.
+  /// Keeps first and last points exact for stroke endpoint accuracy.
+  List<StrokePoint> _smoothStrokePoints(List<StrokePoint> raw) {
+    if (raw.length < 5) return raw;
+
+    // Pass 1: moving average smoothing (3 passes for cleaner curves)
+    var points = List<StrokePoint>.from(raw);
+    for (int pass = 0; pass < 3; pass++) {
+      final smoothed = List<StrokePoint>.from(points);
+      for (int i = 2; i < points.length - 2; i++) {
+        final p0 = points[i - 2];
+        final p1 = points[i - 1];
+        final p2 = points[i];
+        final p3 = points[i + 1];
+        final p4 = points[i + 2];
+        smoothed[i] = StrokePoint(
+          x: (p0.x + p1.x * 2 + p2.x * 4 + p3.x * 2 + p4.x) / 10,
+          y: (p0.y + p1.y * 2 + p2.y * 4 + p3.y * 2 + p4.y) / 10,
+          pressure: (p0.pressure + p1.pressure * 2 + p2.pressure * 4 + p3.pressure * 2 + p4.pressure) / 10,
+          timestamp: p2.timestamp,
+        );
+      }
+      points = smoothed;
+    }
+
+    // Pass 2: decimate points that are too close together (reduce density)
+    final decimated = <StrokePoint>[points.first];
+    const minDistSq = 1.5 * 1.5; // minimum 1.5px apart
+    for (int i = 1; i < points.length - 1; i++) {
+      final last = decimated.last;
+      final dx = points[i].x - last.x;
+      final dy = points[i].y - last.y;
+      if (dx * dx + dy * dy >= minDistSq) {
+        decimated.add(points[i]);
+      }
+    }
+    decimated.add(points.last); // always keep last point
+
+    return decimated;
   }
 
   // ── Shape recognition (improved) ──
@@ -764,6 +921,37 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           // Compute average pressure to match the visual pen width
           final avgPressure = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
           final visualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressure * 0.85);
+
+          // ── ARROW DETECTION ──
+          // An arrow is a line where the LAST segment "backtracks" to form a V-tip.
+          if (lineLen > 30) {
+            final tailCount = max(3, (points.length * 0.2).ceil());
+            if (tailCount < points.length - 1) {
+              final tailStart = points[points.length - tailCount - 1];
+              // Direction of main body vs tail
+              final bodyDx = tailStart.x - points.first.x;
+              final bodyDy = tailStart.y - points.first.y;
+              final tailDx = points.last.x - tailStart.x;
+              final tailDy = points.last.y - tailStart.y;
+              final bodyLen = sqrt(bodyDx * bodyDx + bodyDy * bodyDy);
+              final tailLen = sqrt(tailDx * tailDx + tailDy * tailDy);
+              if (bodyLen > 0 && tailLen > 0) {
+                final dot = (bodyDx / bodyLen) * (tailDx / tailLen) + (bodyDy / bodyLen) * (tailDy / tailLen);
+                // dot < -0.3 means the tail goes backward (arrowhead stroke)
+                if (dot < -0.3 && tailLen > lineLen * 0.08 && tailLen < lineLen * 0.5) {
+                  return ShapeData(
+                    shapeType: 'arrow',
+                    x1: points.first.x, y1: points.first.y,
+                    x2: tailStart.x, y2: tailStart.y,
+                    strokeColor: state!.toolSettings.color,
+                    strokeWidth: visualWidth,
+                  );
+                }
+              }
+            }
+          }
+
+          // Regular straight line
           return ShapeData(
             shapeType: 'line',
             x1: points.first.x, y1: points.first.y,
@@ -1005,9 +1193,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
             if (rect.contains(position)) shouldRemoveWhole = true;
           },
-          image: (i) {
-            final rect = Rect.fromLTWH(i.data.x, i.data.y, i.data.width, i.data.height);
-            if (rect.contains(position)) shouldRemoveWhole = true;
+          image: (_) {
+            // Never erase images (PDFs, symbols) with the eraser
           },
           shape: (sh) {
             final rect = Rect.fromPoints(
@@ -1080,9 +1267,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
             if (rect.contains(position)) { changed = true; } else { newContent.add(element); }
           },
-          image: (i) {
-            final rect = Rect.fromLTWH(i.data.x, i.data.y, i.data.width, i.data.height);
-            if (rect.contains(position)) { changed = true; } else { newContent.add(element); }
+          image: (_) {
+            // Never erase images (PDFs, symbols) with the eraser
+            newContent.add(element);
           },
           shape: (sh) {
             final rect = Rect.fromPoints(Offset(sh.data.x1, sh.data.y1), Offset(sh.data.x2, sh.data.y2));
@@ -1129,6 +1316,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       state = state!.copyWith(clearLasso: true, lassoPath: []);
     }
     state = state!.copyWith(lassoPath: [position]);
+  }
+
+  void clearLassoPath() {
+    if (state == null) return;
+    state = state!.copyWith(clearLasso: true, lassoPath: []);
+  }
+
+  /// Accept a locally-collected lasso path (from _LassoPathNotifier in the UI)
+  /// and run selection — bypasses per-point Riverpod updates entirely.
+  void commitLassoPath(List<Offset> path) {
+    if (state == null) return;
+    final s = state!;
+    if (path.length < 3) {
+      state = s.copyWith(lassoPath: [], clearLasso: true);
+      return;
+    }
+    // Reuse _endLasso logic by temporarily setting the path
+    state = s.copyWith(lassoPath: path);
+    _endLasso();
   }
 
   void _continueLasso(Offset position) {
@@ -1333,6 +1539,118 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  void rotateSelection(double angle) {
+    if (state == null || state!.lassoSelection == null) return;
+    state = state!.copyWith(
+      lassoSelection: state!.lassoSelection!.copyWith(
+        rotation: state!.lassoSelection!.rotation + angle,
+      ),
+    );
+  }
+
+  void applySelectionRotation() {
+    if (state == null || state!.lassoSelection == null) return;
+    final s = state!;
+    final sel = s.lassoSelection!;
+    if (sel.rotation == 0.0) return;
+
+    final page = s.currentPage;
+    if (page == null) return;
+    final fileName = s.currentPageFileName;
+    final undoStack = _pushUndo(s, fileName, page);
+    final center = sel.bounds.center + sel.dragOffset;
+
+    final updatedContent = page.layers.content.map((element) {
+      final id = element.map(
+        stroke: (e) => e.id, text: (e) => e.id,
+        image: (e) => e.id, shape: (e) => e.id,
+      );
+      if (!sel.selectedIds.contains(id)) return element;
+      return _rotateElementAroundCenter(element, center, sel.rotation);
+    }).toList();
+
+    final updatedPage = PageData(
+      pageId: page.pageId, pageNumber: page.pageNumber,
+      width: page.width, height: page.height,
+      layers: RenderingLayers(background: page.layers.background, content: updatedContent),
+      assetReferences: page.assetReferences,
+      createdAt: page.createdAt, modifiedAt: DateTime.now(),
+    );
+
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[fileName] = updatedPage;
+
+    state = s.copyWith(
+      pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true,
+      lassoSelection: LassoSelection(selectedIds: sel.selectedIds, bounds: sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy)),
+    );
+  }
+
+  ContentElement _rotateElementAroundCenter(ContentElement element, Offset center, double angle) {
+    Offset rotatePoint(double x, double y) {
+      final cosA = cos(angle);
+      final sinA = sin(angle);
+      final dx = x - center.dx;
+      final dy = y - center.dy;
+      return Offset(center.dx + dx * cosA - dy * sinA, center.dy + dx * sinA + dy * cosA);
+    }
+
+    return element.map(
+      stroke: (e) => ContentElement.stroke(
+        id: e.id, zIndex: e.zIndex,
+        data: StrokeData(
+          points: e.data.points.map((p) {
+            final rp = rotatePoint(p.x, p.y);
+            return StrokePoint(x: rp.dx, y: rp.dy, pressure: p.pressure, tilt: p.tilt, timestamp: p.timestamp);
+          }).toList(),
+          toolType: e.data.toolType, color: e.data.color,
+          baseWidth: e.data.baseWidth, isHighlighter: e.data.isHighlighter,
+          opacity: e.data.opacity, timestamp: e.data.timestamp,
+        ),
+      ),
+      text: (e) {
+        final rp = rotatePoint(e.data.x, e.data.y);
+        return ContentElement.text(
+          id: e.id, zIndex: e.zIndex,
+          data: TextData(
+            x: rp.dx, y: rp.dy,
+            width: e.data.width, height: e.data.height,
+            content: e.data.content, fontFamily: e.data.fontFamily,
+            fontSize: e.data.fontSize, color: e.data.color,
+            bold: e.data.bold, italic: e.data.italic, alignment: e.data.alignment,
+          ),
+        );
+      },
+      image: (e) {
+        final rp = rotatePoint(e.data.x, e.data.y);
+        return ContentElement.image(
+          id: e.id, zIndex: e.zIndex,
+          data: ImageData(
+            x: rp.dx, y: rp.dy,
+            width: e.data.width, height: e.data.height,
+            assetPath: e.data.assetPath,
+            rotation: e.data.rotation + angle,
+            opacity: e.data.opacity,
+          ),
+        );
+      },
+      shape: (e) {
+        final rp1 = rotatePoint(e.data.x1, e.data.y1);
+        final rp2 = rotatePoint(e.data.x2, e.data.y2);
+        return ContentElement.shape(
+          id: e.id, zIndex: e.zIndex,
+          data: ShapeData(
+            shapeType: e.data.shapeType,
+            x1: rp1.dx, y1: rp1.dy,
+            x2: rp2.dx, y2: rp2.dy,
+            strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
+            fillColor: e.data.fillColor, rotation: e.data.rotation + angle,
+          ),
+        );
+      },
+    );
+  }
+
   void deleteSelection() {
     if (state == null || state!.lassoSelection == null) return;
     final s = state!;
@@ -1409,13 +1727,47 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   // ── Page management ──
 
+  void setActiveChapter(String? chapterId) {
+    if (state == null) return;
+    final s = state!;
+    if (chapterId == null) {
+      state = s.copyWith(clearActiveChapter: true);
+      return;
+    }
+    // Jump to first page of the chapter
+    final firstIdx = s.document.pages.indexWhere((p) => p.chapterId == chapterId);
+    state = s.copyWith(
+      activeChapterId: chapterId,
+      currentPageIndex: firstIdx >= 0 ? firstIdx : s.currentPageIndex,
+      clearLasso: true,
+      lassoPath: [],
+    );
+  }
+
   void goToPage(int index) {
     if (state == null || index < 0 || index >= state!.pageCount) return;
     state = state!.copyWith(currentPageIndex: index, clearLasso: true, lassoPath: []);
   }
 
-  void nextPage() => goToPage((state?.currentPageIndex ?? 0) + 1);
-  void prevPage() => goToPage((state?.currentPageIndex ?? 0) - 1);
+  void nextPage() {
+    if (state == null) return;
+    final s = state!;
+    final filtered = s.filteredPageIndices;
+    final pos = filtered.indexOf(s.currentPageIndex);
+    if (pos >= 0 && pos + 1 < filtered.length) {
+      goToPage(filtered[pos + 1]);
+    }
+  }
+
+  void prevPage() {
+    if (state == null) return;
+    final s = state!;
+    final filtered = s.filteredPageIndices;
+    final pos = filtered.indexOf(s.currentPageIndex);
+    if (pos > 0) {
+      goToPage(filtered[pos - 1]);
+    }
+  }
 
   void addPage() {
     if (state == null) return;
@@ -1440,12 +1792,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       createdAt: now, modifiedAt: now,
     );
 
-    final newEntry = PageEntry(pageId: pageId, pageNumber: pageNum, fileName: fileName, lastModified: now);
+    // Auto-assign chapter if one is active
+    final newEntry = PageEntry(
+      pageId: pageId, pageNumber: pageNum, fileName: fileName,
+      lastModified: now, chapterId: s.activeChapterId,
+    );
+
+    // Insert after current page position (not always at end)
+    final insertIndex = s.currentPageIndex + 1;
+    final pageList = List<PageEntry>.from(s.document.pages)..insert(insertIndex, newEntry);
 
     final updatedDoc = DocumentStructure(
       notebookId: s.document.notebookId,
       formatVersion: s.document.formatVersion,
-      pages: [...s.document.pages, newEntry],
+      pages: pageList,
     );
 
     final updatedPages = Map<String, PageData>.from(s.pages);
@@ -1455,9 +1815,53 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       metadata: s.metadata.copyWith(pageCount: pageNum, modifiedAt: now),
       document: updatedDoc,
       pages: updatedPages,
-      currentPageIndex: pageNum - 1,
+      currentPageIndex: insertIndex,
       isDirty: true,
     );
+  }
+
+  void addChapter(String title) {
+    if (state == null) return;
+    final s = state!;
+    final chapter = Chapter(id: const Uuid().v4(), title: title, pageIds: []);
+    state = s.copyWith(
+      metadata: s.metadata.copyWith(chapters: [...s.metadata.chapters, chapter], modifiedAt: DateTime.now()),
+      isDirty: true,
+    );
+  }
+
+  void renameChapter(String chapterId, String title) {
+    if (state == null) return;
+    final s = state!;
+    final chapters = s.metadata.chapters.map((c) => c.id == chapterId ? c.copyWith(title: title) : c).toList();
+    state = s.copyWith(
+      metadata: s.metadata.copyWith(chapters: chapters, modifiedAt: DateTime.now()),
+      isDirty: true,
+    );
+  }
+
+  void deleteChapter(String chapterId) {
+    if (state == null) return;
+    final s = state!;
+    final chapters = s.metadata.chapters.where((c) => c.id != chapterId).toList();
+    // Pages remain, but chapterId is cleared.
+    final pages = s.document.pages.map((p) => p.chapterId == chapterId ? p.copyWith(chapterId: null) : p).toList();
+    final document = s.document.copyWith(pages: pages);
+    state = s.copyWith(
+      metadata: s.metadata.copyWith(chapters: chapters, modifiedAt: DateTime.now()),
+      document: document,
+      isDirty: true,
+    );
+  }
+
+  void assignPageToChapter(int pageIndex, String? chapterId) {
+    if (state == null) return;
+    final s = state!;
+    if (pageIndex < 0 || pageIndex >= s.document.pages.length) return;
+    final pages = List<PageEntry>.from(s.document.pages);
+    pages[pageIndex] = pages[pageIndex].copyWith(chapterId: chapterId);
+    final document = s.document.copyWith(pages: pages);
+    state = s.copyWith(document: document, isDirty: true);
   }
 
   // ── Zoom & Pan ──
@@ -1676,7 +2080,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final page = s.currentPage;
     if (page == null) return;
     final fileName = s.currentPageFileName;
-    final undoStack = _pushUndo(s, fileName, page);
 
     final updatedContent = page.layers.content.map((element) {
       final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
@@ -1699,6 +2102,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             x: newBounds.left, y: newBounds.top,
             width: newBounds.width, height: newBounds.height,
             assetPath: e.data.assetPath, rotation: e.data.rotation, opacity: e.data.opacity,
+            locked: e.data.locked, comment: e.data.comment,
           ),
         ),
         shape: (e) => ContentElement.shape(
@@ -1724,7 +2128,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[fileName] = updatedPage;
-    state = s.copyWith(pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true);
+    state = s.copyWith(pages: updatedPages, isDirty: true);
   }
 
   void rotateElement(String elementId, double deltaAngle) {
@@ -1748,6 +2152,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             assetPath: e.data.assetPath,
             rotation: e.data.rotation + deltaAngle,
             opacity: e.data.opacity,
+            locked: e.data.locked, comment: e.data.comment,
           ),
         ),
         shape: (e) => ContentElement.shape(
@@ -1805,6 +2210,119 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  void bringToFront(String elementId) {
+    if (state == null) return;
+    final s = state!;
+    final page = s.currentPage;
+    if (page == null) return;
+    final fileName = s.currentPageFileName;
+    final undoStack = _pushUndo(s, fileName, page);
+
+    final content = List<ContentElement>.from(page.layers.content);
+    final idx = content.indexWhere((e) =>
+        e.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id) == elementId);
+    if (idx < 0 || idx == content.length - 1) return;
+    final element = content.removeAt(idx);
+    content.add(element);
+
+    _updatePageContent(s, page, fileName, content, undoStack);
+  }
+
+  void sendToBack(String elementId) {
+    if (state == null) return;
+    final s = state!;
+    final page = s.currentPage;
+    if (page == null) return;
+    final fileName = s.currentPageFileName;
+    final undoStack = _pushUndo(s, fileName, page);
+
+    final content = List<ContentElement>.from(page.layers.content);
+    final idx = content.indexWhere((e) =>
+        e.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id) == elementId);
+    if (idx <= 0) return;
+    final element = content.removeAt(idx);
+    content.insert(0, element);
+
+    _updatePageContent(s, page, fileName, content, undoStack);
+  }
+
+  void toggleImageLock(String elementId) {
+    if (state == null) return;
+    final s = state!;
+    final page = s.currentPage;
+    if (page == null) return;
+    final fileName = s.currentPageFileName;
+
+    final updatedContent = page.layers.content.map((element) {
+      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      if (id != elementId) return element;
+      return element.map(
+        stroke: (e) => e as ContentElement,
+        text: (e) => e as ContentElement,
+        image: (e) => ContentElement.image(
+          id: e.id, zIndex: e.zIndex,
+          data: e.data.copyWith(locked: !e.data.locked),
+        ),
+        shape: (e) => e as ContentElement,
+      );
+    }).toList();
+
+    _updatePageContent(s, page, fileName, updatedContent, s.undoStack);
+  }
+
+  void setImageComment(String elementId, String? comment) {
+    if (state == null) return;
+    final s = state!;
+    final page = s.currentPage;
+    if (page == null) return;
+    final fileName = s.currentPageFileName;
+
+    final updatedContent = page.layers.content.map((element) {
+      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      if (id != elementId) return element;
+      return element.map(
+        stroke: (e) => e as ContentElement,
+        text: (e) => e as ContentElement,
+        image: (e) => ContentElement.image(
+          id: e.id, zIndex: e.zIndex,
+          data: e.data.copyWith(comment: comment),
+        ),
+        shape: (e) => e as ContentElement,
+      );
+    }).toList();
+
+    _updatePageContent(s, page, fileName, updatedContent, s.undoStack);
+  }
+
+  bool isImageLocked(String elementId) {
+    if (state == null) return false;
+    final page = state!.currentPage;
+    if (page == null) return false;
+    for (final el in page.layers.content) {
+      final id = el.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      if (id != elementId) continue;
+      return el.map(
+        stroke: (_) => false, text: (_) => false,
+        image: (e) => e.data.locked,
+        shape: (_) => false,
+      );
+    }
+    return false;
+  }
+
+  void _updatePageContent(CanvasState s, PageData page, String fileName, List<ContentElement> content, List<_UndoEntry> undoStack) {
+    final updatedPage = PageData(
+      pageId: page.pageId, pageNumber: page.pageNumber,
+      width: page.width, height: page.height,
+      layers: RenderingLayers(background: page.layers.background, content: content),
+      assetReferences: page.assetReferences,
+      createdAt: page.createdAt, modifiedAt: DateTime.now(),
+    );
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[fileName] = updatedPage;
+    state = s.copyWith(pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true);
+  }
+
   // ── Image insertion ──
 
   void addImageElement(Offset position, String fileName, Uint8List bytes, double width, double height) {
@@ -1831,15 +2349,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[pageFileName] = updatedPage;
 
-    // Decode image and add to cache asynchronously
+    // Store raw bytes for persistence and decode for rendering
+    final newAssetBytes = Map<String, Uint8List>.from(s.assetBytes);
+    newAssetBytes[assetId] = bytes;
     _decodeAndCacheImage(assetId, bytes);
 
     state = s.copyWith(
       pages: updatedPages,
+      assetBytes: newAssetBytes,
       undoStack: undoStack,
       redoStack: [],
       isDirty: true,
       selectedElementId: newElement.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id),
+      currentTool: CanvasTool.lasso,
     );
   }
 
@@ -1856,6 +2378,118 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     } catch (_) {
       // Image decoding failed — placeholder will be shown
     }
+  }
+
+  /// Crop an image element using a normalized crop rect (0..1).
+  /// Creates a new cropped image from the original bytes.
+  Future<void> cropImageElement(String elementId, Rect normalizedCrop) async {
+    if (state == null) return;
+    final s = state!;
+    final page = s.currentPage;
+    if (page == null) return;
+
+    // Find the image element
+    ImageData? imgData;
+    for (final el in page.layers.content) {
+      el.map(
+        stroke: (_) {},
+        text: (_) {},
+        image: (i) { if (i.id == elementId) imgData = i.data; },
+        shape: (_) {},
+      );
+    }
+    if (imgData == null) return;
+
+    final cachedImage = s.imageCache[imgData!.assetPath];
+    if (cachedImage == null) return;
+
+    // Crop the image using a PictureRecorder
+    final srcW = cachedImage.width.toDouble();
+    final srcH = cachedImage.height.toDouble();
+    final cropSrc = Rect.fromLTRB(
+      normalizedCrop.left * srcW,
+      normalizedCrop.top * srcH,
+      normalizedCrop.right * srcW,
+      normalizedCrop.bottom * srcH,
+    );
+    final cropW = cropSrc.width.toInt();
+    final cropH = cropSrc.height.toInt();
+    if (cropW < 1 || cropH < 1) return;
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    canvas.drawImageRect(
+      cachedImage,
+      cropSrc,
+      Rect.fromLTWH(0, 0, cropW.toDouble(), cropH.toDouble()),
+      Paint()..filterQuality = FilterQuality.high,
+    );
+    final picture = recorder.endRecording();
+    final croppedImage = await picture.toImage(cropW, cropH);
+
+    // Encode the cropped image to PNG bytes
+    final byteData = await croppedImage.toByteData(format: ui.ImageByteFormat.png);
+    if (byteData == null) return;
+    final croppedBytes = Uint8List.view(byteData.buffer);
+
+    final newAssetId = '${const Uuid().v4()}_cropped.png';
+
+    final fileName = s.currentPageFileName;
+    final undoStack = _pushUndo(s, fileName, page);
+
+    // Update the image element dimensions (scale on page proportionally)
+    final scaleX = normalizedCrop.width;
+    final scaleY = normalizedCrop.height;
+    final newPageW = imgData!.width * scaleX;
+    final newPageH = imgData!.height * scaleY;
+    final newX = imgData!.x + imgData!.width * normalizedCrop.left;
+    final newY = imgData!.y + imgData!.height * normalizedCrop.top;
+
+    final updatedContent = page.layers.content.map((element) {
+      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      if (id != elementId) return element;
+      return element.map(
+        stroke: (e) => e as ContentElement,
+        text: (e) => e as ContentElement,
+        image: (e) => ContentElement.image(
+          id: e.id, zIndex: e.zIndex,
+          data: ImageData(
+            x: newX, y: newY,
+            width: newPageW, height: newPageH,
+            assetPath: newAssetId,
+            rotation: e.data.rotation,
+            opacity: e.data.opacity,
+          ),
+        ),
+        shape: (e) => e as ContentElement,
+      );
+    }).toList();
+
+    final updatedPage = PageData(
+      pageId: page.pageId, pageNumber: page.pageNumber,
+      width: page.width, height: page.height,
+      layers: RenderingLayers(background: page.layers.background, content: updatedContent),
+      assetReferences: page.assetReferences,
+      createdAt: page.createdAt, modifiedAt: DateTime.now(),
+    );
+
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[fileName] = updatedPage;
+
+    // Update caches
+    final newCache = Map<String, ui.Image>.from(s.imageCache);
+    newCache[newAssetId] = croppedImage;
+    final newAssets = Map<String, Uint8List>.from(s.assetBytes);
+    newAssets[newAssetId] = croppedBytes;
+
+    state = s.copyWith(
+      pages: updatedPages,
+      imageCache: newCache,
+      assetBytes: newAssets,
+      undoStack: undoStack,
+      redoStack: [],
+      isDirty: true,
+    );
   }
 
   // ── Clipboard operations ──
@@ -1958,9 +2592,63 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
-  // ── Reusable Symbols ──
+  // ── Reusable Symbols & Libraries ──
 
-  void createSymbolFromSelection(String name) {
+  /// Returns the first library, or creates a default one if none exists.
+  SymbolLibrary _defaultLibrary() {
+    if (state!.symbolLibraries.isEmpty) {
+      final lib = SymbolLibrary(id: const Uuid().v4(), name: 'Simboli');
+      state = state!.copyWith(symbolLibraries: [lib]);
+      return lib;
+    }
+    return state!.symbolLibraries.first;
+  }
+
+  void createSymbolLibrary(String name) {
+    if (state == null) return;
+    final lib = SymbolLibrary(id: const Uuid().v4(), name: name);
+    state = state!.copyWith(symbolLibraries: [...state!.symbolLibraries, lib]);
+  }
+
+  void renameSymbolLibrary(String libId, String newName) {
+    if (state == null) return;
+    state = state!.copyWith(
+      symbolLibraries: state!.symbolLibraries.map((l) => l.id == libId ? l.copyWith(name: newName) : l).toList(),
+    );
+  }
+
+  void deleteSymbolLibrary(String libId) {
+    if (state == null) return;
+    state = state!.copyWith(
+      symbolLibraries: state!.symbolLibraries.where((l) => l.id != libId).toList(),
+    );
+  }
+
+  void renameSymbol(String libId, String symbolId, String newName) {
+    if (state == null) return;
+    state = state!.copyWith(
+      symbolLibraries: state!.symbolLibraries.map((l) {
+        if (l.id != libId) return l;
+        return l.copyWith(symbols: l.symbols.map((s) => s.id == symbolId
+            ? ReusableSymbol(id: s.id, name: newName, elements: s.elements, bounds: s.bounds, createdAt: s.createdAt)
+            : s).toList());
+      }).toList(),
+    );
+  }
+
+  void deleteSymbolFromLibrary(String libId, String symbolId) {
+    if (state == null) return;
+    state = state!.copyWith(
+      symbolLibraries: state!.symbolLibraries.map((l) {
+        if (l.id != libId) return l;
+        return l.copyWith(symbols: l.symbols.where((s) => s.id != symbolId).toList());
+      }).toList(),
+    );
+  }
+
+  /// Creates a symbol from the current lasso selection and adds it to the
+  /// target library (first library if [targetLibId] is null).
+  void createSymbolFromSelection(String name, {String? targetLibId}) {
     if (state == null || state!.lassoSelection == null) return;
     final sel = state!.lassoSelection!;
     final page = state!.currentPage;
@@ -1981,7 +2669,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       createdAt: DateTime.now(),
     );
 
-    state = state!.copyWith(symbols: [...state!.symbols, symbol]);
+    // Ensure there is at least one library
+    _defaultLibrary();
+
+    final targetId = targetLibId ?? state!.symbolLibraries.first.id;
+    state = state!.copyWith(
+      symbolLibraries: state!.symbolLibraries.map((l) {
+        if (l.id != targetId) return l;
+        return l.copyWith(symbols: [...l.symbols, symbol]);
+      }).toList(),
+    );
   }
 
   void createSymbolFromElement(String elementId, String name) {
@@ -2006,47 +2703,241 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       createdAt: DateTime.now(),
     );
 
-    state = state!.copyWith(symbols: [...state!.symbols, symbol]);
+    _defaultLibrary();
+    final targetId = state!.symbolLibraries.first.id;
+    state = state!.copyWith(
+      symbolLibraries: state!.symbolLibraries.map((l) {
+        if (l.id != targetId) return l;
+        return l.copyWith(symbols: [...l.symbols, symbol]);
+      }).toList(),
+    );
   }
 
-  void insertSymbol(ReusableSymbol symbol, Offset position) {
+  // Legacy: keep for backward compatibility
+  void deleteSymbol(String symbolId) {
     if (state == null) return;
+    state = state!.copyWith(
+      symbolLibraries: state!.symbolLibraries.map((l) =>
+          l.copyWith(symbols: l.symbols.where((s) => s.id != symbolId).toList())
+      ).toList(),
+    );
+  }
+
+  void setPendingSymbol(ReusableSymbol symbol) {
+    if (state == null) return;
+    state = state!.copyWith(pendingSymbol: symbol);
+  }
+
+  void clearPendingSymbol() {
+    if (state == null) return;
+    state = state!.copyWith(clearPendingSymbol: true);
+  }
+
+  Future<void> insertSymbol(ReusableSymbol symbol, Offset position) async {
+    if (state == null) return;
+    // Clear pending symbol immediately to prevent multiple placements
+    state = state!.copyWith(clearPendingSymbol: true);
+
     final s = state!;
     final page = s.currentPage;
     if (page == null) return;
     final fileName = s.currentPageFileName;
     final undoStack = _pushUndo(s, fileName, page);
 
-    final offset = Offset(position.dx - symbol.bounds.center.dx, position.dy - symbol.bounds.center.dy);
+    final symbolImage = await _rasterizeSymbol(symbol);
+    if (symbolImage == null || state == null) return;
 
-    final newElements = symbol.elements.map((element) {
-      final newId = const Uuid().v4();
-      final translated = _translateElement(element, offset);
-      return translated.map(
-        stroke: (e) => ContentElement.stroke(id: newId, zIndex: page.layers.content.length, data: e.data),
-        text: (e) => ContentElement.text(id: newId, zIndex: page.layers.content.length, data: e.data),
-        image: (e) => ContentElement.image(id: newId, zIndex: page.layers.content.length, data: e.data),
-        shape: (e) => ContentElement.shape(id: newId, zIndex: page.layers.content.length, data: e.data),
-      );
-    }).toList();
+    // Re-read current state after async gap (state may have changed)
+    final current = state!;
+    final currentPage = current.currentPage;
+    if (currentPage == null) return;
+    final currentFileName = current.currentPageFileName;
 
-    final updatedPage = PageData(
-      pageId: page.pageId, pageNumber: page.pageNumber,
-      width: page.width, height: page.height,
-      layers: RenderingLayers(background: page.layers.background, content: [...page.layers.content, ...newElements]),
-      assetReferences: page.assetReferences,
-      createdAt: page.createdAt, modifiedAt: DateTime.now(),
+    final symbolW = symbol.bounds.width <= 0 ? 1.0 : symbol.bounds.width;
+    final symbolH = symbol.bounds.height <= 0 ? 1.0 : symbol.bounds.height;
+    final assetId = 'symbol_${const Uuid().v4()}.png';
+
+    final imgElement = ContentElement.image(
+      id: const Uuid().v4(),
+      zIndex: page.layers.content.length,
+      data: ImageData(
+        x: position.dx - symbolW / 2,
+        y: position.dy - symbolH / 2,
+        width: symbolW,
+        height: symbolH,
+        assetPath: assetId,
+      ),
     );
 
-    final updatedPages = Map<String, PageData>.from(s.pages);
-    updatedPages[fileName] = updatedPage;
+    final updatedPage = PageData(
+      pageId: currentPage.pageId, pageNumber: currentPage.pageNumber,
+      width: currentPage.width, height: currentPage.height,
+      layers: RenderingLayers(background: currentPage.layers.background, content: [...currentPage.layers.content, imgElement]),
+      assetReferences: currentPage.assetReferences,
+      createdAt: currentPage.createdAt, modifiedAt: DateTime.now(),
+    );
 
-    state = s.copyWith(pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true);
+    final updatedPages = Map<String, PageData>.from(current.pages);
+    updatedPages[currentFileName] = updatedPage;
+
+    final newAssets = Map<String, Uint8List>.from(current.assetBytes);
+    newAssets[assetId] = symbolImage.$1;
+    final newCache = Map<String, ui.Image>.from(current.imageCache);
+    newCache[assetId] = symbolImage.$2;
+
+    state = current.copyWith(
+      pages: updatedPages,
+      assetBytes: newAssets,
+      imageCache: newCache,
+      undoStack: undoStack,
+      redoStack: [],
+      isDirty: true,
+      clearSelectedElement: true,
+      clearLasso: true,
+      clearPendingSymbol: true,
+      currentTool: CanvasTool.pen,
+    );
   }
 
-  void deleteSymbol(String symbolId) {
-    if (state == null) return;
-    state = state!.copyWith(symbols: state!.symbols.where((s) => s.id != symbolId).toList());
+  Future<(Uint8List, ui.Image)?> _rasterizeSymbol(ReusableSymbol symbol) async {
+    // Render at 3x resolution for crisp quality
+    const double renderScale = 3.0;
+    final baseW = symbol.bounds.width <= 0 ? 1.0 : symbol.bounds.width;
+    final baseH = symbol.bounds.height <= 0 ? 1.0 : symbol.bounds.height;
+    final renderW = (baseW * renderScale).ceil();
+    final renderH = (baseH * renderScale).ceil();
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, renderW.toDouble(), renderH.toDouble()));
+    canvas.scale(renderScale);
+    canvas.translate(-symbol.bounds.left, -symbol.bounds.top);
+
+    for (final element in symbol.elements) {
+      element.map(
+        stroke: (e) => _paintStrokeSymbol(canvas, e.data),
+        text: (e) => _paintTextSymbol(canvas, e.data),
+        image: (e) => _paintImageSymbol(canvas, e.data),
+        shape: (e) => _paintShapeSymbol(canvas, e.data),
+      );
+    }
+
+    final picture = recorder.endRecording();
+    final image = await picture.toImage(renderW, renderH);
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (byteData == null) {
+      image.dispose();
+      return null;
+    }
+    return (byteData.buffer.asUint8List(), image);
+  }
+
+  void _paintStrokeSymbol(Canvas canvas, StrokeData stroke) {
+    if (stroke.points.length < 2) return;
+    final paint = Paint()
+      ..color = Color(stroke.color).withValues(alpha: stroke.opacity)
+      ..strokeWidth = stroke.baseWidth
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
+      ..isAntiAlias = true;
+
+    for (int i = 0; i < stroke.points.length - 1; i++) {
+      final p0 = stroke.points[i];
+      final p1 = stroke.points[i + 1];
+      canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
+    }
+  }
+
+  void _paintTextSymbol(Canvas canvas, TextData textData) {
+    final style = ui.TextStyle(
+      color: Color(textData.color),
+      fontSize: textData.fontSize,
+      fontFamily: textData.fontFamily,
+      fontWeight: textData.bold ? FontWeight.bold : FontWeight.normal,
+      fontStyle: textData.italic ? FontStyle.italic : FontStyle.normal,
+    );
+    final paragraphStyle = ui.ParagraphStyle(
+      textAlign: textData.alignment == 'center'
+          ? TextAlign.center
+          : textData.alignment == 'right'
+              ? TextAlign.right
+              : TextAlign.left,
+    );
+    final builder = ui.ParagraphBuilder(paragraphStyle)..pushStyle(style)..addText(textData.content);
+    final paragraph = builder.build()..layout(ui.ParagraphConstraints(width: textData.width));
+    canvas.drawParagraph(paragraph, Offset(textData.x, textData.y));
+  }
+
+  void _paintImageSymbol(Canvas canvas, ImageData imageData) {
+    final cachedImage = state?.imageCache[imageData.assetPath];
+    if (cachedImage == null) return;
+
+    canvas.save();
+    if (imageData.rotation != 0) {
+      final cx = imageData.x + imageData.width / 2;
+      final cy = imageData.y + imageData.height / 2;
+      canvas.translate(cx, cy);
+      canvas.rotate(imageData.rotation);
+      canvas.translate(-cx, -cy);
+    }
+
+    final srcRect = Rect.fromLTWH(0, 0, cachedImage.width.toDouble(), cachedImage.height.toDouble());
+    final dstRect = Rect.fromLTWH(imageData.x, imageData.y, imageData.width, imageData.height);
+    final paint = Paint()..color = Colors.white.withValues(alpha: imageData.opacity);
+    canvas.drawImageRect(cachedImage, srcRect, dstRect, paint);
+    canvas.restore();
+  }
+
+  void _paintShapeSymbol(Canvas canvas, ShapeData shape) {
+    final strokePaint = Paint()
+      ..color = Color(shape.strokeColor)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = shape.strokeWidth
+      ..isAntiAlias = true;
+
+    Paint? fillPaint;
+    if (shape.fillColor != null) {
+      fillPaint = Paint()..color = Color(shape.fillColor!)..style = PaintingStyle.fill;
+    }
+
+    canvas.save();
+    if (shape.rotation != 0) {
+      final cx = (shape.x1 + shape.x2) / 2;
+      final cy = (shape.y1 + shape.y2) / 2;
+      canvas.translate(cx, cy);
+      canvas.rotate(shape.rotation);
+      canvas.translate(-cx, -cy);
+    }
+
+    switch (shape.shapeType) {
+      case 'rectangle':
+        final rect = Rect.fromPoints(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2));
+        if (fillPaint != null) canvas.drawRect(rect, fillPaint);
+        canvas.drawRect(rect, strokePaint);
+        break;
+      case 'circle':
+        final center = Offset((shape.x1 + shape.x2) / 2, (shape.y1 + shape.y2) / 2);
+        final radius = Offset(shape.x2 - shape.x1, shape.y2 - shape.y1).distance / 2;
+        if (fillPaint != null) canvas.drawCircle(center, radius, fillPaint);
+        canvas.drawCircle(center, radius, strokePaint);
+        break;
+      case 'line':
+      case 'arrow':
+        canvas.drawLine(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2), strokePaint);
+        break;
+      case 'triangle':
+        final path = Path()
+          ..moveTo((shape.x1 + shape.x2) / 2, shape.y1)
+          ..lineTo(shape.x1, shape.y2)
+          ..lineTo(shape.x2, shape.y2)
+          ..close();
+        if (fillPaint != null) canvas.drawPath(path, fillPaint);
+        canvas.drawPath(path, strokePaint);
+        break;
+      default:
+        canvas.drawRect(Rect.fromPoints(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2)), strokePaint);
+    }
+    canvas.restore();
   }
 
   // ── Page management ──
@@ -2236,6 +3127,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       metadata: updatedMeta,
       document: s.document,
       pages: s.pages,
+      assets: s.assetBytes.isNotEmpty ? s.assetBytes : null,
+      symbolLibraries: s.symbolLibraries.isNotEmpty
+          ? s.symbolLibraries.map((l) => l.toJson()).toList()
+          : null,
     );
 
     state = s.copyWith(metadata: updatedMeta, isDirty: false);

@@ -14,6 +14,197 @@ T _$identity<T>(T value) => value;
 final _privateConstructorUsedError = UnsupportedError(
     'It seems like you constructed your class using `MyClass._()`. This constructor is only meant to be used by freezed and you are not supposed to need it nor use it.\nPlease check the documentation here for more information: https://github.com/rrousselGit/freezed#adding-getters-and-methods-to-our-models');
 
+Chapter _$ChapterFromJson(Map<String, dynamic> json) {
+  return _Chapter.fromJson(json);
+}
+
+/// @nodoc
+mixin _$Chapter {
+  String get id => throw _privateConstructorUsedError;
+  String get title => throw _privateConstructorUsedError;
+  List<String> get pageIds => throw _privateConstructorUsedError;
+
+  /// Serializes this Chapter to a JSON map.
+  Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
+
+  /// Create a copy of Chapter
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $ChapterCopyWith<Chapter> get copyWith => throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $ChapterCopyWith<$Res> {
+  factory $ChapterCopyWith(Chapter value, $Res Function(Chapter) then) =
+      _$ChapterCopyWithImpl<$Res, Chapter>;
+  @useResult
+  $Res call({String id, String title, List<String> pageIds});
+}
+
+/// @nodoc
+class _$ChapterCopyWithImpl<$Res, $Val extends Chapter>
+    implements $ChapterCopyWith<$Res> {
+  _$ChapterCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of Chapter
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? title = null,
+    Object? pageIds = null,
+  }) {
+    return _then(_value.copyWith(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      title: null == title
+          ? _value.title
+          : title // ignore: cast_nullable_to_non_nullable
+              as String,
+      pageIds: null == pageIds
+          ? _value.pageIds
+          : pageIds // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$ChapterImplCopyWith<$Res> implements $ChapterCopyWith<$Res> {
+  factory _$$ChapterImplCopyWith(
+          _$ChapterImpl value, $Res Function(_$ChapterImpl) then) =
+      __$$ChapterImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call({String id, String title, List<String> pageIds});
+}
+
+/// @nodoc
+class __$$ChapterImplCopyWithImpl<$Res>
+    extends _$ChapterCopyWithImpl<$Res, _$ChapterImpl>
+    implements _$$ChapterImplCopyWith<$Res> {
+  __$$ChapterImplCopyWithImpl(
+      _$ChapterImpl _value, $Res Function(_$ChapterImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of Chapter
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? title = null,
+    Object? pageIds = null,
+  }) {
+    return _then(_$ChapterImpl(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      title: null == title
+          ? _value.title
+          : title // ignore: cast_nullable_to_non_nullable
+              as String,
+      pageIds: null == pageIds
+          ? _value._pageIds
+          : pageIds // ignore: cast_nullable_to_non_nullable
+              as List<String>,
+    ));
+  }
+}
+
+/// @nodoc
+@JsonSerializable()
+class _$ChapterImpl implements _Chapter {
+  const _$ChapterImpl(
+      {required this.id,
+      required this.title,
+      final List<String> pageIds = const []})
+      : _pageIds = pageIds;
+
+  factory _$ChapterImpl.fromJson(Map<String, dynamic> json) =>
+      _$$ChapterImplFromJson(json);
+
+  @override
+  final String id;
+  @override
+  final String title;
+  final List<String> _pageIds;
+  @override
+  @JsonKey()
+  List<String> get pageIds {
+    if (_pageIds is EqualUnmodifiableListView) return _pageIds;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_pageIds);
+  }
+
+  @override
+  String toString() {
+    return 'Chapter(id: $id, title: $title, pageIds: $pageIds)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$ChapterImpl &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.title, title) || other.title == title) &&
+            const DeepCollectionEquality().equals(other._pageIds, _pageIds));
+  }
+
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  int get hashCode => Object.hash(
+      runtimeType, id, title, const DeepCollectionEquality().hash(_pageIds));
+
+  /// Create a copy of Chapter
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$ChapterImplCopyWith<_$ChapterImpl> get copyWith =>
+      __$$ChapterImplCopyWithImpl<_$ChapterImpl>(this, _$identity);
+
+  @override
+  Map<String, dynamic> toJson() {
+    return _$$ChapterImplToJson(
+      this,
+    );
+  }
+}
+
+abstract class _Chapter implements Chapter {
+  const factory _Chapter(
+      {required final String id,
+      required final String title,
+      final List<String> pageIds}) = _$ChapterImpl;
+
+  factory _Chapter.fromJson(Map<String, dynamic> json) = _$ChapterImpl.fromJson;
+
+  @override
+  String get id;
+  @override
+  String get title;
+  @override
+  List<String> get pageIds;
+
+  /// Create a copy of Chapter
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$ChapterImplCopyWith<_$ChapterImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
 NotebookMetadata _$NotebookMetadataFromJson(Map<String, dynamic> json) {
   return _NotebookMetadata.fromJson(json);
 }
@@ -32,6 +223,7 @@ mixin _$NotebookMetadata {
   int get paperColor => throw _privateConstructorUsedError;
   int get pageCount => throw _privateConstructorUsedError;
   List<String> get tags => throw _privateConstructorUsedError;
+  List<Chapter> get chapters => throw _privateConstructorUsedError;
   String? get author => throw _privateConstructorUsedError;
   String? get description => throw _privateConstructorUsedError;
 
@@ -63,6 +255,7 @@ abstract class $NotebookMetadataCopyWith<$Res> {
       int paperColor,
       int pageCount,
       List<String> tags,
+      List<Chapter> chapters,
       String? author,
       String? description});
 }
@@ -93,6 +286,7 @@ class _$NotebookMetadataCopyWithImpl<$Res, $Val extends NotebookMetadata>
     Object? paperColor = null,
     Object? pageCount = null,
     Object? tags = null,
+    Object? chapters = null,
     Object? author = freezed,
     Object? description = freezed,
   }) {
@@ -141,6 +335,10 @@ class _$NotebookMetadataCopyWithImpl<$Res, $Val extends NotebookMetadata>
           ? _value.tags
           : tags // ignore: cast_nullable_to_non_nullable
               as List<String>,
+      chapters: null == chapters
+          ? _value.chapters
+          : chapters // ignore: cast_nullable_to_non_nullable
+              as List<Chapter>,
       author: freezed == author
           ? _value.author
           : author // ignore: cast_nullable_to_non_nullable
@@ -173,6 +371,7 @@ abstract class _$$NotebookMetadataImplCopyWith<$Res>
       int paperColor,
       int pageCount,
       List<String> tags,
+      List<Chapter> chapters,
       String? author,
       String? description});
 }
@@ -201,6 +400,7 @@ class __$$NotebookMetadataImplCopyWithImpl<$Res>
     Object? paperColor = null,
     Object? pageCount = null,
     Object? tags = null,
+    Object? chapters = null,
     Object? author = freezed,
     Object? description = freezed,
   }) {
@@ -249,6 +449,10 @@ class __$$NotebookMetadataImplCopyWithImpl<$Res>
           ? _value._tags
           : tags // ignore: cast_nullable_to_non_nullable
               as List<String>,
+      chapters: null == chapters
+          ? _value._chapters
+          : chapters // ignore: cast_nullable_to_non_nullable
+              as List<Chapter>,
       author: freezed == author
           ? _value.author
           : author // ignore: cast_nullable_to_non_nullable
@@ -276,9 +480,11 @@ class _$NotebookMetadataImpl implements _NotebookMetadata {
       this.paperColor = 0xFFFFFFFF,
       this.pageCount = 0,
       final List<String> tags = const [],
+      final List<Chapter> chapters = const [],
       this.author,
       this.description})
-      : _tags = tags;
+      : _tags = tags,
+        _chapters = chapters;
 
   factory _$NotebookMetadataImpl.fromJson(Map<String, dynamic> json) =>
       _$$NotebookMetadataImplFromJson(json);
@@ -320,6 +526,15 @@ class _$NotebookMetadataImpl implements _NotebookMetadata {
     return EqualUnmodifiableListView(_tags);
   }
 
+  final List<Chapter> _chapters;
+  @override
+  @JsonKey()
+  List<Chapter> get chapters {
+    if (_chapters is EqualUnmodifiableListView) return _chapters;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_chapters);
+  }
+
   @override
   final String? author;
   @override
@@ -327,7 +542,7 @@ class _$NotebookMetadataImpl implements _NotebookMetadata {
 
   @override
   String toString() {
-    return 'NotebookMetadata(id: $id, title: $title, formatVersion: $formatVersion, createdAt: $createdAt, modifiedAt: $modifiedAt, coverStyle: $coverStyle, coverColor: $coverColor, paperType: $paperType, paperColor: $paperColor, pageCount: $pageCount, tags: $tags, author: $author, description: $description)';
+    return 'NotebookMetadata(id: $id, title: $title, formatVersion: $formatVersion, createdAt: $createdAt, modifiedAt: $modifiedAt, coverStyle: $coverStyle, coverColor: $coverColor, paperType: $paperType, paperColor: $paperColor, pageCount: $pageCount, tags: $tags, chapters: $chapters, author: $author, description: $description)';
   }
 
   @override
@@ -354,6 +569,7 @@ class _$NotebookMetadataImpl implements _NotebookMetadata {
             (identical(other.pageCount, pageCount) ||
                 other.pageCount == pageCount) &&
             const DeepCollectionEquality().equals(other._tags, _tags) &&
+            const DeepCollectionEquality().equals(other._chapters, _chapters) &&
             (identical(other.author, author) || other.author == author) &&
             (identical(other.description, description) ||
                 other.description == description));
@@ -374,6 +590,7 @@ class _$NotebookMetadataImpl implements _NotebookMetadata {
       paperColor,
       pageCount,
       const DeepCollectionEquality().hash(_tags),
+      const DeepCollectionEquality().hash(_chapters),
       author,
       description);
 
@@ -407,6 +624,7 @@ abstract class _NotebookMetadata implements NotebookMetadata {
       final int paperColor,
       final int pageCount,
       final List<String> tags,
+      final List<Chapter> chapters,
       final String? author,
       final String? description}) = _$NotebookMetadataImpl;
 
@@ -435,6 +653,8 @@ abstract class _NotebookMetadata implements NotebookMetadata {
   int get pageCount;
   @override
   List<String> get tags;
+  @override
+  List<Chapter> get chapters;
   @override
   String? get author;
   @override
@@ -659,6 +879,7 @@ mixin _$PageEntry {
   double get width => throw _privateConstructorUsedError;
   double get height => throw _privateConstructorUsedError;
   String? get thumbnailFile => throw _privateConstructorUsedError;
+  String? get chapterId => throw _privateConstructorUsedError;
   DateTime? get lastModified => throw _privateConstructorUsedError;
 
   /// Serializes this PageEntry to a JSON map.
@@ -683,6 +904,7 @@ abstract class $PageEntryCopyWith<$Res> {
       double width,
       double height,
       String? thumbnailFile,
+      String? chapterId,
       DateTime? lastModified});
 }
 
@@ -707,6 +929,7 @@ class _$PageEntryCopyWithImpl<$Res, $Val extends PageEntry>
     Object? width = null,
     Object? height = null,
     Object? thumbnailFile = freezed,
+    Object? chapterId = freezed,
     Object? lastModified = freezed,
   }) {
     return _then(_value.copyWith(
@@ -734,6 +957,10 @@ class _$PageEntryCopyWithImpl<$Res, $Val extends PageEntry>
           ? _value.thumbnailFile
           : thumbnailFile // ignore: cast_nullable_to_non_nullable
               as String?,
+      chapterId: freezed == chapterId
+          ? _value.chapterId
+          : chapterId // ignore: cast_nullable_to_non_nullable
+              as String?,
       lastModified: freezed == lastModified
           ? _value.lastModified
           : lastModified // ignore: cast_nullable_to_non_nullable
@@ -757,6 +984,7 @@ abstract class _$$PageEntryImplCopyWith<$Res>
       double width,
       double height,
       String? thumbnailFile,
+      String? chapterId,
       DateTime? lastModified});
 }
 
@@ -779,6 +1007,7 @@ class __$$PageEntryImplCopyWithImpl<$Res>
     Object? width = null,
     Object? height = null,
     Object? thumbnailFile = freezed,
+    Object? chapterId = freezed,
     Object? lastModified = freezed,
   }) {
     return _then(_$PageEntryImpl(
@@ -806,6 +1035,10 @@ class __$$PageEntryImplCopyWithImpl<$Res>
           ? _value.thumbnailFile
           : thumbnailFile // ignore: cast_nullable_to_non_nullable
               as String?,
+      chapterId: freezed == chapterId
+          ? _value.chapterId
+          : chapterId // ignore: cast_nullable_to_non_nullable
+              as String?,
       lastModified: freezed == lastModified
           ? _value.lastModified
           : lastModified // ignore: cast_nullable_to_non_nullable
@@ -824,6 +1057,7 @@ class _$PageEntryImpl implements _PageEntry {
       this.width = 595.0,
       this.height = 842.0,
       this.thumbnailFile,
+      this.chapterId,
       this.lastModified});
 
   factory _$PageEntryImpl.fromJson(Map<String, dynamic> json) =>
@@ -845,11 +1079,13 @@ class _$PageEntryImpl implements _PageEntry {
   @override
   final String? thumbnailFile;
   @override
+  final String? chapterId;
+  @override
   final DateTime? lastModified;
 
   @override
   String toString() {
-    return 'PageEntry(pageId: $pageId, pageNumber: $pageNumber, fileName: $fileName, width: $width, height: $height, thumbnailFile: $thumbnailFile, lastModified: $lastModified)';
+    return 'PageEntry(pageId: $pageId, pageNumber: $pageNumber, fileName: $fileName, width: $width, height: $height, thumbnailFile: $thumbnailFile, chapterId: $chapterId, lastModified: $lastModified)';
   }
 
   @override
@@ -866,6 +1102,8 @@ class _$PageEntryImpl implements _PageEntry {
             (identical(other.height, height) || other.height == height) &&
             (identical(other.thumbnailFile, thumbnailFile) ||
                 other.thumbnailFile == thumbnailFile) &&
+            (identical(other.chapterId, chapterId) ||
+                other.chapterId == chapterId) &&
             (identical(other.lastModified, lastModified) ||
                 other.lastModified == lastModified));
   }
@@ -873,7 +1111,7 @@ class _$PageEntryImpl implements _PageEntry {
   @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(runtimeType, pageId, pageNumber, fileName,
-      width, height, thumbnailFile, lastModified);
+      width, height, thumbnailFile, chapterId, lastModified);
 
   /// Create a copy of PageEntry
   /// with the given fields replaced by the non-null parameter values.
@@ -899,6 +1137,7 @@ abstract class _PageEntry implements PageEntry {
       final double width,
       final double height,
       final String? thumbnailFile,
+      final String? chapterId,
       final DateTime? lastModified}) = _$PageEntryImpl;
 
   factory _PageEntry.fromJson(Map<String, dynamic> json) =
@@ -916,6 +1155,8 @@ abstract class _PageEntry implements PageEntry {
   double get height;
   @override
   String? get thumbnailFile;
+  @override
+  String? get chapterId;
   @override
   DateTime? get lastModified;
 
@@ -3597,6 +3838,8 @@ mixin _$ImageData {
       throw _privateConstructorUsedError; // path relativo in assets/images/
   double get rotation => throw _privateConstructorUsedError; // radianti
   double get opacity => throw _privateConstructorUsedError;
+  bool get locked => throw _privateConstructorUsedError;
+  String? get comment => throw _privateConstructorUsedError;
 
   /// Serializes this ImageData to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
@@ -3620,7 +3863,9 @@ abstract class $ImageDataCopyWith<$Res> {
       double height,
       String assetPath,
       double rotation,
-      double opacity});
+      double opacity,
+      bool locked,
+      String? comment});
 }
 
 /// @nodoc
@@ -3645,6 +3890,8 @@ class _$ImageDataCopyWithImpl<$Res, $Val extends ImageData>
     Object? assetPath = null,
     Object? rotation = null,
     Object? opacity = null,
+    Object? locked = null,
+    Object? comment = freezed,
   }) {
     return _then(_value.copyWith(
       x: null == x
@@ -3675,6 +3922,14 @@ class _$ImageDataCopyWithImpl<$Res, $Val extends ImageData>
           ? _value.opacity
           : opacity // ignore: cast_nullable_to_non_nullable
               as double,
+      locked: null == locked
+          ? _value.locked
+          : locked // ignore: cast_nullable_to_non_nullable
+              as bool,
+      comment: freezed == comment
+          ? _value.comment
+          : comment // ignore: cast_nullable_to_non_nullable
+              as String?,
     ) as $Val);
   }
 }
@@ -3694,7 +3949,9 @@ abstract class _$$ImageDataImplCopyWith<$Res>
       double height,
       String assetPath,
       double rotation,
-      double opacity});
+      double opacity,
+      bool locked,
+      String? comment});
 }
 
 /// @nodoc
@@ -3717,6 +3974,8 @@ class __$$ImageDataImplCopyWithImpl<$Res>
     Object? assetPath = null,
     Object? rotation = null,
     Object? opacity = null,
+    Object? locked = null,
+    Object? comment = freezed,
   }) {
     return _then(_$ImageDataImpl(
       x: null == x
@@ -3747,6 +4006,14 @@ class __$$ImageDataImplCopyWithImpl<$Res>
           ? _value.opacity
           : opacity // ignore: cast_nullable_to_non_nullable
               as double,
+      locked: null == locked
+          ? _value.locked
+          : locked // ignore: cast_nullable_to_non_nullable
+              as bool,
+      comment: freezed == comment
+          ? _value.comment
+          : comment // ignore: cast_nullable_to_non_nullable
+              as String?,
     ));
   }
 }
@@ -3761,7 +4028,9 @@ class _$ImageDataImpl implements _ImageData {
       required this.height,
       required this.assetPath,
       this.rotation = 0.0,
-      this.opacity = 1.0});
+      this.opacity = 1.0,
+      this.locked = false,
+      this.comment});
 
   factory _$ImageDataImpl.fromJson(Map<String, dynamic> json) =>
       _$$ImageDataImplFromJson(json);
@@ -3784,10 +4053,15 @@ class _$ImageDataImpl implements _ImageData {
   @override
   @JsonKey()
   final double opacity;
+  @override
+  @JsonKey()
+  final bool locked;
+  @override
+  final String? comment;
 
   @override
   String toString() {
-    return 'ImageData(x: $x, y: $y, width: $width, height: $height, assetPath: $assetPath, rotation: $rotation, opacity: $opacity)';
+    return 'ImageData(x: $x, y: $y, width: $width, height: $height, assetPath: $assetPath, rotation: $rotation, opacity: $opacity, locked: $locked, comment: $comment)';
   }
 
   @override
@@ -3803,13 +4077,15 @@ class _$ImageDataImpl implements _ImageData {
                 other.assetPath == assetPath) &&
             (identical(other.rotation, rotation) ||
                 other.rotation == rotation) &&
-            (identical(other.opacity, opacity) || other.opacity == opacity));
+            (identical(other.opacity, opacity) || other.opacity == opacity) &&
+            (identical(other.locked, locked) || other.locked == locked) &&
+            (identical(other.comment, comment) || other.comment == comment));
   }
 
   @JsonKey(includeFromJson: false, includeToJson: false)
   @override
-  int get hashCode => Object.hash(
-      runtimeType, x, y, width, height, assetPath, rotation, opacity);
+  int get hashCode => Object.hash(runtimeType, x, y, width, height, assetPath,
+      rotation, opacity, locked, comment);
 
   /// Create a copy of ImageData
   /// with the given fields replaced by the non-null parameter values.
@@ -3835,7 +4111,9 @@ abstract class _ImageData implements ImageData {
       required final double height,
       required final String assetPath,
       final double rotation,
-      final double opacity}) = _$ImageDataImpl;
+      final double opacity,
+      final bool locked,
+      final String? comment}) = _$ImageDataImpl;
 
   factory _ImageData.fromJson(Map<String, dynamic> json) =
       _$ImageDataImpl.fromJson;
@@ -3854,6 +4132,10 @@ abstract class _ImageData implements ImageData {
   double get rotation; // radianti
   @override
   double get opacity;
+  @override
+  bool get locked;
+  @override
+  String? get comment;
 
   /// Create a copy of ImageData
   /// with the given fields replaced by the non-null parameter values.

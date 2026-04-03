@@ -15,6 +15,7 @@ class CanvasRenderEngine extends CustomPainter {
   final double? activeWidth;
   final LassoSelection? lassoSelection;
   final List<Offset>? lassoPath;
+  final List<Offset> Function()? lassoPathGetter;
   final (Offset, Offset, String)? shapePreview;
   final ShapeData? recognizedShapePreview;
   final double zoom;
@@ -29,12 +30,13 @@ class CanvasRenderEngine extends CustomPainter {
     this.activeWidth,
     this.lassoSelection,
     this.lassoPath,
+    this.lassoPathGetter,
     this.shapePreview,
     this.recognizedShapePreview,
     this.zoom = 1.0,
     this.panOffset = Offset.zero,
     this.imageCache = const {},
-    ChangeNotifier? repaintNotifier,
+    Listenable? repaintNotifier,
   }) : super(repaint: repaintNotifier);
 
   @override
@@ -83,15 +85,24 @@ class CanvasRenderEngine extends CustomPainter {
 
     final selectedIds = lassoSelection?.selectedIds ?? [];
     final selDragOffset = lassoSelection?.dragOffset ?? Offset.zero;
+    final selRotation = lassoSelection?.rotation ?? 0.0;
+    final selCenter = lassoSelection != null
+        ? (lassoSelection!.bounds.center + selDragOffset)
+        : Offset.zero;
 
     for (final element in sortedContent) {
       final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
       final isSelected = selectedIds.contains(id);
 
-      // If this element is being dragged via lasso, translate it
-      if (isSelected && selDragOffset != Offset.zero) {
+      // If this element is being moved/rotated via lasso, apply transform
+      if (isSelected && (selDragOffset != Offset.zero || selRotation != 0.0)) {
         canvas.save();
         canvas.translate(selDragOffset.dx, selDragOffset.dy);
+        if (selRotation != 0.0) {
+          canvas.translate(selCenter.dx - selDragOffset.dx, selCenter.dy - selDragOffset.dy);
+          canvas.rotate(selRotation);
+          canvas.translate(-(selCenter.dx - selDragOffset.dx), -(selCenter.dy - selDragOffset.dy));
+        }
       }
 
       element.map(
@@ -103,7 +114,7 @@ class CanvasRenderEngine extends CustomPainter {
 
       if (isSelected) {
         _paintSelectionHighlight(canvas, element);
-        if (selDragOffset != Offset.zero) canvas.restore();
+        if (selDragOffset != Offset.zero || selRotation != 0.0) canvas.restore();
       }
     }
 
@@ -127,9 +138,10 @@ class CanvasRenderEngine extends CustomPainter {
       _paintRecognizedShapePreview(canvas, recognizedShapePreview!);
     }
 
-    // 6. Lasso path
-    if (lassoPath != null && lassoPath!.length >= 2) {
-      _paintLassoPath(canvas);
+    // 6. Lasso path — read live from getter if available
+    final currentLassoPath = lassoPathGetter?.call() ?? lassoPath;
+    if (currentLassoPath != null && currentLassoPath.length >= 2) {
+      _paintLassoPathFromPoints(canvas, currentLassoPath);
     }
 
     // 7. Lasso selection bounds
@@ -303,18 +315,19 @@ class CanvasRenderEngine extends CustomPainter {
     }
 
     // ── Fountain pen (default "pen") ──
-    // Draws each segment as a separate filled quad for clean variable-width strokes.
-    // Avoids single-polygon artifacts (stray lines from start to end).
+    // Use per-segment variable-width strokes to avoid polygon seam artifacts
+    // that can appear as dashed/gray lines at large pen widths.
     final interpolated = _catmullRomInterpolate(stroke.points);
     if (interpolated.length < 2) return;
 
-    final fillPaint = Paint()
+    final paint = Paint()
       ..color = color.withValues(alpha: stroke.opacity)
-      ..style = PaintingStyle.fill
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
 
-    // Compute widths with velocity-based thinning for fountain pen feel
-    final widths = <double>[];
+    final widths = List<double>.filled(interpolated.length, stroke.baseWidth);
     for (int i = 0; i < interpolated.length; i++) {
       final p = interpolated[i];
       double velocity = 0;
@@ -322,80 +335,47 @@ class CanvasRenderEngine extends CustomPainter {
         final prev = interpolated[i - 1];
         velocity = sqrt(pow(p.x - prev.x, 2) + pow(p.y - prev.y, 2));
       }
-      // Fast strokes = thinner; slow strokes = thicker (fountain pen behavior)
-      final velocityFactor = (1.0 - (velocity / 25.0).clamp(0.0, 0.5));
+      final velocityFactor = (1.0 - (velocity / 25.0).clamp(0.0, 0.55));
       final pressureFactor = 0.15 + p.pressure * 0.85;
-      widths.add(stroke.baseWidth * pressureFactor * velocityFactor);
+      widths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
     }
 
-    // Smooth widths to avoid jitter (3-pass for extra smoothness)
-    final smoothWidths = List<double>.from(widths);
     for (int pass = 0; pass < 2; pass++) {
-      for (int i = 1; i < smoothWidths.length - 1; i++) {
-        smoothWidths[i] = (smoothWidths[i - 1] + smoothWidths[i] * 2 + smoothWidths[i + 1]) / 4;
+      for (int i = 1; i < widths.length - 1; i++) {
+        widths[i] = (widths[i - 1] + widths[i] * 2 + widths[i + 1]) / 4;
       }
     }
 
-    // Build left and right edge points
-    final leftEdge = <Offset>[];
-    final rightEdge = <Offset>[];
-
-    for (int i = 0; i < interpolated.length; i++) {
-      final p = interpolated[i];
-      final w = smoothWidths[i] / 2;
-
-      // Compute perpendicular direction
-      double nx, ny;
-      if (i == 0) {
-        final next = interpolated[i + 1];
-        final dx = next.x - p.x;
-        final dy = next.y - p.y;
-        final len = sqrt(dx * dx + dy * dy);
-        if (len == 0) { nx = 0; ny = 1; } else { nx = -dy / len; ny = dx / len; }
-      } else if (i == interpolated.length - 1) {
-        final prev = interpolated[i - 1];
-        final dx = p.x - prev.x;
-        final dy = p.y - prev.y;
-        final len = sqrt(dx * dx + dy * dy);
-        if (len == 0) { nx = 0; ny = 1; } else { nx = -dy / len; ny = dx / len; }
-      } else {
-        final prev = interpolated[i - 1];
-        final next = interpolated[i + 1];
-        final dx = next.x - prev.x;
-        final dy = next.y - prev.y;
-        final len = sqrt(dx * dx + dy * dy);
-        if (len == 0) { nx = 0; ny = 1; } else { nx = -dy / len; ny = dx / len; }
-      }
-
-      leftEdge.add(Offset(p.x + nx * w, p.y + ny * w));
-      rightEdge.add(Offset(p.x - nx * w, p.y - ny * w));
+    for (int i = 0; i < interpolated.length - 1; i++) {
+      final p0 = interpolated[i];
+      final p1 = interpolated[i + 1];
+      paint.strokeWidth = ((widths[i] + widths[i + 1]) * 0.5).clamp(0.4, 999.0);
+      canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
     }
 
-    // Draw per-segment quads (no single-polygon artifacts)
-    for (int i = 0; i < leftEdge.length - 1; i++) {
-      final segPath = Path()
-        ..moveTo(leftEdge[i].dx, leftEdge[i].dy)
-        ..lineTo(leftEdge[i + 1].dx, leftEdge[i + 1].dy)
-        ..lineTo(rightEdge[i + 1].dx, rightEdge[i + 1].dy)
-        ..lineTo(rightEdge[i].dx, rightEdge[i].dy)
-        ..close();
-      canvas.drawPath(segPath, fillPaint);
-    }
-
-    // Round caps at start and end
-    final firstP = interpolated.first;
-    final firstW = smoothWidths.first / 2;
-    canvas.drawCircle(Offset(firstP.x, firstP.y), firstW, fillPaint);
-    final lastP = interpolated.last;
-    final lastW = smoothWidths.last / 2;
-    canvas.drawCircle(Offset(lastP.x, lastP.y), lastW, fillPaint);
+    canvas.drawCircle(
+      Offset(interpolated.first.x, interpolated.first.y),
+      (widths.first * 0.5).clamp(0.2, 999.0),
+      Paint()
+        ..color = color.withValues(alpha: stroke.opacity)
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true,
+    );
+    canvas.drawCircle(
+      Offset(interpolated.last.x, interpolated.last.y),
+      (widths.last * 0.5).clamp(0.2, 999.0),
+      Paint()
+        ..color = color.withValues(alpha: stroke.opacity)
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true,
+    );
   }
 
   List<StrokePoint> _catmullRomInterpolate(List<StrokePoint> points) {
     if (points.length < 4) return points;
     final result = <StrokePoint>[];
-    // Use fewer segments for committed strokes — 3 is visually smooth enough
-    const segments = 3;
+    // Smooth Catmull-Rom interpolation — 5 segments per span
+    const segments = 5;
 
     for (int i = 0; i < points.length - 1; i++) {
       final p0 = i > 0 ? points[i - 1] : points[i];
@@ -454,7 +434,7 @@ class CanvasRenderEngine extends CustomPainter {
     if (cachedImage != null) {
       final srcRect = Rect.fromLTWH(0, 0, cachedImage.width.toDouble(), cachedImage.height.toDouble());
       final imgPaint = Paint()
-        ..filterQuality = FilterQuality.medium
+        ..filterQuality = FilterQuality.low
         ..color = Colors.white.withValues(alpha: imageData.opacity);
       canvas.drawImageRect(cachedImage, srcRect, rect, imgPaint);
     } else {
@@ -543,6 +523,34 @@ class CanvasRenderEngine extends CustomPainter {
         if (fillPaint != null) canvas.drawPath(path, fillPaint);
         canvas.drawPath(path, strokePaint);
         break;
+      case 'xy_plane':
+        // XY plane: two arrows from an origin, with optional grid lines
+        final ox = shape.x1;
+        final oy = shape.y2; // origin at bottom-left
+        final ex = shape.x2;
+        final ey = shape.y1;
+        final w = ex - ox;
+        final h = oy - ey;
+        final arrowSz = (min(w, h) * 0.06).clamp(6.0, 16.0);
+        // X axis
+        canvas.drawLine(Offset(ox, oy), Offset(ex, oy), strokePaint);
+        _paintArrowHeadPoints(canvas, Offset(ex - arrowSz * 2, oy), Offset(ex, oy), arrowSz, strokePaint);
+        // Y axis
+        canvas.drawLine(Offset(ox, oy), Offset(ox, ey), strokePaint);
+        _paintArrowHeadPoints(canvas, Offset(ox, ey + arrowSz * 2), Offset(ox, ey), arrowSz, strokePaint);
+        // Labels using canvas.drawParagraph is complex; draw small tick marks
+        final tickPaint = Paint()
+          ..color = Color(shape.strokeColor).withValues(alpha: 0.4)
+          ..strokeWidth = 0.8
+          ..style = PaintingStyle.stroke;
+        const numTicks = 5;
+        for (int i = 1; i <= numTicks; i++) {
+          final tx = ox + i * w / (numTicks + 1);
+          canvas.drawLine(Offset(tx, oy - 4), Offset(tx, oy + 4), tickPaint);
+          final ty = oy - i * h / (numTicks + 1);
+          canvas.drawLine(Offset(ox - 4, ty), Offset(ox + 4, ty), tickPaint);
+        }
+        break;
     }
     canvas.restore();
   }
@@ -556,6 +564,17 @@ class CanvasRenderEngine extends CustomPainter {
       ..lineTo(shape.x2 - arrowLen * cos(angle - arrowAngle), shape.y2 - arrowLen * sin(angle - arrowAngle))
       ..moveTo(shape.x2, shape.y2)
       ..lineTo(shape.x2 - arrowLen * cos(angle + arrowAngle), shape.y2 - arrowLen * sin(angle + arrowAngle));
+    canvas.drawPath(path, paint);
+  }
+
+  void _paintArrowHeadPoints(Canvas canvas, Offset from, Offset to, double size, Paint paint) {
+    final angle = atan2(to.dy - from.dy, to.dx - from.dx);
+    const spread = 0.5;
+    final path = Path()
+      ..moveTo(to.dx, to.dy)
+      ..lineTo(to.dx - size * cos(angle - spread), to.dy - size * sin(angle - spread))
+      ..moveTo(to.dx, to.dy)
+      ..lineTo(to.dx - size * cos(angle + spread), to.dy - size * sin(angle + spread));
     canvas.drawPath(path, paint);
   }
 
@@ -590,6 +609,10 @@ class CanvasRenderEngine extends CustomPainter {
           ..close();
         canvas.drawPath(path, previewPaint);
         break;
+      case 'xy_plane':
+        canvas.drawLine(Offset(start.dx, end.dy), Offset(end.dx, end.dy), previewPaint);
+        canvas.drawLine(Offset(start.dx, end.dy), Offset(start.dx, start.dy), previewPaint);
+        break;
     }
   }
 
@@ -618,11 +641,11 @@ class CanvasRenderEngine extends CustomPainter {
     }
   }
 
-  void _paintLassoPath(Canvas canvas) {
+  void _paintLassoPathFromPoints(Canvas canvas, List<Offset> points) {
     // Build the full closed path
-    final fullPath = Path()..moveTo(lassoPath![0].dx, lassoPath![0].dy);
-    for (int i = 1; i < lassoPath!.length; i++) {
-      fullPath.lineTo(lassoPath![i].dx, lassoPath![i].dy);
+    final fullPath = Path()..moveTo(points[0].dx, points[0].dy);
+    for (int i = 1; i < points.length; i++) {
+      fullPath.lineTo(points[i].dx, points[i].dy);
     }
     fullPath.close(); // Always close back to start
 
@@ -640,7 +663,7 @@ class CanvasRenderEngine extends CustomPainter {
       ..isAntiAlias = true;
 
     // Compute total path length and draw dashes
-    final allPoints = [...lassoPath!, lassoPath![0]]; // include closing segment
+    final allPoints = [...points, points[0]]; // include closing segment
     const dashLen = 6.0;
     const gapLen = 4.0;
     double accumulator = 0;
