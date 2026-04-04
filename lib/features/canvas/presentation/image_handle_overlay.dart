@@ -111,10 +111,10 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           _buildRotateHandle(bounds),
         ],
 
-        // Action buttons bar (above the element)
+        // Action buttons bar (above the rotate handle)
         Positioned(
           left: bounds.left,
-          top: bounds.top - 40,
+          top: bounds.top - _rotateHandleDistance - 24 - 38,
           child: _buildActionBar(),
         ),
       ],

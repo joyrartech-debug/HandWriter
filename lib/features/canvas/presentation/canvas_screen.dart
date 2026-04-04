@@ -13,6 +13,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
@@ -99,7 +100,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
   Future<void> _save({bool silent = false}) async {
     if (_isSaving) return;
-    setState(() => _isSaving = true);
+    _isSaving = true;
+    if (!silent && mounted) setState(() {});
     try {
       await ref.read(canvasProvider.notifier).save();
       if (mounted && !silent) {
@@ -112,7 +114,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Errore: $e')));
       }
     } finally {
-      if (mounted) setState(() => _isSaving = false);
+      _isSaving = false;
+      if (!silent && mounted) setState(() {});
     }
   }
 
@@ -489,10 +492,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    // Check if tapping on an image/shape → select it.
-    // For non-draw tools (lasso/pan/text): always check.
-    // For draw tools: only select if input is mouse or touch (not stylus),
-    // so stylus always draws and mouse/finger can tap to select images.
+    // Check if tapping on an image → select it.
+    // For non-draw tools (lasso/pan/text): check images and shapes.
+    // For draw tools: only select images (not shapes) if input is mouse or touch,
+    // so stylus always draws and recognized shapes don't block subsequent drawing.
     {
       final bool shouldCheckImageTap;
       if (tool == CanvasTool.lasso || tool == CanvasTool.pan || tool == CanvasTool.text) {
@@ -503,7 +506,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         shouldCheckImageTap = false;
       }
       if (shouldCheckImageTap) {
-        final tappedImageOrShape = _findImageOrShapeAt(state, pagePos);
+        final onlyImages = _isDrawLikeTool(tool);
+        final tappedImageOrShape = _findImageOrShapeAt(state, pagePos, imagesOnly: onlyImages);
         if (tappedImageOrShape != null) {
           ref.read(canvasProvider.notifier).selectElement(tappedImageOrShape);
           return;
@@ -663,7 +667,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
     if (_isDraggingSelection) {
       _isDraggingSelection = false;
-      ref.read(canvasProvider.notifier).applySelectionMove();
+      ref.read(canvasProvider.notifier).applySelectionTransform();
       return;
     }
 
@@ -714,6 +718,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   void _onPointerCancel(PointerCancelEvent event) {
     _activePointers = max(0, _activePointers - 1);
     _isTouchPanning = false;
+    _isDraggingSelection = false;
+    _holdRecognizeTimer?.cancel();
+    _shapeRecognizedDuringHold = false;
+    // Cancel any in-progress stroke or lasso
+    if (_activeStrokeNotifier.isActive) {
+      _activeStrokeNotifier.clear();
+      ref.read(canvasProvider.notifier).cancelStroke();
+    }
+    if (_lassoPathNotifier.isActive) {
+      _lassoPathNotifier.clear();
+    }
+    // Restore barrel button state
+    if (_barrelButtonErasing) {
+      _barrelButtonErasing = false;
+      if (_barrelButtonPreviousTool != null) {
+        ref.read(canvasProvider.notifier).setTool(_barrelButtonPreviousTool!);
+        _barrelButtonPreviousTool = null;
+      }
+    }
   }
 
   String? _findElementAt(CanvasState state, Offset pagePos) {
@@ -755,7 +778,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   }
 
   /// Find an image or shape element at the given page position (ignoring strokes/text).
-  String? _findImageOrShapeAt(CanvasState state, Offset pagePos) {
+  String? _findImageOrShapeAt(CanvasState state, Offset pagePos, {bool imagesOnly = false}) {
     final page = state.currentPage;
     if (page == null) return null;
     for (int i = page.layers.content.length - 1; i >= 0; i--) {
@@ -770,8 +793,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           bounds = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
         },
         shape: (s) {
-          id = s.id;
-          bounds = Rect.fromPoints(Offset(s.data.x1, s.data.y1), Offset(s.data.x2, s.data.y2));
+          if (!imagesOnly) {
+            id = s.id;
+            bounds = Rect.fromPoints(Offset(s.data.x1, s.data.y1), Offset(s.data.x2, s.data.y2));
+          }
         },
       );
       if (bounds != null && bounds!.inflate(5).contains(pagePos) && id != null) {
@@ -855,6 +880,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       ),
     );
 
+    controller.dispose();
     if (text != null && text.isNotEmpty) {
       ref.read(canvasProvider.notifier).addTextElement(pagePos, text);
     }
@@ -1247,8 +1273,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
               // Transform handles for selected elements
               ..._buildTransformHandles(canvasState, canvasSize),
 
-              // Lasso selection rotation handle
-              ..._buildLassoRotateHandle(canvasState, canvasSize),
+              // Lasso selection handles (resize corners + rotation)
+              ..._buildLassoHandles(canvasState, canvasSize),
 
               // Recognized shape adjustment indicator (only for shape tool adjustment mode)
               if (canvasState.isAdjustingRecognized && canvasState.recognizedShape != null)
@@ -1538,6 +1564,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         ],
       ),
     );
+    controller.dispose();
     if (result != null) {
       ref.read(canvasProvider.notifier).setImageComment(elementId, result.isEmpty ? null : result);
     }
@@ -1580,17 +1607,66 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
   // ── Lasso selection rotation handle ──
 
-  List<Widget> _buildLassoRotateHandle(CanvasState state, Size canvasSize) {
+  List<Widget> _buildLassoHandles(CanvasState state, Size canvasSize) {
     final sel = state.lassoSelection;
     if (sel == null) return [];
 
-    final bounds = sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy);
-    final screenTL = _toScreenCoords(bounds.topLeft, state, canvasSize);
-    final screenBR = _toScreenCoords(bounds.bottomRight, state, canvasSize);
+    final center = sel.bounds.center;
+    final scaledBounds = Rect.fromCenter(
+      center: center,
+      width: sel.bounds.width * sel.scale,
+      height: sel.bounds.height * sel.scale,
+    ).translate(sel.dragOffset.dx, sel.dragOffset.dy);
+
+    final screenTL = _toScreenCoords(scaledBounds.topLeft, state, canvasSize);
+    final screenBR = _toScreenCoords(scaledBounds.bottomRight, state, canvasSize);
     final screenRect = Rect.fromPoints(screenTL, screenBR);
     final centerTop = Offset(screenRect.center.dx, screenRect.top - 40);
 
+    Widget buildCornerHandle(Offset screenPos, MouseCursor cursor) {
+      return Positioned(
+        left: screenPos.dx - 7,
+        top: screenPos.dy - 7,
+        child: MouseRegion(
+          cursor: cursor,
+          child: GestureDetector(
+            onPanStart: (d) {
+              _resizeDragStart = d.globalPosition;
+              _resizeInitialScale = sel.scale;
+            },
+            onPanUpdate: (d) {
+              final centerScreen = screenRect.center;
+              final startDist = (_resizeDragStart - centerScreen).distance;
+              final currentDist = (d.globalPosition - centerScreen).distance;
+              if (startDist > 5) {
+                final newScale = _resizeInitialScale * (currentDist / startDist);
+                ref.read(canvasProvider.notifier).scaleSelectionPreview(newScale.clamp(0.1, 10.0));
+              }
+            },
+            onPanEnd: (_) {
+              ref.read(canvasProvider.notifier).applySelectionTransform();
+            },
+            child: Container(
+              width: 14, height: 14,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                shape: BoxShape.circle,
+                border: Border.all(color: Colors.blue, width: 1.5),
+                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 2)],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
     return [
+      // Corner resize handles
+      buildCornerHandle(screenRect.topLeft, SystemMouseCursors.resizeUpLeft),
+      buildCornerHandle(screenRect.topRight, SystemMouseCursors.resizeUpRight),
+      buildCornerHandle(screenRect.bottomLeft, SystemMouseCursors.resizeDownLeft),
+      buildCornerHandle(screenRect.bottomRight, SystemMouseCursors.resizeDownRight),
+
       // Rotation handle
       Positioned(
         left: centerTop.dx - 14,
@@ -1598,9 +1674,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         child: Column(
           children: [
             GestureDetector(
-              onPanStart: (_) {
-                // Push undo at start
-              },
               onPanUpdate: (d) {
                 final centerGlobal = screenRect.center;
                 final prev = d.globalPosition - d.delta;
@@ -1610,7 +1683,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                 ref.read(canvasProvider.notifier).rotateSelection(deltaAngle);
               },
               onPanEnd: (_) {
-                ref.read(canvasProvider.notifier).applySelectionRotation();
+                ref.read(canvasProvider.notifier).applySelectionTransform();
               },
               child: Container(
                 width: 28, height: 28,
@@ -1630,6 +1703,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       ),
     ];
   }
+
+  // Fields for resize drag tracking
+  Offset _resizeDragStart = Offset.zero;
+  double _resizeInitialScale = 1.0;
 
   // ── Context menu (right-click) ──
 
@@ -2093,6 +2170,36 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                 splashRadius: 18,
               ),
               const Spacer(),
+              // Zoom indicator — tap to reset to 100%
+              GestureDetector(
+                onTap: () {
+                  ref.read(canvasProvider.notifier).setZoomAndPan(1.0, Offset.zero);
+                },
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: canvasState.zoom != 1.0 ? Colors.blue.shade50 : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${(canvasState.zoom * 100).round()}%',
+                    style: TextStyle(
+                      color: canvasState.zoom != 1.0 ? Colors.blue.shade700 : Colors.grey.shade600,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                'v${AppConfig.appVersion}',
+                style: TextStyle(
+                  color: Colors.grey.shade400,
+                  fontSize: 10,
+                ),
+              ),
+              const SizedBox(width: 4),
               IconButton(
                 icon: Icon(Icons.add_rounded, color: Colors.blue.shade600, size: 20),
                 onPressed: () => ref.read(canvasProvider.notifier).addPage(),

@@ -36,7 +36,7 @@ double eraserSizeToRadius(EraserSize size) {
   }
 }
 
-enum PaperType { blank, linedNarrow, linedWide, grid, dotted }
+enum PaperType { blank, linedNarrow, linedWide, grid, dotted, cornell, isometric, music }
 
 String paperTypeToString(PaperType type) {
   switch (type) {
@@ -45,6 +45,9 @@ String paperTypeToString(PaperType type) {
     case PaperType.linedWide: return 'lined_wide';
     case PaperType.grid: return 'grid';
     case PaperType.dotted: return 'dotted';
+    case PaperType.cornell: return 'cornell';
+    case PaperType.isometric: return 'isometric';
+    case PaperType.music: return 'music';
   }
 }
 
@@ -55,6 +58,9 @@ PaperType paperTypeFromString(String s) {
     case 'lined': return PaperType.linedWide;
     case 'grid': return PaperType.grid;
     case 'dotted': return PaperType.dotted;
+    case 'cornell': return PaperType.cornell;
+    case 'isometric': return PaperType.isometric;
+    case 'music': return PaperType.music;
     default: return PaperType.blank;
   }
 }
@@ -66,6 +72,9 @@ String paperTypeLabel(PaperType type) {
     case PaperType.linedWide: return 'Righe larghe';
     case PaperType.grid: return 'Quadretti';
     case PaperType.dotted: return 'Puntinato';
+    case PaperType.cornell: return 'Cornell';
+    case PaperType.isometric: return 'Isometrico';
+    case PaperType.music: return 'Pentagramma';
   }
 }
 
@@ -76,6 +85,9 @@ double paperTypeLineSpacing(PaperType type) {
     case PaperType.linedWide: return 35.0;
     case PaperType.grid: return 25.0;
     case PaperType.dotted: return 25.0;
+    case PaperType.cornell: return 25.0;
+    case PaperType.isometric: return 30.0;
+    case PaperType.music: return 8.0;
   }
 }
 
@@ -127,12 +139,14 @@ class LassoSelection {
   final Rect bounds;
   final Offset dragOffset;
   final double rotation;
+  final double scale;
 
   const LassoSelection({
     required this.selectedIds,
     required this.bounds,
     this.dragOffset = Offset.zero,
     this.rotation = 0.0,
+    this.scale = 1.0,
   });
 
   LassoSelection copyWith({
@@ -140,11 +154,13 @@ class LassoSelection {
     Rect? bounds,
     Offset? dragOffset,
     double? rotation,
+    double? scale,
   }) => LassoSelection(
     selectedIds: selectedIds ?? this.selectedIds,
     bounds: bounds ?? this.bounds,
     dragOffset: dragOffset ?? this.dragOffset,
     rotation: rotation ?? this.rotation,
+    scale: scale ?? this.scale,
   );
 }
 
@@ -493,6 +509,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Cancel the current stroke without committing (e.g. when pinch-to-zoom starts)
   void cancelStroke() {
     if (state == null) return;
+    _eraserUndoPushed = false;
     state = state!.copyWith(
       activeStroke: [],
       clearShapeStart: true,
@@ -620,20 +637,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       return;
     }
 
-    // For pen/brush/highlighter: points come via commitActiveStroke
-    if (state!.activeStroke.isEmpty) return;
-
-    state = state!.copyWith(
-      activeStroke: [
-        ...state!.activeStroke,
-        StrokePoint(
-          x: position.dx,
-          y: position.dy,
-          pressure: pressure,
-          timestamp: DateTime.now().millisecondsSinceEpoch,
-        ),
-      ],
-    );
+    // Pen/brush/highlighter: fast notifier handles visual rendering,
+    // no need to update Riverpod state on every point (avoids O(n) list copy).
+    // Points are committed via commitAndEndStroke on pointer up.
   }
 
   /// Called from the fast notifier to bulk-set the active stroke before endStroke.
@@ -849,29 +855,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   List<StrokePoint> _smoothStrokePoints(List<StrokePoint> raw) {
     if (raw.length < 5) return raw;
 
-    // Pass 1: moving average smoothing (3 passes for cleaner curves)
+    // Adaptive pass count: fewer passes for short strokes
+    final passCount = raw.length < 50 ? 1 : 2;
     var points = List<StrokePoint>.from(raw);
-    for (int pass = 0; pass < 3; pass++) {
+    for (int pass = 0; pass < passCount; pass++) {
       final smoothed = List<StrokePoint>.from(points);
-      for (int i = 2; i < points.length - 2; i++) {
-        final p0 = points[i - 2];
-        final p1 = points[i - 1];
-        final p2 = points[i];
-        final p3 = points[i + 1];
-        final p4 = points[i + 2];
+      for (int i = 1; i < points.length - 1; i++) {
+        final p0 = points[i - 1];
+        final p1 = points[i];
+        final p2 = points[i + 1];
         smoothed[i] = StrokePoint(
-          x: (p0.x + p1.x * 2 + p2.x * 4 + p3.x * 2 + p4.x) / 10,
-          y: (p0.y + p1.y * 2 + p2.y * 4 + p3.y * 2 + p4.y) / 10,
-          pressure: (p0.pressure + p1.pressure * 2 + p2.pressure * 4 + p3.pressure * 2 + p4.pressure) / 10,
-          timestamp: p2.timestamp,
+          x: (p0.x + p1.x * 2 + p2.x) / 4,
+          y: (p0.y + p1.y * 2 + p2.y) / 4,
+          pressure: (p0.pressure + p1.pressure * 2 + p2.pressure) / 4,
+          timestamp: p1.timestamp,
         );
       }
       points = smoothed;
     }
 
-    // Pass 2: decimate points that are too close together (reduce density)
+    // Decimate points that are too close together
     final decimated = <StrokePoint>[points.first];
-    const minDistSq = 1.5 * 1.5; // minimum 1.5px apart
+    const minDistSq = 1.5 * 1.5;
     for (int i = 1; i < points.length - 1; i++) {
       final last = decimated.last;
       final dx = points[i].x - last.x;
@@ -880,7 +885,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         decimated.add(points[i]);
       }
     }
-    decimated.add(points.last); // always keep last point
+    decimated.add(points.last);
 
     return decimated;
   }
@@ -980,8 +985,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (!isClosed) return null;
 
     // ── CLOSED SHAPE ANALYSIS ──
-    final cx = (minX + maxX) / 2;
-    final cy = (minY + maxY) / 2;
+    // Use centroid (arithmetic mean) for a stable center unaffected by drawing asymmetry
+    final cx = points.map((p) => p.x).reduce((a, b) => a + b) / points.length;
+    final cy = points.map((p) => p.y).reduce((a, b) => a + b) / points.length;
 
     // Compute area using shoelace formula
     double area = 0;
@@ -1206,8 +1212,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
             if (rect.contains(position)) shouldRemoveWhole = true;
           },
-          image: (_) {
-            // Never erase images (PDFs, symbols) with the eraser
+          image: (img) {
+            // Allow erasing symbols (placed via symbol library) but not imported images/PDFs
+            if (img.data.assetPath.startsWith('symbol_')) {
+              final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
+              if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+            }
           },
           shape: (sh) {
             final rect = Rect.fromPoints(
@@ -1280,9 +1290,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
             if (rect.contains(position)) { changed = true; } else { newContent.add(element); }
           },
-          image: (_) {
-            // Never erase images (PDFs, symbols) with the eraser
-            newContent.add(element);
+          image: (img) {
+            // Allow erasing symbols but not imported images/PDFs
+            if (img.data.assetPath.startsWith('symbol_')) {
+              final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
+              if (rect.contains(position)) { changed = true; } else { newContent.add(element); }
+            } else {
+              newContent.add(element);
+            }
           },
           shape: (sh) {
             final rect = Rect.fromPoints(Offset(sh.data.x1, sh.data.y1), Offset(sh.data.x2, sh.data.y2));
@@ -1453,11 +1468,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         if (e.data.points.isEmpty) return null;
         final xs = e.data.points.map((p) => p.x);
         final ys = e.data.points.map((p) => p.y);
-        return Rect.fromLTRB(xs.reduce(min), ys.reduce(min), xs.reduce(max), ys.reduce(max));
+        final halfW = e.data.baseWidth / 2.0;
+        return Rect.fromLTRB(xs.reduce(min) - halfW, ys.reduce(min) - halfW, xs.reduce(max) + halfW, ys.reduce(max) + halfW);
       },
       text: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
       image: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
-      shape: (e) => Rect.fromPoints(Offset(e.data.x1, e.data.y1), Offset(e.data.x2, e.data.y2)),
+      shape: (e) {
+        final halfW = e.data.strokeWidth / 2.0;
+        return Rect.fromPoints(Offset(e.data.x1, e.data.y1), Offset(e.data.x2, e.data.y2)).inflate(halfW);
+      },
     );
   }
 
@@ -1466,46 +1485,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(
       lassoSelection: state!.lassoSelection!.copyWith(
         dragOffset: state!.lassoSelection!.dragOffset + delta,
-      ),
-    );
-  }
-
-  void applySelectionMove() {
-    if (state == null || state!.lassoSelection == null) return;
-    final s = state!;
-    final sel = s.lassoSelection!;
-    if (sel.dragOffset == Offset.zero) return;
-
-    final page = s.currentPage;
-    if (page == null) return;
-    final fileName = s.currentPageFileName;
-    final undoStack = _pushUndo(s, fileName, page);
-
-    final updatedContent = page.layers.content.map((element) {
-      final id = element.map(
-        stroke: (e) => e.id, text: (e) => e.id,
-        image: (e) => e.id, shape: (e) => e.id,
-      );
-      if (!sel.selectedIds.contains(id)) return element;
-      return _translateElement(element, sel.dragOffset);
-    }).toList();
-
-    final updatedPage = PageData(
-      pageId: page.pageId, pageNumber: page.pageNumber,
-      width: page.width, height: page.height,
-      layers: RenderingLayers(background: page.layers.background, content: updatedContent),
-      assetReferences: page.assetReferences,
-      createdAt: page.createdAt, modifiedAt: DateTime.now(),
-    );
-
-    final updatedPages = Map<String, PageData>.from(s.pages);
-    updatedPages[fileName] = updatedPage;
-
-    state = s.copyWith(
-      pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true,
-      lassoSelection: LassoSelection(
-        selectedIds: sel.selectedIds,
-        bounds: sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy),
       ),
     );
   }
@@ -1561,17 +1540,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
-  void applySelectionRotation() {
+  void scaleSelectionPreview(double scale) {
+    if (state == null || state!.lassoSelection == null) return;
+    state = state!.copyWith(
+      lassoSelection: state!.lassoSelection!.copyWith(scale: scale),
+    );
+  }
+
+  void applySelectionTransform() {
     if (state == null || state!.lassoSelection == null) return;
     final s = state!;
     final sel = s.lassoSelection!;
-    if (sel.rotation == 0.0) return;
+    if (sel.rotation == 0.0 && sel.dragOffset == Offset.zero && sel.scale == 1.0) return;
 
     final page = s.currentPage;
     if (page == null) return;
     final fileName = s.currentPageFileName;
     final undoStack = _pushUndo(s, fileName, page);
-    final center = sel.bounds.center + sel.dragOffset;
+    final center = sel.bounds.center;
 
     final updatedContent = page.layers.content.map((element) {
       final id = element.map(
@@ -1579,7 +1565,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         image: (e) => e.id, shape: (e) => e.id,
       );
       if (!sel.selectedIds.contains(id)) return element;
-      return _rotateElementAroundCenter(element, center, sel.rotation);
+      var updated = element;
+      if (sel.scale != 1.0) {
+        updated = _scaleElement(updated, center, sel.scale);
+      }
+      if (sel.rotation != 0.0) {
+        updated = _rotateElementAroundCenter(updated, center, sel.rotation);
+      }
+      if (sel.dragOffset != Offset.zero) {
+        updated = _translateElement(updated, sel.dragOffset);
+      }
+      return updated;
     }).toList();
 
     final updatedPage = PageData(
@@ -1593,9 +1589,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[fileName] = updatedPage;
 
+    // Recalculate bounds from actual transformed element positions
+    Rect? newBounds;
+    for (final element in updatedContent) {
+      final id = element.map(
+        stroke: (e) => e.id, text: (e) => e.id,
+        image: (e) => e.id, shape: (e) => e.id,
+      );
+      if (!sel.selectedIds.contains(id)) continue;
+      final eb = _getElementBounds(element);
+      if (eb == null) continue;
+      newBounds = newBounds == null ? eb : newBounds.expandToInclude(eb);
+    }
+
     state = s.copyWith(
       pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true,
-      lassoSelection: LassoSelection(selectedIds: sel.selectedIds, bounds: sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy)),
+      lassoSelection: LassoSelection(
+        selectedIds: sel.selectedIds,
+        bounds: newBounds ?? sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy),
+      ),
     );
   }
 
@@ -1644,6 +1656,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             assetPath: e.data.assetPath,
             rotation: e.data.rotation + angle,
             opacity: e.data.opacity,
+            locked: e.data.locked,
+            comment: e.data.comment,
           ),
         );
       },
@@ -1759,7 +1773,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void goToPage(int index) {
     if (state == null || index < 0 || index >= state!.pageCount) return;
-    state = state!.copyWith(currentPageIndex: index, clearLasso: true, lassoPath: []);
+    state = state!.copyWith(
+      currentPageIndex: index,
+      activeStroke: [],
+      clearLasso: true,
+      lassoPath: [],
+      clearSelectedElement: true,
+    );
   }
 
   void nextPage() {
@@ -1860,10 +1880,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Pages remain, but chapterId is cleared.
     final pages = s.document.pages.map((p) => p.chapterId == chapterId ? p.copyWith(chapterId: null) : p).toList();
     final document = s.document.copyWith(pages: pages);
+    // If deleted chapter was the active filter, clear the filter
+    final clearActiveChapter = s.activeChapterId == chapterId;
     state = s.copyWith(
       metadata: s.metadata.copyWith(chapters: chapters, modifiedAt: DateTime.now()),
       document: document,
       isDirty: true,
+      clearActiveChapter: clearActiveChapter,
     );
   }
 
@@ -1975,6 +1998,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           x: e.data.x + offset.dx, y: e.data.y + offset.dy,
           width: e.data.width, height: e.data.height,
           assetPath: e.data.assetPath, rotation: e.data.rotation, opacity: e.data.opacity,
+          locked: e.data.locked, comment: e.data.comment,
         ),
       ),
       shape: (e) => ContentElement.shape(
@@ -2023,6 +2047,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           y: center.dy + (e.data.y - center.dy) * scale,
           width: e.data.width * scale, height: e.data.height * scale,
           assetPath: e.data.assetPath, rotation: e.data.rotation, opacity: e.data.opacity,
+          locked: e.data.locked, comment: e.data.comment,
         ),
       ),
       shape: (e) => ContentElement.shape(
@@ -2478,6 +2503,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             assetPath: newAssetId,
             rotation: e.data.rotation,
             opacity: e.data.opacity,
+            locked: e.data.locked, comment: e.data.comment,
           ),
         ),
         shape: (e) => e as ContentElement,
@@ -2772,8 +2798,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (currentPage == null) return;
     final currentFileName = current.currentPageFileName;
 
-    final symbolW = symbol.bounds.width <= 0 ? 1.0 : symbol.bounds.width;
-    final symbolH = symbol.bounds.height <= 0 ? 1.0 : symbol.bounds.height;
+    // Compute the same padding used during rasterization
+    double maxHalfStroke = 2.0;
+    for (final e in symbol.elements) {
+      e.mapOrNull(
+        stroke: (s) {
+          final half = s.data.baseWidth / 2.0;
+          if (half > maxHalfStroke) maxHalfStroke = half;
+        },
+        shape: (s) {
+          final half = s.data.strokeWidth / 2.0;
+          if (half > maxHalfStroke) maxHalfStroke = half;
+        },
+      );
+    }
+    final paddedBounds = symbol.bounds.inflate(maxHalfStroke);
+    final symbolW = paddedBounds.width <= 0 ? 1.0 : paddedBounds.width;
+    final symbolH = paddedBounds.height <= 0 ? 1.0 : paddedBounds.height;
     final assetId = 'symbol_${const Uuid().v4()}.png';
 
     final imgElement = ContentElement.image(
@@ -2821,15 +2862,32 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   Future<(Uint8List, ui.Image)?> _rasterizeSymbol(ReusableSymbol symbol) async {
     // Render at 3x resolution for crisp quality
     const double renderScale = 3.0;
-    final baseW = symbol.bounds.width <= 0 ? 1.0 : symbol.bounds.width;
-    final baseH = symbol.bounds.height <= 0 ? 1.0 : symbol.bounds.height;
+
+    // Compute padding: half of the thickest stroke so edges aren't clipped
+    double maxHalfStroke = 2.0; // minimum padding
+    for (final e in symbol.elements) {
+      e.mapOrNull(
+        stroke: (s) {
+          final half = s.data.baseWidth / 2.0;
+          if (half > maxHalfStroke) maxHalfStroke = half;
+        },
+        shape: (s) {
+          final half = s.data.strokeWidth / 2.0;
+          if (half > maxHalfStroke) maxHalfStroke = half;
+        },
+      );
+    }
+
+    final paddedBounds = symbol.bounds.inflate(maxHalfStroke);
+    final baseW = paddedBounds.width <= 0 ? 1.0 : paddedBounds.width;
+    final baseH = paddedBounds.height <= 0 ? 1.0 : paddedBounds.height;
     final renderW = (baseW * renderScale).ceil();
     final renderH = (baseH * renderScale).ceil();
 
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, renderW.toDouble(), renderH.toDouble()));
     canvas.scale(renderScale);
-    canvas.translate(-symbol.bounds.left, -symbol.bounds.top);
+    canvas.translate(-paddedBounds.left, -paddedBounds.top);
 
     for (final element in symbol.elements) {
       element.map(
@@ -3056,7 +3114,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // Renumber
     for (int i = 0; i < pages.length; i++) {
-      pages[i] = PageEntry(pageId: pages[i].pageId, pageNumber: i + 1, fileName: pages[i].fileName, lastModified: pages[i].lastModified);
+      pages[i] = PageEntry(
+        pageId: pages[i].pageId,
+        pageNumber: i + 1,
+        fileName: pages[i].fileName,
+        lastModified: pages[i].lastModified,
+        chapterId: pages[i].chapterId,
+      );
     }
 
     final updatedDoc = DocumentStructure(

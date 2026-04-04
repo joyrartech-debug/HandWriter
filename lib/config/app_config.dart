@@ -1,5 +1,9 @@
 /// Configurazione centralizzata dell'app HandWriter.
 class AppConfig {
+  // ── App Version ──
+  // Bump this version for each prompt-driven modification.
+  static const String appVersion = '0.16.0';
+
   // ── WebDAV / Nextcloud ──
   static const String defaultRemotePath = '/HandWriter/';
   static const int webdavTimeoutSeconds = 30;

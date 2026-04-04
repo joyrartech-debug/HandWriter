@@ -75,34 +75,34 @@ class CanvasRenderEngine extends CustomPainter {
     // 2. Page border
     _paintPageBorder(canvas);
 
-    // 3. Content elements
-    final sortedContent = List<ContentElement>.from(pageData.layers.content)
-      ..sort((a, b) {
-        final aZ = a.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex);
-        final bZ = b.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex);
-        return aZ.compareTo(bZ);
-      });
+    // 3. Content elements (cached sort to avoid O(n log n) per frame)
+    final sortedContent = _getSortedContent(pageData.layers.content);
 
     final selectedIds = lassoSelection?.selectedIds ?? [];
     final selDragOffset = lassoSelection?.dragOffset ?? Offset.zero;
     final selRotation = lassoSelection?.rotation ?? 0.0;
+    final selScale = lassoSelection?.scale ?? 1.0;
     final selCenter = lassoSelection != null
-        ? (lassoSelection!.bounds.center + selDragOffset)
+        ? lassoSelection!.bounds.center
         : Offset.zero;
+    final hasTransform = selDragOffset != Offset.zero || selRotation != 0.0 || selScale != 1.0;
 
     for (final element in sortedContent) {
       final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
       final isSelected = selectedIds.contains(id);
 
-      // If this element is being moved/rotated via lasso, apply transform
-      if (isSelected && (selDragOffset != Offset.zero || selRotation != 0.0)) {
+      // If this element is being moved/rotated/scaled via lasso, apply transform
+      if (isSelected && hasTransform) {
         canvas.save();
         canvas.translate(selDragOffset.dx, selDragOffset.dy);
-        if (selRotation != 0.0) {
-          canvas.translate(selCenter.dx - selDragOffset.dx, selCenter.dy - selDragOffset.dy);
-          canvas.rotate(selRotation);
-          canvas.translate(-(selCenter.dx - selDragOffset.dx), -(selCenter.dy - selDragOffset.dy));
+        canvas.translate(selCenter.dx, selCenter.dy);
+        if (selScale != 1.0) {
+          canvas.scale(selScale);
         }
+        if (selRotation != 0.0) {
+          canvas.rotate(selRotation);
+        }
+        canvas.translate(-selCenter.dx, -selCenter.dy);
       }
 
       element.map(
@@ -112,9 +112,8 @@ class CanvasRenderEngine extends CustomPainter {
         shape: (e) => _paintShape(canvas, e.data),
       );
 
-      if (isSelected) {
-        _paintSelectionHighlight(canvas, element);
-        if (selDragOffset != Offset.zero || selRotation != 0.0) canvas.restore();
+      if (isSelected && hasTransform) {
+        canvas.restore();
       }
     }
 
@@ -213,6 +212,15 @@ class CanvasRenderEngine extends CustomPainter {
       case 'dotted':
         _paintDottedBackground(canvas, bg.lineSpacing > 0 ? bg.lineSpacing : 25.0, linePaint);
         break;
+      case 'cornell':
+        _paintCornellBackground(canvas, bg.lineSpacing > 0 ? bg.lineSpacing : 25.0, linePaint);
+        break;
+      case 'isometric':
+        _paintIsometricBackground(canvas, bg.lineSpacing > 0 ? bg.lineSpacing : 30.0, linePaint);
+        break;
+      case 'music':
+        _paintMusicBackground(canvas, bg.lineSpacing > 0 ? bg.lineSpacing : 8.0, linePaint);
+        break;
     }
   }
 
@@ -246,6 +254,81 @@ class CanvasRenderEngine extends CustomPainter {
       for (double x = spacing; x < pageData.width; x += spacing) {
         canvas.drawCircle(Offset(x, y), 1.5, dotPaint);
       }
+    }
+  }
+
+  void _paintCornellBackground(Canvas canvas, double spacing, Paint paint) {
+    // Cornell notes: horizontal lines + left margin (cue column) + bottom summary area
+    final w = pageData.width;
+    final h = pageData.height;
+    const cueWidth = 120.0;
+    const summaryHeight = 140.0;
+
+    // Horizontal lines in note-taking area
+    for (double y = spacing + 50; y < h - summaryHeight; y += spacing) {
+      canvas.drawLine(Offset(0, y), Offset(w, y), paint);
+    }
+
+    // Vertical cue column line
+    final cuePaint = Paint()
+      ..color = const Color(0xFFE8B4B8)
+      ..strokeWidth = 1.2
+      ..style = PaintingStyle.stroke;
+    canvas.drawLine(Offset(cueWidth, 0), Offset(cueWidth, h - summaryHeight), cuePaint);
+
+    // Horizontal summary separator
+    canvas.drawLine(Offset(0, h - summaryHeight), Offset(w, h - summaryHeight), cuePaint);
+
+    // Title area separator at top
+    final titlePaint = Paint()
+      ..color = const Color(0xFFB0B0B0)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+    canvas.drawLine(Offset(0, 50), Offset(w, 50), titlePaint);
+  }
+
+  void _paintIsometricBackground(Canvas canvas, double spacing, Paint paint) {
+    final w = pageData.width;
+    final h = pageData.height;
+    final isoHeight = spacing * sqrt(3) / 2;
+
+    // Horizontal rows of triangles
+    for (double y = 0; y < h + isoHeight; y += isoHeight) {
+      // Horizontal line
+      canvas.drawLine(Offset(0, y), Offset(w, y), paint);
+    }
+    // Diagonal lines (/)
+    for (double x = -h; x < w + spacing; x += spacing) {
+      canvas.drawLine(
+        Offset(x, h),
+        Offset(x + h / tan(pi / 3), 0),
+        paint,
+      );
+    }
+    // Diagonal lines (\)
+    for (double x = 0; x < w + h; x += spacing) {
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(x - h / tan(pi / 3), h),
+        paint,
+      );
+    }
+  }
+
+  void _paintMusicBackground(Canvas canvas, double spacing, Paint paint) {
+    // Music staff: groups of 5 lines with larger gaps between staves
+    final w = pageData.width;
+    final h = pageData.height;
+    const staffLines = 5;
+    final staffGap = spacing * 4; // gap between staves
+    double y = 60; // top margin
+
+    while (y + staffLines * spacing < h - 40) {
+      // Draw 5 lines (one staff)
+      for (int i = 0; i < staffLines; i++) {
+        canvas.drawLine(Offset(30, y + i * spacing), Offset(w - 30, y + i * spacing), paint);
+      }
+      y += staffLines * spacing + staffGap;
     }
   }
 
@@ -503,7 +586,7 @@ class CanvasRenderEngine extends CustomPainter {
         break;
       case 'circle':
         final center = Offset((shape.x1 + shape.x2) / 2, (shape.y1 + shape.y2) / 2);
-        final radius = Offset(shape.x2 - shape.x1, shape.y2 - shape.y1).distance / 2;
+        final radius = (shape.x2 - shape.x1).abs() / 2;
         if (fillPaint != null) canvas.drawCircle(center, radius, fillPaint);
         canvas.drawCircle(center, radius, strokePaint);
         break;
@@ -705,58 +788,69 @@ class CanvasRenderEngine extends CustomPainter {
 
   void _paintSelectionBounds(Canvas canvas) {
     final sel = lassoSelection!;
-    final bounds = sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy);
+    final center = sel.bounds.center;
+    // Apply scale around center, then translate by dragOffset
+    final scaledBounds = Rect.fromCenter(
+      center: center,
+      width: sel.bounds.width * sel.scale,
+      height: sel.bounds.height * sel.scale,
+    ).translate(sel.dragOffset.dx, sel.dragOffset.dy);
+    final selRect = scaledBounds.inflate(4);
 
-    final borderPaint = Paint()
-      ..color = const Color(0xFF2196F3)
+    // Dashed border
+    _paintDashedRect(canvas, selRect, const Color(0xFF2196F3), 1.0);
+  }
+
+  void _paintDashedRect(Canvas canvas, Rect rect, Color color, double strokeWidth) {
+    final paint = Paint()
+      ..color = color
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
-
-    canvas.drawRect(bounds.inflate(4), borderPaint);
-
-    // Corner dots
-    final dotPaint = Paint()..color = const Color(0xFF2196F3)..style = PaintingStyle.fill;
-    for (final corner in [bounds.topLeft, bounds.topRight, bounds.bottomLeft, bounds.bottomRight]) {
-      canvas.drawCircle(corner, 4, dotPaint);
+      ..strokeWidth = strokeWidth;
+    const double dashLen = 5.0;
+    const double gapLen = 3.0;
+    for (final edge in [
+      [rect.topLeft, rect.topRight],
+      [rect.topRight, rect.bottomRight],
+      [rect.bottomRight, rect.bottomLeft],
+      [rect.bottomLeft, rect.topLeft],
+    ]) {
+      final start = edge[0];
+      final end = edge[1];
+      final dx = end.dx - start.dx;
+      final dy = end.dy - start.dy;
+      final length = (Offset(dx, dy)).distance;
+      if (length == 0) continue;
+      final ux = dx / length;
+      final uy = dy / length;
+      double d = 0;
+      while (d < length) {
+        final segEnd = (d + dashLen).clamp(0.0, length);
+        canvas.drawLine(
+          Offset(start.dx + ux * d, start.dy + uy * d),
+          Offset(start.dx + ux * segEnd, start.dy + uy * segEnd),
+          paint,
+        );
+        d += dashLen + gapLen;
+      }
     }
   }
 
-  void _paintSelectionHighlight(Canvas canvas, ContentElement element) {
-    final bounds = _getElementBounds(element);
-    if (bounds == null) return;
+  // Cached sort to avoid O(n log n) per paint frame
+  static List<ContentElement>? _cachedSortedContent;
+  static List<ContentElement>? _cachedSourceContent;
 
-    // Stronger blue fill
-    final highlightPaint = Paint()
-      ..color = const Color(0xFF2196F3).withValues(alpha: 0.18)
-      ..style = PaintingStyle.fill;
-    canvas.drawRect(bounds.inflate(5), highlightPaint);
-
-    // Visible blue border
-    final borderPaint = Paint()
-      ..color = const Color(0xFF2196F3).withValues(alpha: 0.6)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
-    canvas.drawRect(bounds.inflate(5), borderPaint);
-
-    // Corner dots
-    final dotPaint = Paint()..color = const Color(0xFF1976D2)..style = PaintingStyle.fill;
-    for (final corner in [bounds.topLeft, bounds.topRight, bounds.bottomLeft, bounds.bottomRight]) {
-      canvas.drawCircle(corner, 3.5, dotPaint);
+  static List<ContentElement> _getSortedContent(List<ContentElement> content) {
+    if (identical(content, _cachedSourceContent) && _cachedSortedContent != null) {
+      return _cachedSortedContent!;
     }
-  }
-
-  Rect? _getElementBounds(ContentElement element) {
-    return element.map(
-      stroke: (e) {
-        if (e.data.points.isEmpty) return null;
-        final xs = e.data.points.map((p) => p.x);
-        final ys = e.data.points.map((p) => p.y);
-        return Rect.fromLTRB(xs.reduce(min), ys.reduce(min), xs.reduce(max), ys.reduce(max));
-      },
-      text: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
-      image: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
-      shape: (e) => Rect.fromPoints(Offset(e.data.x1, e.data.y1), Offset(e.data.x2, e.data.y2)),
-    );
+    _cachedSourceContent = content;
+    _cachedSortedContent = List<ContentElement>.from(content)
+      ..sort((a, b) {
+        final aZ = a.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex);
+        final bZ = b.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex);
+        return aZ.compareTo(bZ);
+      });
+    return _cachedSortedContent!;
   }
 
   @override

@@ -461,6 +461,9 @@ class CanvasToolbar extends StatelessWidget {
       case PaperType.linedWide: return Icons.density_large;
       case PaperType.grid: return Icons.grid_on;
       case PaperType.dotted: return Icons.more_horiz;
+      case PaperType.cornell: return Icons.view_column_outlined;
+      case PaperType.isometric: return Icons.change_history;
+      case PaperType.music: return Icons.music_note_outlined;
     }
   }
 }
