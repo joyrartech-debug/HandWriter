@@ -345,6 +345,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         _activeStrokeNotifier.clear();
         ref.read(canvasProvider.notifier).cancelStroke();
       }
+      // Stop touch-panning so the scale handler takes over exclusively
+      _isTouchPanning = false;
       return;
     }
 
@@ -399,6 +401,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
             ref.read(canvasProvider.notifier).selectElement(tappedImage);
             return;
           }
+          // Tapped away from selection and no other image → deselect
+          ref.read(canvasProvider.notifier).deselectElement();
           _isTouchPanning = true;
           _lastFocalPoint = event.position;
           return;
@@ -444,18 +448,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     }
 
     // If there's a selected element, handle tap interactions.
-    // For draw tools: stylus ignores selection and draws through; mouse/touch can interact.
+    // For draw tools: stylus deselects and draws through; mouse/touch can interact.
     // For non-draw tools: all input devices can interact.
     if (state.selectedElementId != null) {
-      final isNonStylusInDrawMode = _isDrawLikeTool(tool) && event.kind != PointerDeviceKind.stylus;
-      if (!_isDrawLikeTool(tool) || isNonStylusInDrawMode) {
-        final selBounds = _getSelectedElementBounds(state);
-        if (selBounds != null && selBounds.inflate(10).contains(pagePos)) {
-          // Let ImageHandleOverlay or selection tool handle this interaction
-          return;
-        }
-        // Tapped outside selection — deselect
+      if (_isDrawLikeTool(tool) && event.kind == PointerDeviceKind.stylus) {
+        // Stylus in draw mode: deselect image and proceed to draw
         ref.read(canvasProvider.notifier).deselectElement();
+      } else {
+        final isNonStylusInDrawMode = _isDrawLikeTool(tool) && event.kind != PointerDeviceKind.stylus;
+        if (!_isDrawLikeTool(tool) || isNonStylusInDrawMode) {
+          final selBounds = _getSelectedElementBounds(state);
+          if (selBounds != null && selBounds.inflate(10).contains(pagePos)) {
+            // Let ImageHandleOverlay or selection tool handle this interaction
+            return;
+          }
+          // Tapped outside selection — deselect
+          ref.read(canvasProvider.notifier).deselectElement();
+        }
       }
     }
 
@@ -571,8 +580,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    // If a selected element exists and pointer is within it, don't draw
-    if (state.selectedElementId != null) return;
+    // If a selected element exists and no active stroke, don't draw
+    // (If a stroke is in progress, the element was deselected in pointerDown;
+    //  allow moves through until the state rebuilds.)
+    if (state.selectedElementId != null && !_activeStrokeNotifier.isActive) return;
 
     // Fast path: during pen/brush drawing, only update the notifier (no Riverpod rebuild).
     // Riverpod is only updated for eraser/lasso/shape tools that need state tracking.

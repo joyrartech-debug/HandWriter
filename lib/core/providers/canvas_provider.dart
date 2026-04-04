@@ -3216,6 +3216,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           : null,
     );
 
-    state = s.copyWith(metadata: updatedMeta, isDirty: false);
+    // Merge into the CURRENT state (not the stale snapshot) so strokes
+    // drawn during the async upload are preserved.
+    if (state == null) return;
+    final changedDuringSave = !identical(state!.pages, s.pages);
+    state = state!.copyWith(
+      metadata: updatedMeta,
+      isDirty: changedDuringSave,
+    );
   }
 }
