@@ -842,8 +842,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       default: toolType = 'pen';
     }
 
-    // Smooth the raw input points to reduce jitter/wigglyness
-    final smoothedPoints = _smoothStrokePoints(s.activeStroke);
+    // Smooth the raw input points to reduce jitter/wigglyness.
+    // Skip smoothing for dense stylus input (iPad etc.) — already smooth,
+    // and the gaussian stretch distorts precise pen strokes.
+    final smoothedPoints = s.activeStroke.length > 80
+        ? s.activeStroke
+        : _smoothStrokePoints(s.activeStroke);
 
     final newElement = ContentElement.stroke(
       id: const Uuid().v4(),
@@ -1104,12 +1108,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   List<int> _detectCorners(List<StrokePoint> points, double threshold) {
+    // Use a stride proportional to point count so dense stylus input
+    // doesn't produce false corners on smooth curves.
+    final stride = max(2, (points.length / 30).round());
     final corners = <int>[];
-    for (int i = 2; i < points.length - 2; i++) {
-      final v1x = points[i].x - points[i - 2].x;
-      final v1y = points[i].y - points[i - 2].y;
-      final v2x = points[i + 2].x - points[i].x;
-      final v2y = points[i + 2].y - points[i].y;
+    for (int i = stride; i < points.length - stride; i++) {
+      final v1x = points[i].x - points[i - stride].x;
+      final v1y = points[i].y - points[i - stride].y;
+      final v2x = points[i + stride].x - points[i].x;
+      final v2y = points[i + stride].y - points[i].y;
       final dot = v1x * v2x + v1y * v2y;
       final mag1 = sqrt(v1x * v1x + v1y * v1y);
       final mag2 = sqrt(v2x * v2x + v2y * v2y);
@@ -1119,9 +1126,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         if (angle > threshold && angle < 170) corners.add(i);
       }
     }
+    final minSep = max((points.length / 8).round(), stride * 2);
     final merged = <int>[];
     for (final c in corners) {
-      if (merged.isEmpty || c - merged.last > points.length / 8) merged.add(c);
+      if (merged.isEmpty || c - merged.last > minSep) merged.add(c);
     }
     return merged;
   }
