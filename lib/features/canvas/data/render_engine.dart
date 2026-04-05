@@ -363,7 +363,7 @@ class CanvasRenderEngine extends CustomPainter {
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
-      final interpolated = _catmullRomInterpolate(stroke.points);
+      final interpolated = _catmullRomInterpolate(stroke.points, zoom);
       for (int i = 0; i < interpolated.length - 1; i++) {
         final p0 = interpolated[i];
         final p1 = interpolated[i + 1];
@@ -376,7 +376,7 @@ class CanvasRenderEngine extends CustomPainter {
 
     // Brush: wide, soft edges via multiple overlapping strokes
     if (stroke.toolType == 'brush') {
-      final interpolated = _catmullRomInterpolate(stroke.points);
+      final interpolated = _catmullRomInterpolate(stroke.points, zoom);
       for (int layer = 0; layer < 3; layer++) {
         final alpha = (stroke.opacity * (0.3 - layer * 0.08)).clamp(0.05, 1.0);
         final widthMul = 1.0 + layer * 0.6;
@@ -398,73 +398,123 @@ class CanvasRenderEngine extends CustomPainter {
     }
 
     // ── Fountain pen (default "pen") ──
-    // Use per-segment variable-width strokes to avoid polygon seam artifacts
-    // that can appear as dashed/gray lines at large pen widths.
-    final interpolated = _catmullRomInterpolate(stroke.points);
+    // Compute per-original-point width from pressure + velocity, smooth,
+    // then interpolate through adaptive Catmull-Rom.
+    final n = stroke.points.length;
+
+    // Compute velocity from original points (independent of interpolation)
+    final velocities = List<double>.filled(n, 0.0);
+    for (int i = 1; i < n; i++) {
+      final dx = stroke.points[i].x - stroke.points[i - 1].x;
+      final dy = stroke.points[i].y - stroke.points[i - 1].y;
+      velocities[i] = sqrt(dx * dx + dy * dy);
+    }
+    if (n > 1) velocities[0] = velocities[1];
+
+    final rawWidths = List<double>.filled(n, stroke.baseWidth);
+    for (int i = 0; i < n; i++) {
+      final velocityFactor = (1.0 - (velocities[i] / 20.0).clamp(0.0, 0.50));
+      final pressureFactor = 0.15 + stroke.points[i].pressure * 0.85;
+      rawWidths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
+    }
+    // Smooth widths on original points (cheap — only N points)
+    for (int pass = 0; pass < 2; pass++) {
+      for (int i = 1; i < n - 1; i++) {
+        rawWidths[i] = (rawWidths[i - 1] + rawWidths[i] * 2 + rawWidths[i + 1]) / 4;
+      }
+    }
+
+    final interpolated = _catmullRomAdaptiveWithWidth(stroke.points, rawWidths, zoom);
     if (interpolated.length < 2) return;
 
-    final paint = Paint()
+    // Render as filled outline polygon for smooth edges at any zoom.
+    // Compute perpendicular normals at each interpolated point.
+    final count = interpolated.length;
+    final nxArr = List<double>.filled(count, 0.0);
+    final nyArr = List<double>.filled(count, 0.0);
+    for (int i = 0; i < count; i++) {
+      double dx, dy;
+      if (i == 0) {
+        dx = interpolated[1].x - interpolated[0].x;
+        dy = interpolated[1].y - interpolated[0].y;
+      } else if (i == count - 1) {
+        dx = interpolated[i].x - interpolated[i - 1].x;
+        dy = interpolated[i].y - interpolated[i - 1].y;
+      } else {
+        dx = interpolated[i + 1].x - interpolated[i - 1].x;
+        dy = interpolated[i + 1].y - interpolated[i - 1].y;
+      }
+      final len = sqrt(dx * dx + dy * dy);
+      if (len > 0.0001) {
+        nxArr[i] = -dy / len;
+        nyArr[i] = dx / len;
+      } else if (i > 0) {
+        nxArr[i] = nxArr[i - 1];
+        nyArr[i] = nyArr[i - 1];
+      }
+    }
+
+    final path = Path();
+    final hw0 = (interpolated[0].w * 0.5).clamp(0.2, 999.0);
+
+    // Right edge (forward)
+    path.moveTo(
+      interpolated[0].x + nxArr[0] * hw0,
+      interpolated[0].y + nyArr[0] * hw0,
+    );
+    for (int i = 1; i < count; i++) {
+      final hw = (interpolated[i].w * 0.5).clamp(0.2, 999.0);
+      path.lineTo(
+        interpolated[i].x + nxArr[i] * hw,
+        interpolated[i].y + nyArr[i] * hw,
+      );
+    }
+
+    // Left edge (backward) — straight connection at the end
+    for (int i = count - 1; i >= 0; i--) {
+      final hw = (interpolated[i].w * 0.5).clamp(0.2, 999.0);
+      path.lineTo(
+        interpolated[i].x - nxArr[i] * hw,
+        interpolated[i].y - nyArr[i] * hw,
+      );
+    }
+    path.close();
+
+    final fillPaint = Paint()
       ..color = color.withValues(alpha: stroke.opacity)
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
+      ..style = PaintingStyle.fill
       ..isAntiAlias = true;
+    canvas.drawPath(path, fillPaint);
 
-    final widths = List<double>.filled(interpolated.length, stroke.baseWidth);
-    for (int i = 0; i < interpolated.length; i++) {
-      final p = interpolated[i];
-      double velocity = 0;
-      if (i > 0) {
-        final prev = interpolated[i - 1];
-        velocity = sqrt(pow(p.x - prev.x, 2) + pow(p.y - prev.y, 2));
-      }
-      final velocityFactor = (1.0 - (velocity / 25.0).clamp(0.0, 0.55));
-      final pressureFactor = 0.15 + p.pressure * 0.85;
-      widths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
-    }
-
-    for (int pass = 0; pass < 2; pass++) {
-      for (int i = 1; i < widths.length - 1; i++) {
-        widths[i] = (widths[i - 1] + widths[i] * 2 + widths[i + 1]) / 4;
-      }
-    }
-
-    for (int i = 0; i < interpolated.length - 1; i++) {
-      final p0 = interpolated[i];
-      final p1 = interpolated[i + 1];
-      paint.strokeWidth = ((widths[i] + widths[i + 1]) * 0.5).clamp(0.4, 999.0);
-      canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
-    }
-
+    // Round endpoint circles
     canvas.drawCircle(
       Offset(interpolated.first.x, interpolated.first.y),
-      (widths.first * 0.5).clamp(0.2, 999.0),
-      Paint()
-        ..color = color.withValues(alpha: stroke.opacity)
-        ..style = PaintingStyle.fill
-        ..isAntiAlias = true,
+      hw0,
+      fillPaint,
     );
+    final lastHw = (interpolated.last.w * 0.5).clamp(0.2, 999.0);
     canvas.drawCircle(
       Offset(interpolated.last.x, interpolated.last.y),
-      (widths.last * 0.5).clamp(0.2, 999.0),
-      Paint()
-        ..color = color.withValues(alpha: stroke.opacity)
-        ..style = PaintingStyle.fill
-        ..isAntiAlias = true,
+      lastHw,
+      fillPaint,
     );
   }
 
-  List<StrokePoint> _catmullRomInterpolate(List<StrokePoint> points) {
+  List<StrokePoint> _catmullRomInterpolate(List<StrokePoint> points, double zoom) {
     if (points.length < 4) return points;
     final result = <StrokePoint>[];
-    // Smooth Catmull-Rom interpolation — 5 segments per span
-    const segments = 5;
 
     for (int i = 0; i < points.length - 1; i++) {
       final p0 = i > 0 ? points[i - 1] : points[i];
       final p1 = points[i];
       final p2 = points[i + 1];
       final p3 = i + 2 < points.length ? points[i + 2] : points[i + 1];
+
+      final dx = p2.x - p1.x;
+      final dy = p2.y - p1.y;
+      final dist = sqrt(dx * dx + dy * dy);
+      // Proportional to screen-space distance: ~1 segment per 3 screen pixels
+      final segments = max(2, min(24, (dist * zoom / 3.0).ceil()));
 
       for (int j = 0; j < segments; j++) {
         final t = j / segments;
@@ -479,6 +529,52 @@ class CanvasRenderEngine extends CustomPainter {
       }
     }
     result.add(points.last);
+    return result;
+  }
+
+  /// Adaptive Catmull-Rom interpolation that carries pre-computed stroke width.
+  /// Segments proportional to screen-space distance for smooth rendering at any zoom.
+  List<_InterpolatedPoint> _catmullRomAdaptiveWithWidth(
+      List<StrokePoint> points, List<double> widths, double zoom) {
+    if (points.length < 4) {
+      return List.generate(points.length, (i) =>
+          _InterpolatedPoint(points[i].x, points[i].y, points[i].pressure, widths[i]));
+    }
+    final result = <_InterpolatedPoint>[];
+
+    for (int i = 0; i < points.length - 1; i++) {
+      final p0 = i > 0 ? points[i - 1] : points[i];
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      final p3 = i + 2 < points.length ? points[i + 2] : points[i + 1];
+      final w1 = widths[i];
+      final w2 = widths[i + 1];
+
+      final dx = p2.x - p1.x;
+      final dy = p2.y - p1.y;
+      final dist = sqrt(dx * dx + dy * dy);
+      // Proportional to screen-space distance: ~1 segment per 3 screen pixels
+      final segments = max(2, min(24, (dist * zoom / 3.0).ceil()));
+
+      for (int j = 0; j < segments; j++) {
+        final t = j / segments;
+        final t2 = t * t;
+        final t3 = t2 * t;
+
+        final x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t +
+            (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
+            (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+        final y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t +
+            (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
+            (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+        final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
+        final w = w1 + (w2 - w1) * t;
+
+        result.add(_InterpolatedPoint(x, y, pressure, w));
+      }
+    }
+    result.add(_InterpolatedPoint(
+        points.last.x, points.last.y, points.last.pressure, widths.last));
     return result;
   }
 
@@ -562,6 +658,8 @@ class CanvasRenderEngine extends CustomPainter {
       ..color = Color(shape.strokeColor)
       ..style = PaintingStyle.stroke
       ..strokeWidth = shape.strokeWidth
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
 
     Paint? fillPaint;
@@ -866,4 +964,10 @@ class CanvasRenderEngine extends CustomPainter {
         panOffset != oldDelegate.panOffset ||
         imageCache != oldDelegate.imageCache;
   }
+}
+
+/// Lightweight struct for Catmull-Rom interpolated points with pre-computed width.
+class _InterpolatedPoint {
+  final double x, y, pressure, w;
+  const _InterpolatedPoint(this.x, this.y, this.pressure, this.w);
 }

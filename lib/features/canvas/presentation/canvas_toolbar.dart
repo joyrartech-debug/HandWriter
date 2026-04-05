@@ -24,6 +24,7 @@ class CanvasToolbar extends StatelessWidget {
   final VoidCallback? onCutSelection;
   final VoidCallback? onPasteSelection;
   final VoidCallback? onDuplicateSelection;
+  final ValueChanged<int>? onChangeSelectionColor;
   final VoidCallback? onOpenSymbols;
   final VoidCallback? onCreateSymbol;
   final int symbolCount;
@@ -51,6 +52,7 @@ class CanvasToolbar extends StatelessWidget {
     this.onCutSelection,
     this.onPasteSelection,
     this.onDuplicateSelection,
+    this.onChangeSelectionColor,
     this.onOpenSymbols,
     this.onCreateSymbol,
     this.symbolCount = 0,
@@ -210,7 +212,10 @@ class CanvasToolbar extends StatelessWidget {
         return Padding(
           padding: const EdgeInsets.symmetric(horizontal: 1),
           child: GestureDetector(
-            onTap: () => onSettingsChanged(toolSettings.copyWith(color: c)),
+            onTap: () {
+              onSettingsChanged(toolSettings.copyWith(color: c));
+              if (lassoSelection != null) onChangeSelectionColor?.call(c);
+            },
             child: Container(
               width: 22, height: 22,
               decoration: BoxDecoration(
@@ -395,6 +400,13 @@ class CanvasToolbar extends StatelessWidget {
   }
 
   void _showFullPalette(BuildContext context) {
+    _showColorDialog(context, (c) {
+      onSettingsChanged(toolSettings.copyWith(color: c));
+      if (lassoSelection != null) onChangeSelectionColor?.call(c);
+    }, toolSettings.color);
+  }
+
+  void _showColorDialog(BuildContext context, ValueChanged<int> onPick, int? currentColor) {
     final colors = [
       0xFF000000, 0xFF424242, 0xFF757575, 0xFFBDBDBD, 0xFFFFFFFF,
       0xFFC62828, 0xFFE53935, 0xFFEF5350, 0xFFEF9A9A,
@@ -414,9 +426,9 @@ class CanvasToolbar extends StatelessWidget {
           child: Wrap(
             spacing: 10, runSpacing: 10,
             children: colors.map((c) {
-              final sel = toolSettings.color == c;
+              final sel = currentColor == c;
               return GestureDetector(
-                onTap: () { onSettingsChanged(toolSettings.copyWith(color: c)); Navigator.pop(ctx); },
+                onTap: () { onPick(c); Navigator.pop(ctx); },
                 child: Container(
                   width: 36, height: 36,
                   decoration: BoxDecoration(

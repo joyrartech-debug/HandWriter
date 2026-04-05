@@ -770,10 +770,32 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   /// Fix top-left corner (x1,y1), resize by dragging bottom-right to [position].
+  /// For circles: keep center fixed, change radius based on cursor distance.
   void resizeRecognizedShape(Offset position) {
     if (state == null || state!.recognizedShape == null) return;
     final s = state!.recognizedShape!;
-    // Ensure x2 > x1 and y2 > y1 so the rect/circle is always valid
+
+    if (s.shapeType == 'circle') {
+      // Keep center fixed, compute new radius from cursor distance
+      final cx = (s.x1 + s.x2) / 2;
+      final cy = (s.y1 + s.y2) / 2;
+      final radius = sqrt(pow(position.dx - cx, 2) + pow(position.dy - cy, 2));
+      final r = radius < 5 ? 5.0 : radius;
+      state = state!.copyWith(
+        recognizedShape: ShapeData(
+          shapeType: s.shapeType,
+          x1: cx - r, y1: cy - r,
+          x2: cx + r, y2: cy + r,
+          strokeColor: s.strokeColor,
+          strokeWidth: s.strokeWidth,
+          fillColor: s.fillColor,
+          rotation: s.rotation,
+        ),
+      );
+      return;
+    }
+
+    // Ensure x2 > x1 and y2 > y1 so the rect/triangle is always valid
     final x2 = position.dx > s.x1 + 5 ? position.dx : s.x1 + 5;
     final y2 = position.dy > s.y1 + 5 ? position.dy : s.y1 + 5;
     state = state!.copyWith(
@@ -825,7 +847,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final newElement = ContentElement.stroke(
       id: const Uuid().v4(),
-      zIndex: page.layers.content.length,
+      zIndex: _nextZIndex(page),
       data: StrokeData(
         points: smoothedPoints,
         toolType: toolType,
@@ -850,44 +872,38 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
-  /// Smooth raw input points using a weighted moving average + point decimation.
-  /// Keeps first and last points exact for stroke endpoint accuracy.
+  /// Light position smoothing on commit to reduce jitter.
+  /// Only smooths interior points — first and last stay fixed to preserve
+  /// stroke bounds. Pressure is NOT smoothed (already done in real-time).
   List<StrokePoint> _smoothStrokePoints(List<StrokePoint> raw) {
     if (raw.length < 5) return raw;
-
-    // Adaptive pass count: fewer passes for short strokes
-    final passCount = raw.length < 50 ? 1 : 2;
-    var points = List<StrokePoint>.from(raw);
-    for (int pass = 0; pass < passCount; pass++) {
-      final smoothed = List<StrokePoint>.from(points);
-      for (int i = 1; i < points.length - 1; i++) {
-        final p0 = points[i - 1];
-        final p1 = points[i];
-        final p2 = points[i + 1];
-        smoothed[i] = StrokePoint(
-          x: (p0.x + p1.x * 2 + p2.x) / 4,
-          y: (p0.y + p1.y * 2 + p2.y) / 4,
-          pressure: (p0.pressure + p1.pressure * 2 + p2.pressure) / 4,
-          timestamp: p1.timestamp,
-        );
-      }
-      points = smoothed;
+    final smoothed = List<StrokePoint>.from(raw);
+    // Pass 1: 1-2-1 weighted average on positions only
+    for (int i = 1; i < raw.length - 1; i++) {
+      final p0 = raw[i - 1];
+      final p1 = raw[i];
+      final p2 = raw[i + 1];
+      smoothed[i] = StrokePoint(
+        x: (p0.x + p1.x * 2 + p2.x) / 4,
+        y: (p0.y + p1.y * 2 + p2.y) / 4,
+        pressure: p1.pressure, // keep original pressure
+        timestamp: p1.timestamp,
+      );
     }
-
-    // Decimate points that are too close together
-    final decimated = <StrokePoint>[points.first];
-    const minDistSq = 1.5 * 1.5;
-    for (int i = 1; i < points.length - 1; i++) {
-      final last = decimated.last;
-      final dx = points[i].x - last.x;
-      final dy = points[i].y - last.y;
-      if (dx * dx + dy * dy >= minDistSq) {
-        decimated.add(points[i]);
-      }
+    // Pass 2: gaussian (1-2-1) to soften remaining micro-jitter
+    final pass2 = List<StrokePoint>.from(smoothed);
+    for (int i = 1; i < smoothed.length - 1; i++) {
+      final p0 = smoothed[i - 1];
+      final p1 = smoothed[i];
+      final p2 = smoothed[i + 1];
+      pass2[i] = StrokePoint(
+        x: (p0.x + p1.x * 2 + p2.x) / 4,
+        y: (p0.y + p1.y * 2 + p2.y) / 4,
+        pressure: p1.pressure,
+        timestamp: p1.timestamp,
+      );
     }
-    decimated.add(points.last);
-
-    return decimated;
+    return pass2;
   }
 
   // ── Shape recognition (improved) ──
@@ -1007,30 +1023,36 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final avgPressureClosed = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
     final shapeVisualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressureClosed * 0.85);
 
-    // ── CIRCLE / ELLIPSE ──
-    if (circularity > 0.65) {
-      // Good circle
-      final radii = points.map((p) => sqrt(pow(p.x - cx, 2) + pow(p.y - cy, 2))).toList();
-      final avgRadius = radii.reduce((a, b) => a + b) / radii.length;
-      return ShapeData(
-        shapeType: 'circle',
-        x1: cx - avgRadius, y1: cy - avgRadius,
-        x2: cx + avgRadius, y2: cy + avgRadius,
-        strokeColor: state!.toolSettings.color,
-        strokeWidth: shapeVisualWidth,
-      );
-    }
-
-    // ── CORNER DETECTION for triangles and rectangles ──
+    // ── CORNER DETECTION (run BEFORE circle to avoid rectangles being caught as circles) ──
     final corners = _detectCorners(points, 25.0);
+
+    // ── RECTANGLE ──
+    if (corners.length >= 4 && corners.length <= 6) {
+      // Check how well points hug the bounding box edges
+      double rectScore = 0;
+      for (final p in points) {
+        final distToLeft = (p.x - minX).abs();
+        final distToRight = (p.x - maxX).abs();
+        final distToTop = (p.y - minY).abs();
+        final distToBottom = (p.y - maxY).abs();
+        final minDist = [distToLeft, distToRight, distToTop, distToBottom].reduce(min);
+        if (minDist < max(width, height) * 0.15) rectScore++;
+      }
+      if (rectScore / points.length > 0.55) {
+        return ShapeData(
+          shapeType: 'rectangle',
+          x1: minX, y1: minY, x2: maxX, y2: maxY,
+          strokeColor: state!.toolSettings.color,
+          strokeWidth: shapeVisualWidth,
+        );
+      }
+    }
 
     // ── TRIANGLE ──
     if (corners.length == 3) {
-      // Use the 3 corner points for a clean triangle
       final c0 = points[corners[0]];
       final c1 = points[corners[1]];
       final c2 = points[corners[2]];
-      // Fit to bounding box of the 3 corners
       final tx = [c0.x, c1.x, c2.x];
       final ty = [c0.y, c1.y, c2.y];
       return ShapeData(
@@ -1042,32 +1064,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       );
     }
 
-    // ── RECTANGLE ──
-    if (corners.length == 4 || corners.length == 5) {
-      // Check how well points hug the bounding box edges
-      double rectScore = 0;
-      for (final p in points) {
-        final distToLeft = (p.x - minX).abs();
-        final distToRight = (p.x - maxX).abs();
-        final distToTop = (p.y - minY).abs();
-        final distToBottom = (p.y - maxY).abs();
-        final minDist = [distToLeft, distToRight, distToTop, distToBottom].reduce(min);
-        if (minDist < max(width, height) * 0.15) rectScore++;
-      }
-      if (rectScore / points.length > 0.6) {
-        return ShapeData(
-          shapeType: 'rectangle',
-          x1: minX, y1: minY, x2: maxX, y2: maxY,
-          strokeColor: state!.toolSettings.color,
-          strokeWidth: shapeVisualWidth,
-        );
-      }
+    // ── CIRCLE / ELLIPSE ──
+    // Only if no corners detected (0-2 corners) and high circularity
+    if (corners.length <= 2 && circularity > 0.60) {
+      // Use the bounding box to size the circle so it matches the drawn size
+      final r = max(width, height) / 2;
+      return ShapeData(
+        shapeType: 'circle',
+        x1: cx - r, y1: cy - r,
+        x2: cx + r, y2: cy + r,
+        strokeColor: state!.toolSettings.color,
+        strokeWidth: shapeVisualWidth,
+      );
     }
 
-    // ── FALLBACK: if roughly rectangular shape detected ──
+    // ── FALLBACK: rectangle from edge proximity (no corner requirement) ──
     final aspectRatio = width / height;
     if (aspectRatio > 0.3 && aspectRatio < 3.0 && circularity > 0.45) {
-      // Could be a rough rectangle
       double rectScore = 0;
       for (final p in points) {
         final distToLeft = (p.x - minX).abs();
@@ -1077,7 +1090,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         final minDist = [distToLeft, distToRight, distToTop, distToBottom].reduce(min);
         if (minDist < max(width, height) * 0.15) rectScore++;
       }
-      if (rectScore / points.length > 0.65) {
+      if (rectScore / points.length > 0.60) {
         return ShapeData(
           shapeType: 'rectangle',
           x1: minX, y1: minY, x2: maxX, y2: maxY,
@@ -1121,7 +1134,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final newElement = ContentElement.shape(
       id: const Uuid().v4(),
-      zIndex: page.layers.content.length,
+      zIndex: _nextZIndex(page),
       data: shapeData,
     );
 
@@ -1153,7 +1166,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final newElement = ContentElement.shape(
       id: const Uuid().v4(),
-      zIndex: page.layers.content.length,
+      zIndex: _nextZIndex(page),
       data: ShapeData(
         shapeType: s.toolSettings.shapeType,
         x1: s.shapeStartPos!.dx, y1: s.shapeStartPos!.dy,
@@ -1717,6 +1730,46 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(clearLasso: true, lassoPath: []);
   }
 
+  /// Change the color of all selected strokes/shapes/text.
+  void changeSelectionColor(int newColor) {
+    if (state == null || state!.lassoSelection == null) return;
+    final s = state!;
+    final sel = s.lassoSelection!;
+    final page = s.currentPage;
+    if (page == null) return;
+    final fileName = s.currentPageFileName;
+    final undoStack = _pushUndo(s, fileName, page);
+
+    final updatedContent = page.layers.content.map((element) {
+      final id = element.map(
+        stroke: (e) => e.id, text: (e) => e.id,
+        image: (e) => e.id, shape: (e) => e.id,
+      );
+      if (!sel.selectedIds.contains(id)) return element;
+      return element.map(
+        stroke: (e) => e.copyWith(data: e.data.copyWith(color: newColor)),
+        text: (e) => e.copyWith(data: e.data.copyWith(color: newColor)),
+        image: (e) => e, // images don't have a stroke color
+        shape: (e) => e.copyWith(data: e.data.copyWith(strokeColor: newColor)),
+      );
+    }).toList();
+
+    final updatedPage = PageData(
+      pageId: page.pageId, pageNumber: page.pageNumber,
+      width: page.width, height: page.height,
+      layers: RenderingLayers(background: page.layers.background, content: updatedContent),
+      assetReferences: page.assetReferences,
+      createdAt: page.createdAt, modifiedAt: DateTime.now(),
+    );
+
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[fileName] = updatedPage;
+
+    state = s.copyWith(
+      pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true,
+    );
+  }
+
   // ── Undo / Redo ──
 
   void undo() {
@@ -1775,6 +1828,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null || index < 0 || index >= state!.pageCount) return;
     state = state!.copyWith(
       currentPageIndex: index,
+      zoom: 1.0,
+      panOffset: Offset.zero,
       activeStroke: [],
       clearLasso: true,
       lassoPath: [],
@@ -1849,8 +1904,70 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       document: updatedDoc,
       pages: updatedPages,
       currentPageIndex: insertIndex,
+      zoom: 1.0,
+      panOffset: Offset.zero,
       isDirty: true,
     );
+  }
+
+  /// Insert a new blank page at a specific position (0-based index).
+  void insertPageAt(int index) {
+    if (state == null) return;
+    final s = state!;
+    final uuid = const Uuid();
+    final pageId = uuid.v4();
+    final now = DateTime.now();
+    final pageNum = s.pageCount + 1;
+    final fileName = 'page_${pageNum.toString().padLeft(3, '0')}.json';
+
+    final currentBg = s.currentPage?.layers.background;
+    final bgType = currentBg?.type ?? 'blank';
+    final lineSpacing = currentBg?.lineSpacing ?? 30.0;
+
+    final newPage = PageData(
+      pageId: pageId, pageNumber: pageNum,
+      width: AppConfig.defaultPageWidth, height: AppConfig.defaultPageHeight,
+      layers: RenderingLayers(
+        background: BackgroundLayer(type: bgType, lineSpacing: lineSpacing),
+        content: const [],
+      ),
+      createdAt: now, modifiedAt: now,
+    );
+
+    final insertIdx = index.clamp(0, s.document.pages.length);
+
+    // Inherit chapter from the page before the insert position
+    String? chapterId;
+    if (insertIdx > 0) {
+      chapterId = s.document.pages[insertIdx - 1].chapterId;
+    } else if (s.document.pages.isNotEmpty) {
+      chapterId = s.document.pages[0].chapterId;
+    }
+
+    final newEntry = PageEntry(
+      pageId: pageId, pageNumber: pageNum, fileName: fileName,
+      lastModified: now, chapterId: chapterId,
+    );
+
+    final pageList = List<PageEntry>.from(s.document.pages)..insert(insertIdx, newEntry);
+    final updatedDoc = s.document.copyWith(pages: pageList);
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[fileName] = newPage;
+
+    state = s.copyWith(
+      metadata: s.metadata.copyWith(pageCount: pageNum, modifiedAt: now),
+      document: updatedDoc,
+      pages: updatedPages,
+      currentPageIndex: insertIdx,
+      zoom: 1.0,
+      panOffset: Offset.zero,
+      isDirty: true,
+    );
+  }
+
+  /// Move a page to a different chapter.
+  void movePageToChapter(int pageIndex, String? chapterId) {
+    assignPageToChapter(pageIndex, chapterId);
   }
 
   void addChapter(String title) {
@@ -1930,7 +2047,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final newElement = ContentElement.text(
       id: const Uuid().v4(),
-      zIndex: page.layers.content.length,
+      zIndex: _nextZIndex(page),
       data: TextData(
         x: position.dx, y: position.dy,
         width: 300, height: 50,
@@ -1953,6 +2070,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final stack = [...s.undoStack, _UndoEntry(fileName, page)];
     if (stack.length > 50) stack.removeAt(0);
     return stack;
+  }
+
+  int _nextZIndex(PageData page) {
+    int maxZ = -1;
+    for (final e in page.layers.content) {
+      final z = e.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex);
+      if (z > maxZ) maxZ = z;
+    }
+    return maxZ + 1;
   }
 
   PageData _pageWithNewElement(PageData page, ContentElement element) {
@@ -2267,7 +2393,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         e.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id) == elementId);
     if (idx < 0 || idx == content.length - 1) return;
     final element = content.removeAt(idx);
-    content.add(element);
+    // Give it a zIndex higher than all others
+    final maxZ = content.fold<int>(0, (m, e) =>
+        max(m, e.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex)));
+    final updated = element.map(
+      stroke: (e) => ContentElement.stroke(id: e.id, zIndex: maxZ + 1, data: e.data),
+      text: (e) => ContentElement.text(id: e.id, zIndex: maxZ + 1, data: e.data),
+      image: (e) => ContentElement.image(id: e.id, zIndex: maxZ + 1, data: e.data),
+      shape: (e) => ContentElement.shape(id: e.id, zIndex: maxZ + 1, data: e.data),
+    );
+    content.add(updated);
 
     _updatePageContent(s, page, fileName, content, undoStack);
   }
@@ -2285,7 +2420,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         e.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id) == elementId);
     if (idx <= 0) return;
     final element = content.removeAt(idx);
-    content.insert(0, element);
+    // Give it a zIndex lower than all others
+    final minZ = content.fold<int>(999999, (m, e) =>
+        min(m, e.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex)));
+    final updated = element.map(
+      stroke: (e) => ContentElement.stroke(id: e.id, zIndex: minZ - 1, data: e.data),
+      text: (e) => ContentElement.text(id: e.id, zIndex: minZ - 1, data: e.data),
+      image: (e) => ContentElement.image(id: e.id, zIndex: minZ - 1, data: e.data),
+      shape: (e) => ContentElement.shape(id: e.id, zIndex: minZ - 1, data: e.data),
+    );
+    content.insert(0, updated);
 
     _updatePageContent(s, page, fileName, content, undoStack);
   }
@@ -2381,7 +2525,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final newElement = ContentElement.image(
       id: const Uuid().v4(),
-      zIndex: page.layers.content.length,
+      zIndex: _nextZIndex(page),
       data: ImageData(
         x: position.dx, y: position.dy,
         width: width, height: height,
@@ -2573,17 +2717,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         ? Offset(at.dx - clip.bounds.center.dx, at.dy - clip.bounds.center.dy)
         : const Offset(20, 20);
 
-    final newElements = clip.elements.map((element) {
+    final baseZ = _nextZIndex(page);
+    final newElements = <ContentElement>[];
+    for (int idx = 0; idx < clip.elements.length; idx++) {
+      final element = clip.elements[idx];
       final newId = const Uuid().v4();
       final translated = _translateElement(element, pasteOffset);
-      // Replace the id with a new one
-      return translated.map(
-        stroke: (e) => ContentElement.stroke(id: newId, zIndex: page.layers.content.length, data: e.data),
-        text: (e) => ContentElement.text(id: newId, zIndex: page.layers.content.length, data: e.data),
-        image: (e) => ContentElement.image(id: newId, zIndex: page.layers.content.length, data: e.data),
-        shape: (e) => ContentElement.shape(id: newId, zIndex: page.layers.content.length, data: e.data),
-      );
-    }).toList();
+      final z = baseZ + idx;
+      newElements.add(translated.map(
+        stroke: (e) => ContentElement.stroke(id: newId, zIndex: z, data: e.data),
+        text: (e) => ContentElement.text(id: newId, zIndex: z, data: e.data),
+        image: (e) => ContentElement.image(id: newId, zIndex: z, data: e.data),
+        shape: (e) => ContentElement.shape(id: newId, zIndex: z, data: e.data),
+      ));
+    }
 
     final updatedPage = PageData(
       pageId: page.pageId, pageNumber: page.pageNumber,
@@ -2620,11 +2767,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final undoStack = _pushUndo(s, fileName, page);
     final translated = _translateElement(original, const Offset(20, 20));
     final newId = const Uuid().v4();
+    final z = _nextZIndex(page);
     final newElement = translated.map(
-      stroke: (e) => ContentElement.stroke(id: newId, zIndex: page.layers.content.length, data: e.data),
-      text: (e) => ContentElement.text(id: newId, zIndex: page.layers.content.length, data: e.data),
-      image: (e) => ContentElement.image(id: newId, zIndex: page.layers.content.length, data: e.data),
-      shape: (e) => ContentElement.shape(id: newId, zIndex: page.layers.content.length, data: e.data),
+      stroke: (e) => ContentElement.stroke(id: newId, zIndex: z, data: e.data),
+      text: (e) => ContentElement.text(id: newId, zIndex: z, data: e.data),
+      image: (e) => ContentElement.image(id: newId, zIndex: z, data: e.data),
+      shape: (e) => ContentElement.shape(id: newId, zIndex: z, data: e.data),
     );
 
     final updatedPage = _pageWithNewElement(page, newElement);
@@ -2819,7 +2967,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final imgElement = ContentElement.image(
       id: const Uuid().v4(),
-      zIndex: page.layers.content.length,
+      zIndex: _nextZIndex(page),
       data: ImageData(
         x: position.dx - symbolW / 2,
         y: position.dy - symbolH / 2,
@@ -2910,19 +3058,223 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void _paintStrokeSymbol(Canvas canvas, StrokeData stroke) {
     if (stroke.points.length < 2) return;
-    final paint = Paint()
-      ..color = Color(stroke.color).withValues(alpha: stroke.opacity)
-      ..strokeWidth = stroke.baseWidth
-      ..style = PaintingStyle.stroke
-      ..strokeCap = StrokeCap.round
-      ..strokeJoin = StrokeJoin.round
-      ..isAntiAlias = true;
+    final color = Color(stroke.color);
 
-    for (int i = 0; i < stroke.points.length - 1; i++) {
-      final p0 = stroke.points[i];
-      final p1 = stroke.points[i + 1];
-      canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
+    // Highlighter
+    if (stroke.isHighlighter) {
+      final paint = Paint()
+        ..color = color.withValues(alpha: 0.35)
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = stroke.baseWidth
+        ..blendMode = BlendMode.multiply
+        ..isAntiAlias = true;
+      final path = Path()..moveTo(stroke.points[0].x, stroke.points[0].y);
+      for (int i = 1; i < stroke.points.length; i++) {
+        path.lineTo(stroke.points[i].x, stroke.points[i].y);
+      }
+      canvas.drawPath(path, paint);
+      return;
     }
+
+    // Ballpoint
+    if (stroke.toolType == 'ballpoint') {
+      final paint = Paint()
+        ..color = color.withValues(alpha: stroke.opacity)
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      final interp = _catmullRomInterpolateSymbol(stroke.points);
+      for (int i = 0; i < interp.length - 1; i++) {
+        final p0 = interp[i];
+        final p1 = interp[i + 1];
+        final avgP = (p0.pressure + p1.pressure) / 2;
+        paint.strokeWidth = stroke.baseWidth * (0.6 + avgP * 0.4);
+        canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
+      }
+      return;
+    }
+
+    // Brush
+    if (stroke.toolType == 'brush') {
+      final interp = _catmullRomInterpolateSymbol(stroke.points);
+      for (int layer = 0; layer < 3; layer++) {
+        final alpha = (stroke.opacity * (0.3 - layer * 0.08)).clamp(0.05, 1.0);
+        final widthMul = 1.0 + layer * 0.6;
+        final paint = Paint()
+          ..color = color.withValues(alpha: alpha)
+          ..style = PaintingStyle.stroke
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round
+          ..isAntiAlias = true;
+        for (int i = 0; i < interp.length - 1; i++) {
+          final p0 = interp[i];
+          final p1 = interp[i + 1];
+          final avgP = (p0.pressure + p1.pressure) / 2;
+          paint.strokeWidth = stroke.baseWidth * widthMul * (0.2 + avgP * 0.8);
+          canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
+        }
+      }
+      return;
+    }
+
+    // Fountain pen (default)
+    final n = stroke.points.length;
+    final velocities = List<double>.filled(n, 0.0);
+    for (int i = 1; i < n; i++) {
+      final dx = stroke.points[i].x - stroke.points[i - 1].x;
+      final dy = stroke.points[i].y - stroke.points[i - 1].y;
+      velocities[i] = sqrt(dx * dx + dy * dy);
+    }
+    if (n > 1) velocities[0] = velocities[1];
+
+    final rawWidths = List<double>.filled(n, stroke.baseWidth);
+    for (int i = 0; i < n; i++) {
+      final velocityFactor = (1.0 - (velocities[i] / 20.0).clamp(0.0, 0.50));
+      final pressureFactor = 0.15 + stroke.points[i].pressure * 0.85;
+      rawWidths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
+    }
+    for (int pass = 0; pass < 2; pass++) {
+      for (int i = 1; i < n - 1; i++) {
+        rawWidths[i] = (rawWidths[i - 1] + rawWidths[i] * 2 + rawWidths[i + 1]) / 4;
+      }
+    }
+
+    final interp = _catmullRomAdaptiveWithWidthSymbol(stroke.points, rawWidths);
+    if (interp.length < 2) return;
+
+    // Render as filled outline polygon for smooth edges.
+    final count = interp.length;
+    final nxArr = List<double>.filled(count, 0.0);
+    final nyArr = List<double>.filled(count, 0.0);
+    for (int i = 0; i < count; i++) {
+      double dx, dy;
+      if (i == 0) {
+        dx = interp[1].$1 - interp[0].$1;
+        dy = interp[1].$2 - interp[0].$2;
+      } else if (i == count - 1) {
+        dx = interp[i].$1 - interp[i - 1].$1;
+        dy = interp[i].$2 - interp[i - 1].$2;
+      } else {
+        dx = interp[i + 1].$1 - interp[i - 1].$1;
+        dy = interp[i + 1].$2 - interp[i - 1].$2;
+      }
+      final len = sqrt(dx * dx + dy * dy);
+      if (len > 0.0001) {
+        nxArr[i] = -dy / len;
+        nyArr[i] = dx / len;
+      } else if (i > 0) {
+        nxArr[i] = nxArr[i - 1];
+        nyArr[i] = nyArr[i - 1];
+      }
+    }
+
+    final path = Path();
+    final hw0 = (interp[0].$4 * 0.5).clamp(0.2, 999.0);
+
+    // Right edge (forward)
+    path.moveTo(
+      interp[0].$1 + nxArr[0] * hw0,
+      interp[0].$2 + nyArr[0] * hw0,
+    );
+    for (int i = 1; i < count; i++) {
+      final hw = (interp[i].$4 * 0.5).clamp(0.2, 999.0);
+      path.lineTo(
+        interp[i].$1 + nxArr[i] * hw,
+        interp[i].$2 + nyArr[i] * hw,
+      );
+    }
+
+    // Left edge (backward) — straight connection at the end
+    for (int i = count - 1; i >= 0; i--) {
+      final hw = (interp[i].$4 * 0.5).clamp(0.2, 999.0);
+      path.lineTo(
+        interp[i].$1 - nxArr[i] * hw,
+        interp[i].$2 - nyArr[i] * hw,
+      );
+    }
+    path.close();
+
+    final fillPaint = Paint()
+      ..color = color.withValues(alpha: stroke.opacity)
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+    canvas.drawPath(path, fillPaint);
+
+    // Round endpoint circles
+    canvas.drawCircle(
+      Offset(interp.first.$1, interp.first.$2),
+      hw0,
+      fillPaint,
+    );
+    final lastHw = (interp.last.$4 * 0.5).clamp(0.2, 999.0);
+    canvas.drawCircle(
+      Offset(interp.last.$1, interp.last.$2),
+      lastHw,
+      fillPaint,
+    );
+  }
+
+  List<StrokePoint> _catmullRomInterpolateSymbol(List<StrokePoint> points) {
+    if (points.length < 4) return points;
+    final result = <StrokePoint>[];
+    for (int i = 0; i < points.length - 1; i++) {
+      final p0 = i > 0 ? points[i - 1] : points[i];
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      final p3 = i + 2 < points.length ? points[i + 2] : points[i + 1];
+      final dx = p2.x - p1.x;
+      final dy = p2.y - p1.y;
+      final dist = sqrt(dx * dx + dy * dy);
+      final segments = dist < 2 ? 2 : dist < 8 ? 4 : dist < 20 ? 6 : 8;
+      for (int j = 0; j < segments; j++) {
+        final t = j / segments;
+        final t2 = t * t;
+        final t3 = t2 * t;
+        final x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+        final y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+        final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
+        result.add(StrokePoint(x: x, y: y, pressure: pressure));
+      }
+    }
+    result.add(points.last);
+    return result;
+  }
+
+  /// Adaptive Catmull-Rom with width for symbol rasterization.
+  /// Returns list of (x, y, pressure, width) tuples.
+  List<(double, double, double, double)> _catmullRomAdaptiveWithWidthSymbol(
+      List<StrokePoint> points, List<double> widths) {
+    if (points.length < 4) {
+      return List.generate(points.length, (i) =>
+          (points[i].x, points[i].y, points[i].pressure, widths[i]));
+    }
+    final result = <(double, double, double, double)>[];
+    for (int i = 0; i < points.length - 1; i++) {
+      final p0 = i > 0 ? points[i - 1] : points[i];
+      final p1 = points[i];
+      final p2 = points[i + 1];
+      final p3 = i + 2 < points.length ? points[i + 2] : points[i + 1];
+      final w1 = widths[i];
+      final w2 = widths[i + 1];
+      final dx = p2.x - p1.x;
+      final dy = p2.y - p1.y;
+      final dist = sqrt(dx * dx + dy * dy);
+      final segments = dist < 2 ? 2 : dist < 8 ? 4 : dist < 20 ? 6 : 8;
+      for (int j = 0; j < segments; j++) {
+        final t = j / segments;
+        final t2 = t * t;
+        final t3 = t2 * t;
+        final x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t + (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
+        final y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
+        final w = w1 + (w2 - w1) * t;
+        result.add((x, y, p1.pressure + (p2.pressure - p1.pressure) * t, w));
+      }
+    }
+    result.add((points.last.x, points.last.y, points.last.pressure, widths.last));
+    return result;
   }
 
   void _paintTextSymbol(Canvas canvas, TextData textData) {
@@ -2970,6 +3322,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       ..color = Color(shape.strokeColor)
       ..style = PaintingStyle.stroke
       ..strokeWidth = shape.strokeWidth
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
 
     Paint? fillPaint;
