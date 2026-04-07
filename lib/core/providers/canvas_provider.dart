@@ -842,7 +842,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       default: toolType = 'pen';
     }
 
-    // iPad build: no commit-time smoothing (stylus input is already smooth)
+    // iPad: no commit-time smoothing (stylus input is already smooth)
     final smoothedPoints = s.activeStroke;
 
     final newElement = ContentElement.stroke(
@@ -941,28 +941,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final dy = points.last.y - points.first.y;
       final lineLen = sqrt(dx * dx + dy * dy);
       if (lineLen > 20) {
-        // Compute max perpendicular deviation from the straight line
         double maxDev = 0;
         for (final p in points) {
-          // Distance from point to line (start→end)
           final cross = ((p.x - points.first.x) * dy - (p.y - points.first.y) * dx).abs();
           final dev = cross / lineLen;
           if (dev > maxDev) maxDev = dev;
         }
-        // Also check straightness ratio
         final straightness = lineLen / pathLen;
         if (maxDev < lineLen * 0.1 && straightness > 0.85) {
-          // Compute average pressure to match the visual pen width
           final avgPressure = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
           final visualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressure * 0.85);
 
           // ── ARROW DETECTION ──
-          // An arrow is a line where the LAST segment "backtracks" to form a V-tip.
           if (lineLen > 30) {
             final tailCount = max(3, (points.length * 0.2).ceil());
             if (tailCount < points.length - 1) {
               final tailStart = points[points.length - tailCount - 1];
-              // Direction of main body vs tail
               final bodyDx = tailStart.x - points.first.x;
               final bodyDy = tailStart.y - points.first.y;
               final tailDx = points.last.x - tailStart.x;
@@ -971,7 +965,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
               final tailLen = sqrt(tailDx * tailDx + tailDy * tailDy);
               if (bodyLen > 0 && tailLen > 0) {
                 final dot = (bodyDx / bodyLen) * (tailDx / tailLen) + (bodyDy / bodyLen) * (tailDy / tailLen);
-                // dot < -0.3 means the tail goes backward (arrowhead stroke)
                 if (dot < -0.3 && tailLen > lineLen * 0.08 && tailLen < lineLen * 0.5) {
                   return ShapeData(
                     shapeType: 'arrow',
@@ -985,7 +978,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             }
           }
 
-          // Regular straight line
           return ShapeData(
             shapeType: 'line',
             x1: points.first.x, y1: points.first.y,
@@ -1001,7 +993,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (!isClosed) return null;
 
     // ── CLOSED SHAPE ANALYSIS ──
-    // Use centroid (arithmetic mean) for a stable center unaffected by drawing asymmetry
     final cx = points.map((p) => p.x).reduce((a, b) => a + b) / points.length;
     final cy = points.map((p) => p.y).reduce((a, b) => a + b) / points.length;
 
@@ -1013,61 +1004,42 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
     area = area.abs() / 2;
 
-    // Perimeter
-    double perimeter = pathLen + startEnd; // close it
-
-    // Circularity = 4π·area / perimeter²  (1.0 for perfect circle)
+    double perimeter = pathLen + startEnd;
     final circularity = (4 * pi * area) / (perimeter * perimeter);
 
-    // Visual width that matches what the fountain pen would draw
     final avgPressureClosed = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
     final shapeVisualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressureClosed * 0.85);
 
-    // ── CORNER DETECTION (run BEFORE circle to avoid rectangles being caught as circles) ──
-    final corners = _detectCorners(points, 25.0);
+    // ── CORNER DETECTION ──
+    final corners = _detectCorners(points, 35.0);
 
-    // ── RECTANGLE ──
-    if (corners.length >= 4 && corners.length <= 6) {
-      // Check how well points hug the bounding box edges
-      double rectScore = 0;
-      for (final p in points) {
-        final distToLeft = (p.x - minX).abs();
-        final distToRight = (p.x - maxX).abs();
-        final distToTop = (p.y - minY).abs();
-        final distToBottom = (p.y - maxY).abs();
-        final minDist = [distToLeft, distToRight, distToTop, distToBottom].reduce(min);
-        if (minDist < max(width, height) * 0.15) rectScore++;
-      }
-      if (rectScore / points.length > 0.55) {
-        return ShapeData(
-          shapeType: 'rectangle',
-          x1: minX, y1: minY, x2: maxX, y2: maxY,
-          strokeColor: state!.toolSettings.color,
-          strokeWidth: shapeVisualWidth,
-        );
-      }
+    // ── Compute radial variance for circle vs polygon discrimination ──
+    // A circle has low radial variance; a rectangle has high.
+    double sumR = 0, sumR2 = 0;
+    for (final p in points) {
+      final r = sqrt((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy));
+      sumR += r;
+      sumR2 += r * r;
     }
+    final avgR = sumR / points.length;
+    final radialVariance = (sumR2 / points.length - avgR * avgR);
+    final radialCV = avgR > 0 ? sqrt(radialVariance) / avgR : 0.0; // coefficient of variation
 
-    // ── TRIANGLE ──
-    if (corners.length == 3) {
-      final c0 = points[corners[0]];
-      final c1 = points[corners[1]];
-      final c2 = points[corners[2]];
-      final tx = [c0.x, c1.x, c2.x];
-      final ty = [c0.y, c1.y, c2.y];
-      return ShapeData(
-        shapeType: 'triangle',
-        x1: tx.reduce(min), y1: ty.reduce(min),
-        x2: tx.reduce(max), y2: ty.reduce(max),
-        strokeColor: state!.toolSettings.color,
-        strokeWidth: shapeVisualWidth,
-      );
+    // ── Compute rectangle edge-hugging score ──
+    double rectScore = 0;
+    for (final p in points) {
+      final distToLeft = (p.x - minX).abs();
+      final distToRight = (p.x - maxX).abs();
+      final distToTop = (p.y - minY).abs();
+      final distToBottom = (p.y - maxY).abs();
+      final minDist = [distToLeft, distToRight, distToTop, distToBottom].reduce(min);
+      if (minDist < max(width, height) * 0.12) rectScore++;
     }
+    final rectRatio = rectScore / points.length;
 
-    // ── CIRCLE / ELLIPSE ──
-    // Only if no corners detected (0-2 corners) and high circularity
-    if (corners.length <= 2 && circularity > 0.60) {
-      // Use the bounding box to size the circle so it matches the drawn size
+    // ── CIRCLE (primary check) ──
+    // High circularity + low radial variance = definitely a circle
+    if (circularity > 0.65 && radialCV < 0.15) {
       final r = max(width, height) / 2;
       return ShapeData(
         shapeType: 'circle',
@@ -1078,35 +1050,67 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       );
     }
 
-    // ── FALLBACK: rectangle from edge proximity (no corner requirement) ──
-    final aspectRatio = width / height;
-    if (aspectRatio > 0.3 && aspectRatio < 3.0 && circularity > 0.45) {
-      double rectScore = 0;
-      for (final p in points) {
-        final distToLeft = (p.x - minX).abs();
-        final distToRight = (p.x - maxX).abs();
-        final distToTop = (p.y - minY).abs();
-        final distToBottom = (p.y - maxY).abs();
-        final minDist = [distToLeft, distToRight, distToTop, distToBottom].reduce(min);
-        if (minDist < max(width, height) * 0.15) rectScore++;
-      }
-      if (rectScore / points.length > 0.60) {
+    // ── RECTANGLE ──
+    // Need real corners (4-6) AND high edge score AND low circularity relative to circle
+    if (corners.length >= 4 && corners.length <= 6 && rectRatio > 0.65 && radialCV > 0.10) {
+      return ShapeData(
+        shapeType: 'rectangle',
+        x1: minX, y1: minY, x2: maxX, y2: maxY,
+        strokeColor: state!.toolSettings.color,
+        strokeWidth: shapeVisualWidth,
+      );
+    }
+
+    // ── TRIANGLE ──
+    if (corners.length == 3 && radialCV > 0.12) {
+      // Verify triangle-like area: drawn area should be >40% of bounding box
+      // (a random scribble with 3 corners wouldn't fill as much)
+      final bboxArea = width * height;
+      if (bboxArea > 0 && area / bboxArea > 0.30) {
+        final c0 = points[corners[0]];
+        final c1 = points[corners[1]];
+        final c2 = points[corners[2]];
+        final tx = [c0.x, c1.x, c2.x];
+        final ty = [c0.y, c1.y, c2.y];
         return ShapeData(
-          shapeType: 'rectangle',
-          x1: minX, y1: minY, x2: maxX, y2: maxY,
+          shapeType: 'triangle',
+          x1: tx.reduce(min), y1: ty.reduce(min),
+          x2: tx.reduce(max), y2: ty.reduce(max),
           strokeColor: state!.toolSettings.color,
           strokeWidth: shapeVisualWidth,
         );
       }
     }
 
+    // ── CIRCLE (relaxed, for slightly wobbly circles) ──
+    if (circularity > 0.55 && radialCV < 0.20 && corners.length <= 2) {
+      final r = max(width, height) / 2;
+      return ShapeData(
+        shapeType: 'circle',
+        x1: cx - r, y1: cy - r,
+        x2: cx + r, y2: cy + r,
+        strokeColor: state!.toolSettings.color,
+        strokeWidth: shapeVisualWidth,
+      );
+    }
+
+    // ── FALLBACK: rectangle only if very strong edge hugging ──
+    if (rectRatio > 0.70 && circularity > 0.45 && radialCV > 0.10) {
+      return ShapeData(
+        shapeType: 'rectangle',
+        x1: minX, y1: minY, x2: maxX, y2: maxY,
+        strokeColor: state!.toolSettings.color,
+        strokeWidth: shapeVisualWidth,
+      );
+    }
+
     return null;
   }
 
   List<int> _detectCorners(List<StrokePoint> points, double threshold) {
-    // Use a stride proportional to point count so dense stylus input
-    // doesn't produce false corners on smooth curves.
-    final stride = max(2, (points.length / 30).round());
+    // Stride proportional to point count — look at meaningful segments,
+    // not micro-segments from dense stylus input.
+    final stride = max(3, (points.length / 20).round());
     final corners = <int>[];
     for (int i = stride; i < points.length - stride; i++) {
       final v1x = points[i].x - points[i - stride].x;
@@ -1116,13 +1120,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final dot = v1x * v2x + v1y * v2y;
       final mag1 = sqrt(v1x * v1x + v1y * v1y);
       final mag2 = sqrt(v2x * v2x + v2y * v2y);
-      if (mag1 > 0 && mag2 > 0) {
+      if (mag1 > 1 && mag2 > 1) {
         final cosAngle = dot / (mag1 * mag2);
         final angle = acos(cosAngle.clamp(-1.0, 1.0)) * 180 / pi;
-        if (angle > threshold && angle < 170) corners.add(i);
+        if (angle > threshold && angle < 160) corners.add(i);
       }
     }
-    final minSep = max((points.length / 8).round(), stride * 2);
+    final minSep = max((points.length / 6).round(), stride * 3);
     final merged = <int>[];
     for (final c in corners) {
       if (merged.isEmpty || c - merged.last > minSep) merged.add(c);
