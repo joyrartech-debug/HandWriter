@@ -842,7 +842,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       default: toolType = 'pen';
     }
 
-    // iPad: no commit-time smoothing (stylus input is already smooth)
     final smoothedPoints = s.activeStroke;
 
     final newElement = ContentElement.stroke(
@@ -1011,7 +1010,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final shapeVisualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressureClosed * 0.85);
 
     // ── CORNER DETECTION ──
-    final corners = _detectCorners(points, 35.0);
+    final corners = _detectCorners(points, 55.0);
 
     // ── Compute radial variance for circle vs polygon discrimination ──
     // A circle has low radial variance; a rectangle has high.
@@ -1037,9 +1036,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
     final rectRatio = rectScore / points.length;
 
-    // ── CIRCLE (primary check) ──
-    // High circularity + low radial variance = definitely a circle
-    if (circularity > 0.65 && radialCV < 0.15) {
+    // ── CIRCLE ──
+    // RadialCV is the most reliable discriminator: low CV = round shape.
+    // Check circle FIRST with generous thresholds — circles should never
+    // fall through to rectangle.
+    if (radialCV < 0.20 && circularity > 0.45) {
       final r = max(width, height) / 2;
       return ShapeData(
         shapeType: 'circle',
@@ -1050,9 +1051,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       );
     }
 
+    // ── Below here: only angular shapes (radialCV >= 0.20) ──
+
     // ── RECTANGLE ──
-    // Need real corners (4-6) AND high edge score AND low circularity relative to circle
-    if (corners.length >= 4 && corners.length <= 6 && rectRatio > 0.65 && radialCV > 0.10) {
+    // Strict: real corners + high edge score + clearly non-round
+    if (corners.length >= 3 && corners.length <= 6 && rectRatio > 0.65 && radialCV > 0.18) {
       return ShapeData(
         shapeType: 'rectangle',
         x1: minX, y1: minY, x2: maxX, y2: maxY,
@@ -1062,9 +1065,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     // ── TRIANGLE ──
-    if (corners.length == 3 && radialCV > 0.12) {
-      // Verify triangle-like area: drawn area should be >40% of bounding box
-      // (a random scribble with 3 corners wouldn't fill as much)
+    if (corners.length == 3 && radialCV > 0.15) {
       final bboxArea = width * height;
       if (bboxArea > 0 && area / bboxArea > 0.30) {
         final c0 = points[corners[0]];
@@ -1082,35 +1083,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
-    // ── CIRCLE (relaxed, for slightly wobbly circles) ──
-    if (circularity > 0.55 && radialCV < 0.20 && corners.length <= 2) {
-      final r = max(width, height) / 2;
-      return ShapeData(
-        shapeType: 'circle',
-        x1: cx - r, y1: cy - r,
-        x2: cx + r, y2: cy + r,
-        strokeColor: state!.toolSettings.color,
-        strokeWidth: shapeVisualWidth,
-      );
-    }
-
-    // ── FALLBACK: rectangle only if very strong edge hugging ──
-    if (rectRatio > 0.70 && circularity > 0.45 && radialCV > 0.10) {
-      return ShapeData(
-        shapeType: 'rectangle',
-        x1: minX, y1: minY, x2: maxX, y2: maxY,
-        strokeColor: state!.toolSettings.color,
-        strokeWidth: shapeVisualWidth,
-      );
-    }
-
     return null;
   }
 
   List<int> _detectCorners(List<StrokePoint> points, double threshold) {
     // Stride proportional to point count — look at meaningful segments,
     // not micro-segments from dense stylus input.
-    final stride = max(3, (points.length / 20).round());
+    // Larger stride avoids false corners on circles (direction changes
+    // gradually but can exceed low thresholds with small strides).
+    final stride = max(4, (points.length / 10).round());
     final corners = <int>[];
     for (int i = stride; i < points.length - stride; i++) {
       final v1x = points[i].x - points[i - stride].x;

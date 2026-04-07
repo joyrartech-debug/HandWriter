@@ -2,7 +2,7 @@
 class AppConfig {
   // ── App Version ──
   // Bump this version for each prompt-driven modification.
-  static const String appVersion = '0.24.0';
+  static const String appVersion = '0.25.0';
 
   // ── WebDAV / Nextcloud ──
   static const String defaultRemotePath = '/HandWriter/';
