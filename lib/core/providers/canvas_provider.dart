@@ -842,12 +842,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       default: toolType = 'pen';
     }
 
-    // Smooth the raw input points to reduce jitter/wigglyness.
-    // Skip smoothing for dense stylus input (iPad etc.) — already smooth,
-    // and the gaussian stretch distorts precise pen strokes.
-    final smoothedPoints = s.activeStroke.length > 80
-        ? s.activeStroke
-        : _smoothStrokePoints(s.activeStroke);
+    // iPad build: no commit-time smoothing (stylus input is already smooth)
+    final smoothedPoints = s.activeStroke;
 
     final newElement = ContentElement.stroke(
       id: const Uuid().v4(),
