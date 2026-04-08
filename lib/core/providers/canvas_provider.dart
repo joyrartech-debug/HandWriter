@@ -270,6 +270,7 @@ class CanvasState {
   final ShapeData? recognizedShape;
   final bool isAdjustingRecognized;
   final ReusableSymbol? pendingSymbol;
+  final bool pendingPaste;
   final String? activeChapterId;
 
   /// Indices of pages visible under the active chapter filter (or all if null).
@@ -316,6 +317,7 @@ class CanvasState {
     this.recognizedShape,
     this.isAdjustingRecognized = false,
     this.pendingSymbol,
+    this.pendingPaste = false,
     this.activeChapterId,
   });
 
@@ -370,6 +372,7 @@ class CanvasState {
     bool? isAdjustingRecognized,
     ReusableSymbol? pendingSymbol,
     bool clearPendingSymbol = false,
+    bool? pendingPaste,
     String? activeChapterId,
     bool clearActiveChapter = false,
   }) =>
@@ -401,6 +404,7 @@ class CanvasState {
         recognizedShape: clearRecognizedShape ? null : (recognizedShape ?? this.recognizedShape),
         isAdjustingRecognized: isAdjustingRecognized ?? this.isAdjustingRecognized,
         pendingSymbol: clearPendingSymbol ? null : (pendingSymbol ?? this.pendingSymbol),
+        pendingPaste: pendingPaste ?? this.pendingPaste,
         activeChapterId: clearActiveChapter ? null : (activeChapterId ?? this.activeChapterId),
       );
 }
@@ -775,17 +779,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null || state!.recognizedShape == null) return;
     final s = state!.recognizedShape!;
 
-    if (s.shapeType == 'circle') {
-      // Keep center fixed, compute new radius from cursor distance
+    if (s.shapeType == 'circle' || s.shapeType == 'triangle') {
+      // Keep center fixed, compute new size from cursor distance to center
       final cx = (s.x1 + s.x2) / 2;
       final cy = (s.y1 + s.y2) / 2;
-      final radius = sqrt(pow(position.dx - cx, 2) + pow(position.dy - cy, 2));
-      final r = radius < 5 ? 5.0 : radius;
+      final dx = (position.dx - cx).abs();
+      final dy = (position.dy - cy).abs();
+      final halfW = max(dx, 5.0);
+      final halfH = max(dy, 5.0);
       state = state!.copyWith(
         recognizedShape: ShapeData(
           shapeType: s.shapeType,
-          x1: cx - r, y1: cy - r,
-          x2: cx + r, y2: cy + r,
+          x1: cx - halfW, y1: cy - halfH,
+          x2: cx + halfW, y2: cy + halfH,
           strokeColor: s.strokeColor,
           strokeWidth: s.strokeWidth,
           fillColor: s.fillColor,
@@ -795,14 +801,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       return;
     }
 
-    // Ensure x2 > x1 and y2 > y1 so the rect/triangle is always valid
-    final x2 = position.dx > s.x1 + 5 ? position.dx : s.x1 + 5;
-    final y2 = position.dy > s.y1 + 5 ? position.dy : s.y1 + 5;
+    // x1,y1 is the anchor (opposite corner from pen at recognition time).
+    // x2,y2 follows the cursor freely — rendering uses Rect.fromPoints
+    // so any ordering is handled correctly.
     state = state!.copyWith(
       recognizedShape: ShapeData(
         shapeType: s.shapeType,
         x1: s.x1, y1: s.y1,
-        x2: x2, y2: y2,
+        x2: position.dx, y2: position.dy,
         strokeColor: s.strokeColor,
         strokeWidth: s.strokeWidth,
         fillColor: s.fillColor,
@@ -842,6 +848,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       default: toolType = 'pen';
     }
 
+    // Smooth the raw input points to reduce jitter/wigglyness.
+    // Skip smoothing for dense stylus input (iPad etc.) — already smooth,
+    // and the gaussian stretch distorts precise pen strokes.
     final smoothedPoints = s.activeStroke;
 
     final newElement = ContentElement.stroke(
@@ -918,172 +927,275 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final maxY = ys.reduce(max);
     final width = maxX - minX;
     final height = maxY - minY;
+    final maxDim = max(width, height);
 
-    if (width < 10 && height < 10) return null;
+    if (maxDim < 10) return null;
 
-    // Total path length
+    // Total path length vs straight line distance
     double pathLen = 0;
     for (int i = 1; i < points.length; i++) {
       pathLen += sqrt(pow(points[i].x - points[i - 1].x, 2) + pow(points[i].y - points[i - 1].y, 2));
     }
+    final startEndDist = sqrt(pow(points.last.x - points.first.x, 2) + pow(points.last.y - points.first.y, 2));
+    
+    final avgPressure = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
+    final visualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressure * 0.85);
+    final color = state!.toolSettings.color;
 
-    final startEnd = sqrt(
-      pow(points.last.x - points.first.x, 2) +
-      pow(points.last.y - points.first.y, 2),
-    );
-
-    final isClosed = startEnd < max(width, height) * 0.3;
-
-    // ── LINE DETECTION ──
-    if (!isClosed && pathLen > 20) {
-      final dx = points.last.x - points.first.x;
-      final dy = points.last.y - points.first.y;
-      final lineLen = sqrt(dx * dx + dy * dy);
-      if (lineLen > 20) {
-        double maxDev = 0;
-        for (final p in points) {
-          final cross = ((p.x - points.first.x) * dy - (p.y - points.first.y) * dx).abs();
-          final dev = cross / lineLen;
-          if (dev > maxDev) maxDev = dev;
-        }
-        final straightness = lineLen / pathLen;
-        if (maxDev < lineLen * 0.1 && straightness > 0.85) {
-          final avgPressure = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
-          final visualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressure * 0.85);
-
-          // ── ARROW DETECTION ──
-          if (lineLen > 30) {
-            final tailCount = max(3, (points.length * 0.2).ceil());
-            if (tailCount < points.length - 1) {
-              final tailStart = points[points.length - tailCount - 1];
-              final bodyDx = tailStart.x - points.first.x;
-              final bodyDy = tailStart.y - points.first.y;
-              final tailDx = points.last.x - tailStart.x;
-              final tailDy = points.last.y - tailStart.y;
-              final bodyLen = sqrt(bodyDx * bodyDx + bodyDy * bodyDy);
-              final tailLen = sqrt(tailDx * tailDx + tailDy * tailDy);
-              if (bodyLen > 0 && tailLen > 0) {
-                final dot = (bodyDx / bodyLen) * (tailDx / tailLen) + (bodyDy / bodyLen) * (tailDy / tailLen);
-                if (dot < -0.3 && tailLen > lineLen * 0.08 && tailLen < lineLen * 0.5) {
-                  return ShapeData(
-                    shapeType: 'arrow',
-                    x1: points.first.x, y1: points.first.y,
-                    x2: tailStart.x, y2: tailStart.y,
-                    strokeColor: state!.toolSettings.color,
-                    strokeWidth: visualWidth,
-                  );
-                }
-              }
-            }
-          }
-
-          return ShapeData(
-            shapeType: 'line',
-            x1: points.first.x, y1: points.first.y,
-            x2: points.last.x, y2: points.last.y,
-            strokeColor: state!.toolSettings.color,
-            strokeWidth: visualWidth,
-          );
-        }
+    // ── LINE & ARROW DETECTION ──
+    // If the path length is barely longer than the distance between start and end, it's a straight line.
+    if (pathLen > 20 && (pathLen / startEndDist) < 1.12) {
+      // Basic arrow detection (checking if the tail hooks back)
+      final tailStart = points[(points.length * 0.8).round()];
+      final tailDist = sqrt(pow(points.last.x - tailStart.x, 2) + pow(points.last.y - tailStart.y, 2));
+      if (tailDist > 5 && tailDist < maxDim * 0.4) {
+        // We can confidently assume it's an arrow if it hooks
+        return ShapeData(
+          shapeType: 'arrow',
+          x1: points.first.x, y1: points.first.y,
+          x2: points.last.x, y2: points.last.y, // Snap to the actual end
+          strokeColor: color, strokeWidth: visualWidth,
+        );
       }
-      return null;
+      
+      return ShapeData(
+        shapeType: 'line',
+        x1: points.first.x, y1: points.first.y,
+        x2: points.last.x, y2: points.last.y,
+        strokeColor: color, strokeWidth: visualWidth,
+      );
     }
 
+    // ── CLOSURE CHECK ──
+    // Allow a generous overlap gap for messy hand drawing
+    final isClosed = startEndDist < maxDim * 0.35;
     if (!isClosed) return null;
 
-    // ── CLOSED SHAPE ANALYSIS ──
-    final cx = points.map((p) => p.x).reduce((a, b) => a + b) / points.length;
-    final cy = points.map((p) => p.y).reduce((a, b) => a + b) / points.length;
+    // Auto-fill closed shapes with a transparent version of the stroke color.
+    final fillAlpha = 0x30; // ~19% opacity
+    final autoFill = (color & 0x00FFFFFF) | (fillAlpha << 24);
 
-    // Compute area using shoelace formula
-    double area = 0;
-    for (int i = 0; i < points.length; i++) {
-      final j = (i + 1) % points.length;
-      area += points[i].x * points[j].y - points[j].x * points[i].y;
+    // ── POLYGON DETECTION (Douglas-Peucker) — run early to inform circle vs rect ──
+    final offsets = points.map((p) => Offset(p.x, p.y)).toList();
+    
+    // Lowered epsilon to 0.06 to avoid over-smoothing rounded corners
+    final simplified = _douglasPeucker(offsets, maxDim * 0.06);
+    
+    // Remove the last point if it overlaps the first to get the true corner count
+    List<Offset> corners = List.from(simplified);
+    if (corners.length > 1 && (corners.first - corners.last).distance < maxDim * 0.25) {
+      corners.removeLast();
     }
-    area = area.abs() / 2;
 
-    double perimeter = pathLen + startEnd;
-    final circularity = (4 * pi * area) / (perimeter * perimeter);
-
-    final avgPressureClosed = points.map((p) => p.pressure).reduce((a, b) => a + b) / points.length;
-    final shapeVisualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressureClosed * 0.85);
-
-    // ── CORNER DETECTION ──
-    final corners = _detectCorners(points, 55.0);
-
-    // ── Compute radial variance for circle vs polygon discrimination ──
-    // A circle has low radial variance; a rectangle has high.
+    // ── CIRCLE DETECTION (Radial Variance) ──
+    // A circle has many Douglas-Peucker segments (7+), while
+    // rectangles have 4-6 and triangles have 3. Use corner count
+    // to disambiguate: only accept circle if NOT in polygon range (4-6).
+    final cx = (minX + maxX) / 2;
+    final cy = (minY + maxY) / 2;
     double sumR = 0, sumR2 = 0;
+    
     for (final p in points) {
-      final r = sqrt((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy));
+      final r = sqrt(pow(p.x - cx, 2) + pow(p.y - cy, 2));
       sumR += r;
       sumR2 += r * r;
     }
+    
     final avgR = sumR / points.length;
-    final radialVariance = (sumR2 / points.length - avgR * avgR);
-    final radialCV = avgR > 0 ? sqrt(radialVariance) / avgR : 0.0; // coefficient of variation
+    final radialVariance = (sumR2 / points.length) - (avgR * avgR);
+    final radialCV = avgR > 0 ? sqrt(radialVariance) / avgR : 0.0;
+    final aspectRatio = min(width, height) / max(width, height);
 
-    // ── Compute rectangle edge-hugging score ──
-    double rectScore = 0;
-    for (final p in points) {
-      final distToLeft = (p.x - minX).abs();
-      final distToRight = (p.x - maxX).abs();
-      final distToTop = (p.y - minY).abs();
-      final distToBottom = (p.y - maxY).abs();
-      final minDist = [distToLeft, distToRight, distToTop, distToBottom].reduce(min);
-      if (minDist < max(width, height) * 0.12) rectScore++;
-    }
-    final rectRatio = rectScore / points.length;
+    // Accept circle if: good radial fit AND either not in rectangle corner range,
+    // or radial fit is very strong (CV < 0.08 overrides corner count).
+    final isCircleCandidate = radialCV < 0.15 && aspectRatio > 0.60;
+    final notPolygonRange = corners.length < 4 || corners.length > 6;
+    final veryStrongCircle = radialCV < 0.08;
 
-    // ── CIRCLE ──
-    // RadialCV is the most reliable discriminator: low CV = round shape.
-    // Check circle FIRST with generous thresholds — circles should never
-    // fall through to rectangle.
-    if (radialCV < 0.20 && circularity > 0.45) {
-      final r = max(width, height) / 2;
+    if (isCircleCandidate && (notPolygonRange || veryStrongCircle)) {
+      // Use avgR (mean distance from center to drawn points) to preserve drawn size
+      final r = avgR;
       return ShapeData(
         shapeType: 'circle',
         x1: cx - r, y1: cy - r,
         x2: cx + r, y2: cy + r,
-        strokeColor: state!.toolSettings.color,
-        strokeWidth: shapeVisualWidth,
-      );
-    }
-
-    // ── Below here: only angular shapes (radialCV >= 0.20) ──
-
-    // ── RECTANGLE ──
-    // Strict: real corners + high edge score + clearly non-round
-    if (corners.length >= 3 && corners.length <= 6 && rectRatio > 0.65 && radialCV > 0.18) {
-      return ShapeData(
-        shapeType: 'rectangle',
-        x1: minX, y1: minY, x2: maxX, y2: maxY,
-        strokeColor: state!.toolSettings.color,
-        strokeWidth: shapeVisualWidth,
+        strokeColor: color, strokeWidth: visualWidth,
+        fillColor: autoFill,
       );
     }
 
     // ── TRIANGLE ──
-    if (corners.length == 3 && radialCV > 0.15) {
-      final bboxArea = width * height;
-      if (bboxArea > 0 && area / bboxArea > 0.30) {
-        final c0 = points[corners[0]];
-        final c1 = points[corners[1]];
-        final c2 = points[corners[2]];
-        final tx = [c0.x, c1.x, c2.x];
-        final ty = [c0.y, c1.y, c2.y];
+    if (corners.length == 3) {
+      // Anchor (x1,y1) = corner opposite the pen; Free (x2,y2) = pen's corner.
+      // This lets the user drag x2,y2 naturally after recognition.
+      final endPoint = Offset(points.last.x, points.last.y);
+      final boxCorners = [
+        Offset(minX, minY), Offset(maxX, minY),
+        Offset(maxX, maxY), Offset(minX, maxY)
+      ];
+      int closestIdx = 0;
+      double closestDist = double.infinity;
+      for (int i = 0; i < 4; i++) {
+        final d = (boxCorners[i] - endPoint).distance;
+        if (d < closestDist) {
+          closestDist = d;
+          closestIdx = i;
+        }
+      }
+      return ShapeData(
+        shapeType: 'triangle',
+        x1: boxCorners[(closestIdx + 2) % 4].dx,
+        y1: boxCorners[(closestIdx + 2) % 4].dy,
+        x2: boxCorners[closestIdx].dx,
+        y2: boxCorners[closestIdx].dy,
+        strokeColor: color, strokeWidth: visualWidth,
+        fillColor: autoFill,
+      );
+    }
+
+    // ── RECTANGLE (With slant/rotation support) ──
+    if (corners.length >= 4 && corners.length <= 6) {
+      double maxEdgeLen = 0;
+      double angle = 0;
+      for (int i = 0; i < corners.length; i++) {
+        final p1 = corners[i];
+        final p2 = corners[(i + 1) % corners.length];
+        final dist = (p1 - p2).distance;
+        if (dist > maxEdgeLen) {
+          maxEdgeLen = dist;
+          angle = atan2(p2.dy - p1.dy, p2.dx - p1.dx);
+        }
+      }
+
+      final snappedAngle = (angle / (pi / 2)).round() * (pi / 2);
+      if ((angle - snappedAngle).abs() < 0.2) angle = snappedAngle;
+
+      // For axis-aligned rectangles (angle is multiple of π/2), use the
+      // simple bounding box directly. The OBB rotation is only needed for
+      // truly tilted rectangles — using it for axis-aligned ones produces
+      // distorted coordinates that break resize and rendering.
+      final isAxisAligned = (angle % (pi / 2)).abs() < 0.01 || ((angle % (pi / 2)).abs() - pi / 2).abs() < 0.01;
+
+      double rMinX, rMaxX, rMinY, rMaxY;
+      double finalAngle;
+
+      if (isAxisAligned) {
+        // Use raw bounding box — no rotation needed
+        rMinX = minX;
+        rMaxX = maxX;
+        rMinY = minY;
+        rMaxY = maxY;
+        finalAngle = 0;
+      } else {
+        // Tilted rectangle: compute OBB
+        final cosA = cos(-angle);
+        final sinA = sin(-angle);
+        rMinX = double.infinity;
+        rMaxX = double.negativeInfinity;
+        rMinY = double.infinity;
+        rMaxY = double.negativeInfinity;
+
+        for (final p in offsets) {
+          final dx = p.dx - cx;
+          final dy = p.dy - cy;
+          final rx = dx * cosA - dy * sinA;
+          final ry = dx * sinA + dy * cosA;
+          if (rx < rMinX) rMinX = rx;
+          if (rx > rMaxX) rMaxX = rx;
+          if (ry < rMinY) rMinY = ry;
+          if (ry > rMaxY) rMaxY = ry;
+        }
+        // Convert back to page-space
+        rMinX += cx;
+        rMaxX += cx;
+        rMinY += cy;
+        rMaxY += cy;
+        finalAngle = angle;
+      }
+
+      final obbW = rMaxX - (isAxisAligned ? rMinX : rMinX);
+      final obbH = rMaxY - (isAxisAligned ? rMinY : rMinY);
+      final obbArea = obbW * obbH;
+
+      double shapeArea = 0;
+      for (int i = 0; i < corners.length; i++) {
+        final p1 = corners[i];
+        final p2 = corners[(i + 1) % corners.length];
+        shapeArea += (p1.dx * p2.dy) - (p2.dx * p1.dy);
+      }
+      shapeArea = (shapeArea.abs() / 2);
+
+      if (obbArea > 0 && (shapeArea / obbArea) > 0.70) {
+        // Find which corner the pen ended near
+        final endPoint = Offset(points.last.x, points.last.y);
+        final rectCorners = [
+          Offset(rMinX, rMinY), // Top-Left
+          Offset(rMaxX, rMinY), // Top-Right
+          Offset(rMaxX, rMaxY), // Bottom-Right
+          Offset(rMinX, rMaxY), // Bottom-Left
+        ];
+        int closestIdx = 0;
+        double closestDist = double.infinity;
+        for (int i = 0; i < 4; i++) {
+          final d = (rectCorners[i] - endPoint).distance;
+          if (d < closestDist) {
+            closestDist = d;
+            closestIdx = i;
+          }
+        }
         return ShapeData(
-          shapeType: 'triangle',
-          x1: tx.reduce(min), y1: ty.reduce(min),
-          x2: tx.reduce(max), y2: ty.reduce(max),
-          strokeColor: state!.toolSettings.color,
-          strokeWidth: shapeVisualWidth,
+          shapeType: 'rectangle',
+          x1: rectCorners[(closestIdx + 2) % 4].dx,
+          y1: rectCorners[(closestIdx + 2) % 4].dy,
+          x2: rectCorners[closestIdx].dx,
+          y2: rectCorners[closestIdx].dy,
+          rotation: finalAngle,
+          strokeColor: color, strokeWidth: visualWidth,
+          fillColor: autoFill,
         );
       }
     }
 
     return null;
+  }
+
+  // ── MATHEMATICAL HELPERS ──
+
+  /// Douglas-Peucker algorithm to reduce complex paths into core geometric vertices
+  List<Offset> _douglasPeucker(List<Offset> points, double epsilon) {
+    if (points.length <= 2) return points;
+
+    double maxDist = 0.0;
+    int index = 0;
+    final end = points.length - 1;
+
+    for (int i = 1; i < end; i++) {
+      final dist = _perpendicularDistance(points[i], points[0], points[end]);
+      if (dist > maxDist) {
+        maxDist = dist;
+        index = i;
+      }
+    }
+
+    if (maxDist > epsilon) {
+      final left = _douglasPeucker(points.sublist(0, index + 1), epsilon);
+      final right = _douglasPeucker(points.sublist(index, end + 1), epsilon);
+      return [...left.sublist(0, left.length - 1), ...right];
+    } else {
+      return [points[0], points[end]];
+    }
+  }
+
+  /// Calculates the shortest distance from a point to a line segment
+  double _perpendicularDistance(Offset pt, Offset lineStart, Offset lineEnd) {
+    final dx = lineEnd.dx - lineStart.dx;
+    final dy = lineEnd.dy - lineStart.dy;
+    final mag = sqrt(dx * dx + dy * dy);
+    
+    if (mag > 0.0) {
+      return ((pt.dx - lineStart.dx) * dy - (pt.dy - lineStart.dy) * dx).abs() / mag;
+    }
+    return (pt - lineStart).distance;
   }
 
   List<int> _detectCorners(List<StrokePoint> points, double threshold) {
@@ -2129,6 +2241,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  Rect _elementBounds(ContentElement element) {
+    return element.map(
+      stroke: (e) {
+        if (e.data.points.isEmpty) return Rect.zero;
+        double mnX = e.data.points.first.x, mxX = mnX, mnY = e.data.points.first.y, mxY = mnY;
+        for (final p in e.data.points) {
+          if (p.x < mnX) mnX = p.x; if (p.x > mxX) mxX = p.x;
+          if (p.y < mnY) mnY = p.y; if (p.y > mxY) mxY = p.y;
+        }
+        return Rect.fromLTRB(mnX, mnY, mxX, mxY);
+      },
+      text: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
+      image: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
+      shape: (e) => Rect.fromPoints(Offset(e.data.x1, e.data.y1), Offset(e.data.x2, e.data.y2)),
+    );
+  }
+
   ContentElement _scaleElement(ContentElement element, Offset center, double scale) {
     return element.map(
       stroke: (e) => ContentElement.stroke(
@@ -2737,7 +2866,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void duplicateSelection() {
     copySelection();
-    paste();
+    // Enter placement mode — user taps to place the copy
+    if (state != null && state!.clipboard != null) {
+      state = state!.copyWith(pendingPaste: true, clearLasso: true);
+    }
   }
 
   void duplicateElement(String elementId) {
@@ -2745,7 +2877,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final s = state!;
     final page = s.currentPage;
     if (page == null) return;
-    final fileName = s.currentPageFileName;
 
     final original = page.layers.content.where((e) {
       final id = e.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
@@ -2753,25 +2884,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }).firstOrNull;
     if (original == null) return;
 
-    final undoStack = _pushUndo(s, fileName, page);
-    final translated = _translateElement(original, const Offset(20, 20));
-    final newId = const Uuid().v4();
-    final z = _nextZIndex(page);
-    final newElement = translated.map(
-      stroke: (e) => ContentElement.stroke(id: newId, zIndex: z, data: e.data),
-      text: (e) => ContentElement.text(id: newId, zIndex: z, data: e.data),
-      image: (e) => ContentElement.image(id: newId, zIndex: z, data: e.data),
-      shape: (e) => ContentElement.shape(id: newId, zIndex: z, data: e.data),
-    );
-
-    final updatedPage = _pageWithNewElement(page, newElement);
-    final updatedPages = Map<String, PageData>.from(s.pages);
-    updatedPages[fileName] = updatedPage;
-
+    // Copy the element to clipboard and enter placement mode
+    final bounds = _elementBounds(original);
     state = s.copyWith(
-      pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true,
-      selectedElementId: newId, clearLasso: true,
+      clipboard: CanvasClipboard(elements: [original], bounds: bounds),
+      pendingPaste: true,
+      clearSelectedElement: true,
     );
+  }
+
+  void cancelPendingPaste() {
+    if (state == null) return;
+    state = state!.copyWith(pendingPaste: false);
   }
 
   // ── Reusable Symbols & Libraries ──
@@ -3346,13 +3470,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         canvas.drawLine(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2), strokePaint);
         break;
       case 'triangle':
-        final path = Path()
-          ..moveTo((shape.x1 + shape.x2) / 2, shape.y1)
-          ..lineTo(shape.x1, shape.y2)
-          ..lineTo(shape.x2, shape.y2)
+        final tLeft = min(shape.x1, shape.x2);
+        final tRight = max(shape.x1, shape.x2);
+        final tTop = min(shape.y1, shape.y2);
+        final tBottom = max(shape.y1, shape.y2);
+        final tPath = Path()
+          ..moveTo((tLeft + tRight) / 2, tTop)
+          ..lineTo(tLeft, tBottom)
+          ..lineTo(tRight, tBottom)
           ..close();
-        if (fillPaint != null) canvas.drawPath(path, fillPaint);
-        canvas.drawPath(path, strokePaint);
+        if (fillPaint != null) canvas.drawPath(tPath, fillPaint);
+        canvas.drawPath(tPath, strokePaint);
         break;
       default:
         canvas.drawRect(Rect.fromPoints(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2)), strokePaint);

@@ -183,11 +183,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       }
     }
 
-    // Escape — deselect / cancel pending symbol
+    // Escape — deselect / cancel pending symbol / cancel pending paste
     if (event.logicalKey == LogicalKeyboardKey.escape) {
       final state = ref.read(canvasProvider);
       if (state?.pendingSymbol != null) {
         ref.read(canvasProvider.notifier).clearPendingSymbol();
+        return KeyEventResult.handled;
+      }
+      if (state?.pendingPaste == true) {
+        ref.read(canvasProvider.notifier).cancelPendingPaste();
         return KeyEventResult.handled;
       }
       ref.read(canvasProvider.notifier).clearSelection();
@@ -492,6 +496,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     // Pending symbol placement: tap to place symbol at this position
     if (state.pendingSymbol != null) {
       ref.read(canvasProvider.notifier).insertSymbol(state.pendingSymbol!, pagePos);
+      return;
+    }
+
+    // Pending paste placement: tap to place duplicated/pasted content here
+    if (state.pendingPaste && state.clipboard != null) {
+      ref.read(canvasProvider.notifier).paste(at: pagePos);
+      ref.read(canvasProvider.notifier).cancelPendingPaste();
       return;
     }
 
@@ -939,10 +950,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
     final newZoom = (_baseZoom * details.scale).clamp(0.3, 5.0);
 
-    // Zoom toward focal point: adjust pan so focal point stays fixed
-    final focalPoint = details.localFocalPoint;
+    // Zoom toward pointer: adjust pan so the point under the pointer stays fixed
+    final focalPoint = details.focalPoint;
+    final localFocalPoint = details.localFocalPoint;
     final oldZoom = state.zoom;
-    final newPan = focalPoint - (focalPoint - state.panOffset) * (newZoom / oldZoom);
+    final renderBox = context.findRenderObject() as RenderBox?;
+    Offset pointerInCanvas = localFocalPoint;
+    if (renderBox != null) {
+      // Convert to global if needed
+      pointerInCanvas = renderBox.globalToLocal(focalPoint);
+    }
+    final newPan = pointerInCanvas - (pointerInCanvas - state.panOffset) * (newZoom / oldZoom);
 
     notifier.setZoomAndPan(newZoom, newPan);
     _lastFocalPoint = details.focalPoint;
@@ -1317,8 +1335,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                       final newZoom = (oldZoom * zoomDelta).clamp(0.3, 5.0);
                       final cursorPos = event.localPosition;
                       final newPan = cursorPos - (cursorPos - canvasState.panOffset) * (newZoom / oldZoom);
-                      ref.read(canvasProvider.notifier).setZoom(newZoom);
-                      ref.read(canvasProvider.notifier).setPanOffset(newPan);
+                      ref.read(canvasProvider.notifier).setZoomAndPan(newZoom, newPan);
+                    } else if (event is PointerScaleEvent) {
+                      // Trackpad pinch-to-zoom
+                      final oldZoom = canvasState.zoom;
+                      final newZoom = (oldZoom * event.scale).clamp(0.3, 5.0);
+                      final cursorPos = event.localPosition;
+                      final newPan = cursorPos - (cursorPos - canvasState.panOffset) * (newZoom / oldZoom);
+                      ref.read(canvasProvider.notifier).setZoomAndPan(newZoom, newPan);
                     }
                   },
                   child: GestureDetector(
@@ -1370,6 +1394,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
               // Lasso selection handles (resize corners + rotation)
               ..._buildLassoHandles(canvasState, canvasSize),
+
+              // Floating context actions near lasso selection
+              if (canvasState.lassoSelection != null)
+                _buildFloatingSelectionActions(canvasState, canvasSize),
 
               // Recognized shape adjustment indicator (only for shape tool adjustment mode)
               if (canvasState.isAdjustingRecognized && canvasState.recognizedShape != null)
@@ -1448,6 +1476,39 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                           const SizedBox(width: 8),
                           GestureDetector(
                             onTap: () => ref.read(canvasProvider.notifier).clearPendingSymbol(),
+                            child: const Icon(Icons.close, color: Colors.white70, size: 16),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+              // Pending paste placement hint (duplicate / paste)
+              if (canvasState.pendingPaste && canvasState.clipboard != null)
+                Positioned(
+                  top: 16,
+                  left: 0, right: 0,
+                  child: Center(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade700,
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.place, color: Colors.white, size: 16),
+                          const SizedBox(width: 8),
+                          const Text(
+                            'Tocca per posizionare la copia',
+                            style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
+                          ),
+                          const SizedBox(width: 8),
+                          GestureDetector(
+                            onTap: () => ref.read(canvasProvider.notifier).cancelPendingPaste(),
                             child: const Icon(Icons.close, color: Colors.white70, size: 16),
                           ),
                         ],
@@ -1751,6 +1812,65 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   }
 
   // ── Lasso selection rotation handle ──
+
+  Widget _buildFloatingSelectionActions(CanvasState state, Size canvasSize) {
+    final sel = state.lassoSelection!;
+    final center = sel.bounds.center;
+    final scaledBounds = Rect.fromCenter(
+      center: center,
+      width: sel.bounds.width * sel.scale,
+      height: sel.bounds.height * sel.scale,
+    ).translate(sel.dragOffset.dx, sel.dragOffset.dy);
+
+    // Position below the selection
+    final screenBottom = _toScreenCoords(scaledBounds.bottomCenter, state, canvasSize);
+    final screenCenter = _toScreenCoords(scaledBounds.center, state, canvasSize);
+
+    // Clamp to stay within view
+    final top = (screenBottom.dy + 12).clamp(0.0, canvasSize.height - 50);
+
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: top,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: [
+              BoxShadow(color: Colors.black.withValues(alpha: 0.18), blurRadius: 8, offset: const Offset(0, 2)),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _FloatingActionBtn(Icons.copy_rounded, 'Copia', () {
+                ref.read(canvasProvider.notifier).copySelection();
+              }),
+              _FloatingActionBtn(Icons.content_cut_rounded, 'Taglia', () {
+                ref.read(canvasProvider.notifier).cutSelection();
+              }),
+              _FloatingActionBtn(Icons.copy_all_rounded, 'Duplica', () {
+                ref.read(canvasProvider.notifier).duplicateSelection();
+              }),
+              if (state.clipboard != null)
+                _FloatingActionBtn(Icons.paste_rounded, 'Incolla', () {
+                  ref.read(canvasProvider.notifier).paste();
+                }),
+              _FloatingActionBtn(Icons.delete_outline, 'Elimina', () {
+                ref.read(canvasProvider.notifier).deleteSelection();
+              }, color: Colors.red),
+              _FloatingActionBtn(Icons.close, null, () {
+                ref.read(canvasProvider.notifier).clearSelection();
+              }),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
   List<Widget> _buildLassoHandles(CanvasState state, Size canvasSize) {
     final sel = state.lassoSelection;
@@ -2686,6 +2806,38 @@ class _Dims {
 }
 
 /// Context menu row with icon, label, and optional shortcut
+class _FloatingActionBtn extends StatelessWidget {
+  final IconData icon;
+  final String? label;
+  final VoidCallback onTap;
+  final Color? color;
+
+  const _FloatingActionBtn(this.icon, this.label, this.onTap, {this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = color ?? Colors.grey.shade800;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 20, color: c),
+              if (label != null)
+                Text(label!, style: TextStyle(fontSize: 9, color: c)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _MenuRow extends StatelessWidget {
   final IconData icon;
   final String label;

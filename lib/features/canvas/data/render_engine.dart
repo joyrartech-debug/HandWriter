@@ -696,13 +696,17 @@ class CanvasRenderEngine extends CustomPainter {
         _paintArrowHead(canvas, shape, strokePaint);
         break;
       case 'triangle':
-        final path = Path()
-          ..moveTo((shape.x1 + shape.x2) / 2, shape.y1)
-          ..lineTo(shape.x1, shape.y2)
-          ..lineTo(shape.x2, shape.y2)
+        final tLeft = min(shape.x1, shape.x2);
+        final tRight = max(shape.x1, shape.x2);
+        final tTop = min(shape.y1, shape.y2);
+        final tBottom = max(shape.y1, shape.y2);
+        final tPath = Path()
+          ..moveTo((tLeft + tRight) / 2, tTop)
+          ..lineTo(tLeft, tBottom)
+          ..lineTo(tRight, tBottom)
           ..close();
-        if (fillPaint != null) canvas.drawPath(path, fillPaint);
-        canvas.drawPath(path, strokePaint);
+        if (fillPaint != null) canvas.drawPath(tPath, fillPaint);
+        canvas.drawPath(tPath, strokePaint);
         break;
       case 'xy_plane':
         // XY plane: two arrows from an origin, with optional grid lines
@@ -783,12 +787,16 @@ class CanvasRenderEngine extends CustomPainter {
         canvas.drawLine(start, end, previewPaint);
         break;
       case 'triangle':
-        final path = Path()
-          ..moveTo((start.dx + end.dx) / 2, start.dy)
-          ..lineTo(start.dx, end.dy)
-          ..lineTo(end.dx, end.dy)
+        final tLeft = min(start.dx, end.dx);
+        final tRight = max(start.dx, end.dx);
+        final tTop = min(start.dy, end.dy);
+        final tBottom = max(start.dy, end.dy);
+        final tPath = Path()
+          ..moveTo((tLeft + tRight) / 2, tTop)
+          ..lineTo(tLeft, tBottom)
+          ..lineTo(tRight, tBottom)
           ..close();
-        canvas.drawPath(path, previewPaint);
+        canvas.drawPath(tPath, previewPaint);
         break;
       case 'xy_plane':
         canvas.drawLine(Offset(start.dx, end.dy), Offset(end.dx, end.dy), previewPaint);
@@ -813,11 +821,11 @@ class CanvasRenderEngine extends CustomPainter {
         canvas.drawLine(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2), glowPaint);
         break;
       case 'circle':
-        final rect = Rect.fromLTRB(shape.x1, shape.y1, shape.x2, shape.y2);
+        final rect = Rect.fromPoints(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2));
         canvas.drawOval(rect, glowPaint);
         break;
       default:
-        final rect = Rect.fromLTRB(shape.x1, shape.y1, shape.x2, shape.y2);
+        final rect = Rect.fromPoints(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2));
         canvas.drawRect(rect, glowPaint);
     }
   }
