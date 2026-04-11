@@ -510,7 +510,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           ref.read(canvasProvider.notifier).deselectElement();
           _isTouchPanning = true;
           _lastFocalPoint = event.position;
-          _startLongPressTimer(event.position, event.localPosition, state, canvasSize);
+          // Don't show context menu if stylus is actively drawing (palm rest)
+          if (!_activeStrokeNotifier.isActive) {
+            _startLongPressTimer(event.position, event.localPosition, state, canvasSize);
+          }
           return;
         }
       } else {
@@ -524,7 +527,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         }
         _isTouchPanning = true;
         _lastFocalPoint = event.position;
-        _startLongPressTimer(event.position, event.localPosition, state, canvasSize);
+        // Don't show context menu if stylus is actively drawing (palm rest)
+        if (!_activeStrokeNotifier.isActive) {
+          _startLongPressTimer(event.position, event.localPosition, state, canvasSize);
+        }
         return;
       }
     }
@@ -2018,7 +2024,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           children: [
             GestureDetector(
               onPanUpdate: (d) {
-                final centerGlobal = screenRect.center;
+                // Convert screenRect center to global coords for correct rotation
+                final box = context.findRenderObject() as RenderBox?;
+                final centerGlobal = box != null
+                    ? box.localToGlobal(screenRect.center)
+                    : screenRect.center;
                 final prev = d.globalPosition - d.delta;
                 final startAngle = atan2(prev.dy - centerGlobal.dy, prev.dx - centerGlobal.dx);
                 final currentAngle = atan2(d.globalPosition.dy - centerGlobal.dy, d.globalPosition.dx - centerGlobal.dx);

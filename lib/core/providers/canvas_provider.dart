@@ -1349,7 +1349,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final eraseRadius = eraserSizeToRadius(s.toolSettings.eraserSize);
     final fileName = s.currentPageFileName;
-    final isStrokeEraser = s.currentTool == CanvasTool.eraserStroke;
 
     final newContent = <ContentElement>[];
     bool changed = false;
@@ -1357,116 +1356,44 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     for (final element in page.layers.content) {
       bool shouldRemoveWhole = false;
 
-      if (isStrokeEraser) {
-        // Stroke eraser: remove entire element if any point is within radius
-        element.map(
-          stroke: (stroke) {
-            for (final point in stroke.data.points) {
-              final dx = point.x - position.dx;
-              final dy = point.y - position.dy;
-              if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
-                shouldRemoveWhole = true;
-                break;
-              }
+      // Both erasers remove entire elements. Standard eraser uses a smaller
+      // radius for precision, stroke eraser is more aggressive.
+      element.map(
+        stroke: (stroke) {
+          for (final point in stroke.data.points) {
+            final dx = point.x - position.dx;
+            final dy = point.y - position.dy;
+            if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
+              shouldRemoveWhole = true;
+              break;
             }
-          },
-          text: (t) {
-            final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
-            if (rect.contains(position)) shouldRemoveWhole = true;
-          },
-          image: (img) {
-            // Allow erasing symbols (placed via symbol library) but not imported images/PDFs
-            if (img.data.assetPath.startsWith('symbol_')) {
-              final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
-              if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
-            }
-          },
-          shape: (sh) {
-            final rect = Rect.fromPoints(
-              Offset(sh.data.x1, sh.data.y1),
-              Offset(sh.data.x2, sh.data.y2),
-            );
+          }
+        },
+        text: (t) {
+          final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
+          if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+        },
+        image: (img) {
+          // Allow erasing symbols (placed via symbol library) but not imported images/PDFs
+          if (img.data.assetPath.startsWith('symbol_')) {
+            final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
             if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
-          },
-        );
+          }
+        },
+        shape: (sh) {
+          final rect = Rect.fromPoints(
+            Offset(sh.data.x1, sh.data.y1),
+            Offset(sh.data.x2, sh.data.y2),
+          );
+          if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+        },
+      );
 
-        if (shouldRemoveWhole) {
-          changed = true;
-          continue; // skip this element
-        }
-        newContent.add(element);
-      } else {
-        // Standard eraser: for strokes, remove only points within radius and split
-        element.map(
-          stroke: (stroke) {
-            // Split stroke: keep segments that are outside the eraser circle
-            final segments = <List<StrokePoint>>[];
-            var currentSegment = <StrokePoint>[];
-
-            for (final point in stroke.data.points) {
-              final dx = point.x - position.dx;
-              final dy = point.y - position.dy;
-              if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
-                // Point is within eraser — end current segment
-                if (currentSegment.length >= 2) {
-                  segments.add(currentSegment);
-                }
-                currentSegment = [];
-                changed = true;
-              } else {
-                currentSegment.add(point);
-              }
-            }
-            if (currentSegment.length >= 2) {
-              segments.add(currentSegment);
-            }
-
-            if (segments.isEmpty) {
-              changed = true;
-              return; // entire stroke erased
-            }
-
-            if (segments.length == 1 && segments[0].length == stroke.data.points.length) {
-              newContent.add(element); // unchanged
-              return;
-            }
-
-            // Create new stroke elements for each remaining segment
-            for (final seg in segments) {
-              newContent.add(ContentElement.stroke(
-                id: const Uuid().v4(),
-                zIndex: stroke.zIndex,
-                data: StrokeData(
-                  points: seg,
-                  toolType: stroke.data.toolType,
-                  color: stroke.data.color,
-                  baseWidth: stroke.data.baseWidth,
-                  isHighlighter: stroke.data.isHighlighter,
-                  opacity: stroke.data.opacity,
-                  timestamp: stroke.data.timestamp,
-                ),
-              ));
-            }
-          },
-          text: (t) {
-            final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
-            if (rect.contains(position)) { changed = true; } else { newContent.add(element); }
-          },
-          image: (img) {
-            // Allow erasing symbols but not imported images/PDFs
-            if (img.data.assetPath.startsWith('symbol_')) {
-              final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
-              if (rect.contains(position)) { changed = true; } else { newContent.add(element); }
-            } else {
-              newContent.add(element);
-            }
-          },
-          shape: (sh) {
-            final rect = Rect.fromPoints(Offset(sh.data.x1, sh.data.y1), Offset(sh.data.x2, sh.data.y2));
-            if (rect.inflate(eraseRadius).contains(position)) { changed = true; } else { newContent.add(element); }
-          },
-        );
+      if (shouldRemoveWhole) {
+        changed = true;
+        continue; // skip this element
       }
+      newContent.add(element);
     }
 
     if (!changed) return;
