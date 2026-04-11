@@ -540,8 +540,12 @@ class _NotebookCard extends StatelessWidget {
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Text(
-                                    '${meta.pageCount} pag.',
+                                    meta.chapters.isNotEmpty
+                                        ? '${meta.pageCount} pag. \u2022 ${meta.chapters.map((c) => c.title).join(', ')}'
+                                        : '${meta.pageCount} pag.',
                                     style: const TextStyle(color: Colors.white, fontSize: 11),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
                                 ),
                                 GestureDetector(
@@ -594,6 +598,15 @@ class _NotebookCard extends StatelessWidget {
                         ),
                       ],
                     ),
+                    if (meta.chapters.isNotEmpty) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        meta.chapters.map((c) => c.title).join(' \u2022 '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 10, color: Colors.grey.shade400, fontStyle: FontStyle.italic),
+                      ),
+                    ],
                   ],
                 ),
               ),

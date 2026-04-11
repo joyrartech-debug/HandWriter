@@ -297,7 +297,7 @@ class CanvasState {
     this.currentTool = CanvasTool.pen,
     this.toolSettings = const ToolSettings(),
     this.activeStroke = const [],
-    this.zoom = 1.0,
+    this.zoom = 2.0,
     this.panOffset = Offset.zero,
     this.undoStack = const [],
     this.redoStack = const [],
@@ -428,8 +428,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   final Ref _ref;
   // Track whether we've pushed undo for the current eraser/drag gesture
   bool _eraserUndoPushed = false;
+  Size? _viewportSize;
 
   CanvasNotifier(this._ref) : super(null);
+
+  void setViewportSize(Size size) {
+    final wasNull = _viewportSize == null;
+    _viewportSize = size;
+    // On first layout, centre the page if zoom != 1.0
+    if (wasNull && state != null && state!.zoom != 1.0) {
+      state = state!.copyWith(panOffset: _centeredPanOffset(state!.zoom));
+    }
+  }
+
+  /// Compute the panOffset that horizontally centres the page at given zoom.
+  Offset _centeredPanOffset(double zoom) {
+    final vp = _viewportSize;
+    if (vp == null) return Offset.zero;
+    return Offset(vp.width * (1 - zoom) / 2, 0);
+  }
 
   void openNotebook({
     required NotebookMetadata metadata,
@@ -685,6 +702,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final page = s.currentPage;
     if (page == null) return;
 
+    // Try shape recognition at commit time if enabled
+    if (s.toolSettings.shapeRecognition && s.activeStroke.length >= 5) {
+      final recognized = _recognizeShape(s.activeStroke);
+      if (recognized != null) {
+        _commitRecognizedShape(s, recognized);
+        return;
+      }
+    }
+
     _addStrokeElement(s);
   }
 
@@ -717,10 +743,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     ShapeData updated;
     switch (shape.shapeType) {
       case 'line':
+      case 'arrow':
+        final snapped = _snapLineEnd(shape.x1, shape.y1, position.dx, position.dy);
         updated = ShapeData(
-          shapeType: 'line',
+          shapeType: shape.shapeType,
           x1: shape.x1, y1: shape.y1,
-          x2: position.dx, y2: position.dy,
+          x2: snapped[0], y2: snapped[1],
           strokeColor: shape.strokeColor,
           strokeWidth: shape.strokeWidth,
         );
@@ -760,11 +788,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void setRecognizedLineEndpoint(Offset position) {
     if (state == null || state!.recognizedShape == null) return;
     final s = state!.recognizedShape!;
+    final snapped = _snapLineEnd(s.x1, s.y1, position.dx, position.dy);
     state = state!.copyWith(
       recognizedShape: ShapeData(
         shapeType: s.shapeType,
         x1: s.x1, y1: s.y1,
-        x2: position.dx, y2: position.dy,
+        x2: snapped[0], y2: snapped[1],
         strokeColor: s.strokeColor,
         strokeWidth: s.strokeWidth,
         fillColor: s.fillColor,
@@ -830,6 +859,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(clearRecognizedShape: true, isAdjustingRecognized: false);
   }
 
+  /// Immediately commit a recognized shape (used at endStroke for instant recognition).
+  void _commitRecognizedShape(CanvasState s, ShapeData shape) {
+    _addShapeElement(shape);
+    state = state!.copyWith(activeStroke: []);
+  }
+
   void _addStrokeElement(CanvasState s) {
     final page = s.currentPage!;
     final fileName = s.currentPageFileName;
@@ -851,7 +886,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Smooth the raw input points to reduce jitter/wigglyness.
     // Skip smoothing for dense stylus input (iPad etc.) — already smooth,
     // and the gaussian stretch distorts precise pen strokes.
-    final smoothedPoints = s.activeStroke;
+    final smoothedPoints = s.activeStroke.length > 80
+        ? s.activeStroke
+        : _smoothStrokePoints(s.activeStroke);
 
     final newElement = ContentElement.stroke(
       id: const Uuid().v4(),
@@ -885,33 +922,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// stroke bounds. Pressure is NOT smoothed (already done in real-time).
   List<StrokePoint> _smoothStrokePoints(List<StrokePoint> raw) {
     if (raw.length < 5) return raw;
-    final smoothed = List<StrokePoint>.from(raw);
-    // Pass 1: 1-2-1 weighted average on positions only
+    // Single pass of 1-2-1 Gaussian smoothing — subtle cleanup without
+    // visibly reshaping the stroke the user drew.
+    final result = List<StrokePoint>.from(raw);
     for (int i = 1; i < raw.length - 1; i++) {
       final p0 = raw[i - 1];
       final p1 = raw[i];
       final p2 = raw[i + 1];
-      smoothed[i] = StrokePoint(
-        x: (p0.x + p1.x * 2 + p2.x) / 4,
-        y: (p0.y + p1.y * 2 + p2.y) / 4,
-        pressure: p1.pressure, // keep original pressure
-        timestamp: p1.timestamp,
-      );
-    }
-    // Pass 2: gaussian (1-2-1) to soften remaining micro-jitter
-    final pass2 = List<StrokePoint>.from(smoothed);
-    for (int i = 1; i < smoothed.length - 1; i++) {
-      final p0 = smoothed[i - 1];
-      final p1 = smoothed[i];
-      final p2 = smoothed[i + 1];
-      pass2[i] = StrokePoint(
+      result[i] = StrokePoint(
         x: (p0.x + p1.x * 2 + p2.x) / 4,
         y: (p0.y + p1.y * 2 + p2.y) / 4,
         pressure: p1.pressure,
         timestamp: p1.timestamp,
       );
     }
-    return pass2;
+    return result;
   }
 
   // ── Shape recognition (improved) ──
@@ -944,16 +969,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // ── LINE & ARROW DETECTION ──
     // If the path length is barely longer than the distance between start and end, it's a straight line.
-    if (pathLen > 20 && (pathLen / startEndDist) < 1.12) {
+    if (pathLen > 20 && (pathLen / startEndDist) < 1.25) {
       // Basic arrow detection (checking if the tail hooks back)
       final tailStart = points[(points.length * 0.8).round()];
       final tailDist = sqrt(pow(points.last.x - tailStart.x, 2) + pow(points.last.y - tailStart.y, 2));
       if (tailDist > 5 && tailDist < maxDim * 0.4) {
         // We can confidently assume it's an arrow if it hooks
+        final arrowEnd = _snapLineEnd(points.first.x, points.first.y, points.last.x, points.last.y);
         return ShapeData(
           shapeType: 'arrow',
           x1: points.first.x, y1: points.first.y,
-          x2: points.last.x, y2: points.last.y, // Snap to the actual end
+          x2: arrowEnd[0], y2: arrowEnd[1],
           strokeColor: color, strokeWidth: visualWidth,
         );
       }
@@ -961,7 +987,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       return ShapeData(
         shapeType: 'line',
         x1: points.first.x, y1: points.first.y,
-        x2: points.last.x, y2: points.last.y,
+        x2: _snapLineEnd(points.first.x, points.first.y, points.last.x, points.last.y)[0],
+        y2: _snapLineEnd(points.first.x, points.first.y, points.last.x, points.last.y)[1],
         strokeColor: color, strokeWidth: visualWidth,
       );
     }
@@ -1160,6 +1187,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   // ── MATHEMATICAL HELPERS ──
+
+  /// Snap line end to nearest common angle if within threshold.
+  /// Snaps to multiples of 15° (0°, 15°, 30°, 45°, 60°, 75°, 90°, …).
+  /// Returns [snappedX2, snappedY2].
+  List<double> _snapLineEnd(double x1, double y1, double x2, double y2) {
+    final dx = x2 - x1;
+    final dy = y2 - y1;
+    final lineLen = sqrt(dx * dx + dy * dy);
+    if (lineLen < 5) return [x2, y2];
+
+    final angle = atan2(dy, dx); // radians
+    // Snap to multiples of 15° (π/12)
+    const snapStep = pi / 12; // 15 degrees
+    const snapThreshold = 0.065; // ~3.7 degrees in radians
+
+    final nearest = (angle / snapStep).round() * snapStep;
+    if ((angle - nearest).abs() < snapThreshold) {
+      return [x1 + lineLen * cos(nearest), y1 + lineLen * sin(nearest)];
+    }
+    return [x2, y2];
+  }
 
   /// Douglas-Peucker algorithm to reduce complex paths into core geometric vertices
   List<Offset> _douglasPeucker(List<Offset> points, double epsilon) {
@@ -1929,8 +1977,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null || index < 0 || index >= state!.pageCount) return;
     state = state!.copyWith(
       currentPageIndex: index,
-      zoom: 1.0,
-      panOffset: Offset.zero,
+      zoom: 2.0,
+      panOffset: _centeredPanOffset(2.0),
       activeStroke: [],
       clearLasso: true,
       lassoPath: [],
@@ -2005,8 +2053,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       document: updatedDoc,
       pages: updatedPages,
       currentPageIndex: insertIndex,
-      zoom: 1.0,
-      panOffset: Offset.zero,
+      zoom: 2.0,
+      panOffset: _centeredPanOffset(2.0),
       isDirty: true,
     );
   }
@@ -2060,8 +2108,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       document: updatedDoc,
       pages: updatedPages,
       currentPageIndex: insertIdx,
-      zoom: 1.0,
-      panOffset: Offset.zero,
+      zoom: 2.0,
+      panOffset: _centeredPanOffset(2.0),
       isDirty: true,
     );
   }
@@ -2074,9 +2122,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void addChapter(String title) {
     if (state == null) return;
     final s = state!;
-    final chapter = Chapter(id: const Uuid().v4(), title: title, pageIds: []);
+    final now = DateTime.now();
+    final chapterId = const Uuid().v4();
+
+    // Assign the current page to the new chapter
+    final currentEntry = s.document.pages[s.currentPageIndex];
+    final chapter = Chapter(id: chapterId, title: title, pageIds: [currentEntry.pageId]);
+
+    // Update the current page's chapterId
+    final pages = List<PageEntry>.from(s.document.pages);
+    pages[s.currentPageIndex] = currentEntry.copyWith(chapterId: chapterId);
+    final updatedDoc = s.document.copyWith(pages: pages);
+
     state = s.copyWith(
-      metadata: s.metadata.copyWith(chapters: [...s.metadata.chapters, chapter], modifiedAt: DateTime.now()),
+      metadata: s.metadata.copyWith(
+        chapters: [...s.metadata.chapters, chapter],
+        modifiedAt: now,
+      ),
+      document: updatedDoc,
+      activeChapterId: chapterId,
       isDirty: true,
     );
   }
@@ -2085,6 +2149,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null) return;
     final s = state!;
     final chapters = s.metadata.chapters.map((c) => c.id == chapterId ? c.copyWith(title: title) : c).toList();
+    state = s.copyWith(
+      metadata: s.metadata.copyWith(chapters: chapters, modifiedAt: DateTime.now()),
+      isDirty: true,
+    );
+  }
+
+  void reorderChapters(int oldIndex, int newIndex) {
+    if (state == null) return;
+    final s = state!;
+    final chapters = List<Chapter>.from(s.metadata.chapters);
+    if (oldIndex < 0 || oldIndex >= chapters.length) return;
+    if (newIndex < 0 || newIndex >= chapters.length) return;
+    final item = chapters.removeAt(oldIndex);
+    chapters.insert(newIndex, item);
     state = s.copyWith(
       metadata: s.metadata.copyWith(chapters: chapters, modifiedAt: DateTime.now()),
       isDirty: true,
@@ -3497,14 +3575,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final fileName = entry.fileName;
 
     final newPages = List<PageEntry>.from(s.document.pages)..removeAt(index);
-    // Renumber pages
+    // Renumber pages (preserve all fields including chapterId)
     for (int i = 0; i < newPages.length; i++) {
-      newPages[i] = PageEntry(
-        pageId: newPages[i].pageId,
-        pageNumber: i + 1,
-        fileName: newPages[i].fileName,
-        lastModified: newPages[i].lastModified,
-      );
+      newPages[i] = newPages[i].copyWith(pageNumber: i + 1);
     }
 
     final updatedDoc = DocumentStructure(
@@ -3556,7 +3629,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       createdAt: now, modifiedAt: now,
     );
 
-    final newEntry = PageEntry(pageId: pageId, pageNumber: pageNum, fileName: fileName, lastModified: now);
+    final newEntry = PageEntry(pageId: pageId, pageNumber: pageNum, fileName: fileName, lastModified: now, chapterId: entry.chapterId);
 
     final updatedDoc = DocumentStructure(
       notebookId: s.document.notebookId,
@@ -3665,7 +3738,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void resetZoom() {
     if (state == null) return;
-    state = state!.copyWith(zoom: 1.0, panOffset: Offset.zero);
+    state = state!.copyWith(zoom: 2.0, panOffset: _centeredPanOffset(2.0));
   }
 
   Future<void> save() async {

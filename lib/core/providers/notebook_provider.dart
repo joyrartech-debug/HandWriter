@@ -109,6 +109,7 @@ class NotebookListNotifier
     final notebookId = uuid.v4();
     final now = DateTime.now();
     final pageId = uuid.v4();
+    final chapterId = uuid.v4();
 
     final metadata = NotebookMetadata(
       id: notebookId,
@@ -118,6 +119,9 @@ class NotebookListNotifier
       paperType: paperType,
       coverColor: coverColor,
       pageCount: 1,
+      chapters: [
+        Chapter(id: chapterId, title: 'Capitolo 1', pageIds: [pageId]),
+      ],
     );
 
     final document = DocumentStructure(
@@ -128,6 +132,7 @@ class NotebookListNotifier
           pageNumber: 1,
           fileName: 'page_001.json',
           lastModified: now,
+          chapterId: chapterId,
         ),
       ],
     );

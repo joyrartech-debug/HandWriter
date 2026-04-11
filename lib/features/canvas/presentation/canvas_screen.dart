@@ -48,16 +48,26 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   Offset _lastHoldCheckPos = Offset.zero;
 
   // Drag-left to create new page / drag-right to go to previous page
-  Timer? _newPageHoldTimer;
   bool _showNewPageHint = false;
-  Timer? _prevPageHoldTimer;
   bool _showPrevPageHint = false;
-  Timer? _nextPageHoldTimer;
   bool _showNextPageHint = false;
 
   // Stylus barrel button temporary eraser
   bool _barrelButtonErasing = false;
   CanvasTool? _barrelButtonPreviousTool;
+
+  // Long-press context menu for touch
+  Timer? _longPressTimer;
+  Offset _longPressGlobalPos = Offset.zero;
+  Offset _longPressLocalPos = Offset.zero;
+  bool _longPressFired = false;
+
+  // Double-tap detection for element selection
+  DateTime _lastTapTime = DateTime(0);
+  Offset _lastTapPos = Offset.zero;
+
+  // Cached canvas size for pointer-up page-drag commit
+  Size _lastCanvasSize = Size.zero;
 
   // ── High-performance active stroke notifier ──
   final _activeStrokeNotifier = _ActiveStrokeNotifier();
@@ -87,9 +97,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     _lassoPathNotifier.dispose();
     _autoSaveTimer?.cancel();
     _holdRecognizeTimer?.cancel();
-    _newPageHoldTimer?.cancel();
-    _prevPageHoldTimer?.cancel();
-    _nextPageHoldTimer?.cancel();
+    _longPressTimer?.cancel();
     _focusNode.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -280,73 +288,83 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     final hasPrev = pos > 0;
     final isLastPage = pos >= 0 && pos == filtered.length - 1;
 
-    // ─ Swipe LEFT: next page or new page ─
-    if (pageRightScreen < canvasSize.width * 0.3) {
-      _cancelPrevPageTimer();
-      if (isLastPage) {
-        // Create new page
-        if (_newPageHoldTimer == null) {
-          setState(() { _showNewPageHint = true; _showNextPageHint = false; });
-          _newPageHoldTimer = Timer(const Duration(milliseconds: 800), () {
-            _newPageHoldTimer = null;
-            setState(() => _showNewPageHint = false);
-            ref.read(canvasProvider.notifier).addPage();
-          });
-        }
-      } else if (hasNext) {
-        // Go to next page
-        _cancelNewPageTimer();
-        if (_nextPageHoldTimer == null) {
-          setState(() { _showNextPageHint = true; _showNewPageHint = false; });
-          _nextPageHoldTimer = Timer(const Duration(milliseconds: 500), () {
-            _nextPageHoldTimer = null;
-            setState(() => _showNextPageHint = false);
-            ref.read(canvasProvider.notifier).nextPage();
-          });
-        }
-      }
-    }
-    // ─ Swipe RIGHT: previous page ─
-    else if (pageLeftScreen > canvasSize.width * 0.7 && hasPrev) {
-      _cancelNewPageTimer();
-      _cancelNextPageTimer();
-      if (_prevPageHoldTimer == null) {
-        setState(() => _showPrevPageHint = true);
-        _prevPageHoldTimer = Timer(const Duration(milliseconds: 500), () {
-          _prevPageHoldTimer = null;
-          setState(() => _showPrevPageHint = false);
-          ref.read(canvasProvider.notifier).prevPage();
-        });
-      }
-    } else {
-      _cancelNewPageTimer();
-      _cancelPrevPageTimer();
-      _cancelNextPageTimer();
-    }
-  }
-
-  void _cancelNewPageTimer() {
-    if (_newPageHoldTimer != null || _showNewPageHint) {
-      _newPageHoldTimer?.cancel();
-      _newPageHoldTimer = null;
-      if (_showNewPageHint) setState(() => _showNewPageHint = false);
-    }
-  }
-
-  void _cancelPrevPageTimer() {
-    if (_prevPageHoldTimer != null || _showPrevPageHint) {
-      _prevPageHoldTimer?.cancel();
-      _prevPageHoldTimer = null;
+    // ─ Swipe LEFT: show next page or new page preview ─
+    if (pageRightScreen < canvasSize.width * 0.68) {
       if (_showPrevPageHint) setState(() => _showPrevPageHint = false);
+      if (isLastPage) {
+        if (!_showNewPageHint) setState(() { _showNewPageHint = true; _showNextPageHint = false; });
+      } else if (hasNext) {
+        if (!_showNextPageHint) setState(() { _showNextPageHint = true; _showNewPageHint = false; });
+      }
+    }
+    // ─ Swipe RIGHT: show previous page preview ─
+    else if (pageLeftScreen > canvasSize.width * 0.32 && hasPrev) {
+      if (!_showPrevPageHint) setState(() { _showPrevPageHint = true; _showNewPageHint = false; _showNextPageHint = false; });
+    } else {
+      _clearPageHints();
     }
   }
 
-  void _cancelNextPageTimer() {
-    if (_nextPageHoldTimer != null || _showNextPageHint) {
-      _nextPageHoldTimer?.cancel();
-      _nextPageHoldTimer = null;
-      if (_showNextPageHint) setState(() => _showNextPageHint = false);
+  /// Commit page navigation on pointer-up if page edge is past the commit
+  /// threshold (50% of screen), otherwise just dismiss the preview.
+  void _commitOrCancelPageDrag(CanvasState state, Size canvasSize) {
+    final pageW = state.currentPage?.width ?? 595;
+    final pageH = state.currentPage?.height ?? 842;
+    final renderScale = min(canvasSize.width / pageW, canvasSize.height / pageH);
+    final scaledW = pageW * renderScale;
+    final centerOffsetX = (canvasSize.width - scaledW) / 2;
+
+    final pageRightScreen = (scaledW * state.zoom) + state.panOffset.dx + (centerOffsetX * state.zoom);
+    final pageLeftScreen = state.panOffset.dx + (centerOffsetX * state.zoom);
+
+    final filtered = state.filteredPageIndices;
+    final pos = filtered.indexOf(state.currentPageIndex);
+    final hasNext = pos >= 0 && pos + 1 < filtered.length;
+    final hasPrev = pos > 0;
+    final isLastPage = pos >= 0 && pos == filtered.length - 1;
+
+    // Commit threshold: page edge must be past 50% of screen
+    if (pageRightScreen < canvasSize.width * 0.50) {
+      if (isLastPage) {
+        ref.read(canvasProvider.notifier).addPage();
+      } else if (hasNext) {
+        ref.read(canvasProvider.notifier).nextPage();
+      }
+    } else if (pageLeftScreen > canvasSize.width * 0.50 && hasPrev) {
+      ref.read(canvasProvider.notifier).prevPage();
     }
+
+    _clearPageHints();
+  }
+
+  void _clearPageHints() {
+    if (_showNewPageHint || _showPrevPageHint || _showNextPageHint) {
+      setState(() {
+        _showNewPageHint = false;
+        _showPrevPageHint = false;
+        _showNextPageHint = false;
+      });
+    }
+  }
+
+  void _startLongPressTimer(Offset globalPos, Offset localPos, CanvasState state, Size canvasSize) {
+    _cancelLongPressTimer();
+    _longPressGlobalPos = globalPos;
+    _longPressLocalPos = localPos;
+    _longPressFired = false;
+    _longPressTimer = Timer(const Duration(milliseconds: 500), () {
+      _longPressTimer = null;
+      _longPressFired = true;
+      final latestState = ref.read(canvasProvider);
+      if (latestState != null) {
+        _showContextMenu(globalPos, localPos, latestState, canvasSize);
+      }
+    });
+  }
+
+  void _cancelLongPressTimer() {
+    _longPressTimer?.cancel();
+    _longPressTimer = null;
   }
 
   // ── Coordinate conversion ──
@@ -374,6 +392,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     final centerOffsetY = (canvasSize.height - scaledH) / 2;
     final scaled = Offset(pagePos.dx * renderScale, pagePos.dy * renderScale);
     return scaled * state.zoom + state.panOffset + Offset(centerOffsetX * state.zoom, centerOffsetY * state.zoom);
+  }
+
+  /// Returns true if this tap is a double-tap (close in position and time to the last tap).
+  bool _isDoubleTap(Offset position) {
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastTapTime).inMilliseconds;
+    final dist = (position - _lastTapPos).distance;
+    _lastTapTime = now;
+    _lastTapPos = position;
+    return elapsed < 400 && dist < 30;
   }
 
   double _getRenderScale(CanvasState state, Size canvasSize) {
@@ -468,27 +496,33 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         if (extendedBounds != null && extendedBounds.contains(pagePos)) {
           // Fall through to selected element handling below
         } else {
-          // Also check if tapping a different image to select it
-          final tappedImage = _findImageOrShapeAt(state, pagePos);
-          if (tappedImage != null) {
-            ref.read(canvasProvider.notifier).selectElement(tappedImage);
-            return;
+          // Double-tap on an image to select it (single tap just pans)
+          if (_isDoubleTap(event.localPosition)) {
+            final tappedImage = _findImageOrShapeAt(state, pagePos);
+            if (tappedImage != null) {
+              ref.read(canvasProvider.notifier).selectElement(tappedImage);
+              return;
+            }
           }
           // Tapped away from selection and no other image → deselect
           ref.read(canvasProvider.notifier).deselectElement();
           _isTouchPanning = true;
           _lastFocalPoint = event.position;
+          _startLongPressTimer(event.position, event.localPosition, state, canvasSize);
           return;
         }
       } else {
-        // No selection — check if tapping on an image to select it
-        final tappedImage = _findImageOrShapeAt(state, pagePos);
-        if (tappedImage != null) {
-          ref.read(canvasProvider.notifier).selectElement(tappedImage);
-          return;
+        // No selection — double-tap an image to select it
+        if (_isDoubleTap(event.localPosition)) {
+          final tappedImage = _findImageOrShapeAt(state, pagePos);
+          if (tappedImage != null) {
+            ref.read(canvasProvider.notifier).selectElement(tappedImage);
+            return;
+          }
         }
         _isTouchPanning = true;
         _lastFocalPoint = event.position;
+        _startLongPressTimer(event.position, event.localPosition, state, canvasSize);
         return;
       }
     }
@@ -593,7 +627,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    // Check if tapping on an image → select it.
+    // Check if double-tapping on an image/shape → select it.
     // For non-draw tools (lasso/pan/text): check images and shapes.
     // For draw tools: only select images (not shapes) if input is a plain mouse
     // (no pressure), so stylus and tablet pens always draw through images.
@@ -608,7 +642,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       } else {
         shouldCheckImageTap = false;
       }
-      if (shouldCheckImageTap) {
+      if (shouldCheckImageTap && _isDoubleTap(event.localPosition)) {
         final onlyImages = _isDrawLikeTool(tool);
         final tappedImageOrShape = _findImageOrShapeAt(state, pagePos, imagesOnly: onlyImages);
         if (tappedImageOrShape != null) {
@@ -628,6 +662,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     if (_activePointers >= 2) return;
 
     if (_isTouchPanning) {
+      // Cancel long-press if finger moved significantly
+      if (_longPressTimer != null) {
+        final moved = (event.position - _longPressGlobalPos).distance;
+        if (moved > 10) _cancelLongPressTimer();
+      }
+      if (_longPressFired) return; // Don't pan after context menu shown
       final delta = event.position - _lastFocalPoint;
       _lastFocalPoint = event.position;
       final latest = ref.read(canvasProvider);
@@ -764,7 +804,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
     if (_isTouchPanning) {
       _isTouchPanning = false;
-      _cancelNewPageTimer();
+      _cancelLongPressTimer();
+      _longPressFired = false;
+      final latest = ref.read(canvasProvider);
+      if (latest != null) {
+        _commitOrCancelPageDrag(latest, _lastCanvasSize);
+      } else {
+        _clearPageHints();
+      }
       return;
     }
 
@@ -795,7 +842,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     }
 
     if (state.currentTool == CanvasTool.pan) {
-      _cancelNewPageTimer();
+      _commitOrCancelPageDrag(state, _lastCanvasSize);
       return;
     }
     if (state.currentTool == CanvasTool.image) return;
@@ -943,24 +990,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
-    if (details.pointerCount < 2) return;
+    // Accept scale gesture if either: 2+ pointers (multi-touch), or scale != 1 (trackpad pinch)
+    if (details.pointerCount < 2 && (details.scale - 1).abs() < 0.001) return;
+    
     final notifier = ref.read(canvasProvider.notifier);
     final state = ref.read(canvasProvider);
     if (state == null) return;
 
+    // Use _baseZoom (from _onScaleStart) as the oldZoom baseline for consistency
+    final oldZoom = _baseZoom;
     final newZoom = (_baseZoom * details.scale).clamp(0.3, 5.0);
 
-    // Zoom toward pointer: adjust pan so the point under the pointer stays fixed
-    final focalPoint = details.focalPoint;
-    final localFocalPoint = details.localFocalPoint;
-    final oldZoom = state.zoom;
-    final renderBox = context.findRenderObject() as RenderBox?;
-    Offset pointerInCanvas = localFocalPoint;
-    if (renderBox != null) {
-      // Convert to global if needed
-      pointerInCanvas = renderBox.globalToLocal(focalPoint);
-    }
-    final newPan = pointerInCanvas - (pointerInCanvas - state.panOffset) * (newZoom / oldZoom);
+    // Correct zoom centering: keep the content under the focal point fixed
+    final focalPoint = details.localFocalPoint;
+    final newPan = state.panOffset + (focalPoint - state.panOffset) * (1 - (newZoom / oldZoom));
 
     notifier.setZoomAndPan(newZoom, newPan);
     _lastFocalPoint = details.focalPoint;
@@ -1106,9 +1149,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         final st = ref.read(canvasProvider);
         final pageW = st?.currentPage?.width ?? 595.0;
         final pageH = st?.currentPage?.height ?? 842.0;
-        // Place first page at tap position, subsequent pages centred
-        final insertPos = i == 0 ? pagePos : Offset(pageW / 2, pageH / 2);
-        notifier.addImageElement(insertPos, '${name}_p${i + 1}.png', png, pageW, pageH);
+        // Fit the rasterized PDF page to the A4 page, preserving aspect ratio
+        final raster = rasters[i];
+        double imgW = raster.width.toDouble();
+        double imgH = raster.height.toDouble();
+        final scaleToFit = min(pageW / imgW, pageH / imgH);
+        imgW *= scaleToFit;
+        imgH *= scaleToFit;
+        // Center on the page
+        final insertPos = Offset((pageW - imgW) / 2, (pageH - imgH) / 2);
+        notifier.addImageElement(insertPos, '${name}_p${i + 1}.png', png, imgW, imgH);
       }
 
       if (mounted) {
@@ -1300,6 +1350,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final canvasSize = Size(constraints.maxWidth, constraints.maxHeight);
+        _lastCanvasSize = canvasSize;
+        ref.read(canvasProvider.notifier).setViewportSize(canvasSize);
 
         MouseCursor cursor = SystemMouseCursors.precise;
         if (canvasState.currentTool == CanvasTool.pan) cursor = SystemMouseCursors.grab;
@@ -1334,14 +1386,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                       final zoomDelta = event.scrollDelta.dy > 0 ? 0.9 : 1.1;
                       final newZoom = (oldZoom * zoomDelta).clamp(0.3, 5.0);
                       final cursorPos = event.localPosition;
-                      final newPan = cursorPos - (cursorPos - canvasState.panOffset) * (newZoom / oldZoom);
+                      final newPan = canvasState.panOffset + (cursorPos - canvasState.panOffset) * (1 - (newZoom / oldZoom));
                       ref.read(canvasProvider.notifier).setZoomAndPan(newZoom, newPan);
                     } else if (event is PointerScaleEvent) {
-                      // Trackpad pinch-to-zoom
+                      // Trackpad pinch-to-zoom (may not fire on all platforms)
                       final oldZoom = canvasState.zoom;
                       final newZoom = (oldZoom * event.scale).clamp(0.3, 5.0);
                       final cursorPos = event.localPosition;
-                      final newPan = cursorPos - (cursorPos - canvasState.panOffset) * (newZoom / oldZoom);
+                      final newPan = canvasState.panOffset + (cursorPos - canvasState.panOffset) * (1 - (newZoom / oldZoom));
                       ref.read(canvasProvider.notifier).setZoomAndPan(newZoom, newPan);
                     }
                   },
@@ -1520,22 +1572,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
               // New page drag-left hint
               if (_showNewPageHint)
                 Positioned(
-                  right: 16,
+                  right: 0,
                   top: 0, bottom: 0,
-                  child: Center(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                      decoration: BoxDecoration(
-                        color: Colors.green.shade700.withValues(alpha: 0.9),
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                  width: 120,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        begin: Alignment.centerRight,
+                        end: Alignment.centerLeft,
+                        colors: [Colors.green.shade700.withValues(alpha: 0.85), Colors.green.shade700.withValues(alpha: 0.0)],
                       ),
-                      child: const Column(
+                    ),
+                    child: const Center(
+                      child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.add_circle_outline, color: Colors.white, size: 32),
+                          Icon(Icons.add_circle_outline, color: Colors.white, size: 36),
                           SizedBox(height: 4),
-                          Text('Nuova pagina', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
+                          Text('Nuova pagina', style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w600)),
                         ],
                       ),
                     ),
@@ -1544,53 +1598,75 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
               // Next page drag-left hint (when not last page)
               if (_showNextPageHint)
-                Positioned(
-                  right: 16,
-                  top: 0, bottom: 0,
-                  child: Center(
+                Builder(builder: (ctx) {
+                  final filtered = canvasState.filteredPageIndices;
+                  final curIdx = filtered.indexOf(canvasState.currentPageIndex);
+                  PageData? nextPage;
+                  if (curIdx >= 0 && curIdx + 1 < filtered.length) {
+                    final nextDocIdx = filtered[curIdx + 1];
+                    final nextEntry = canvasState.document.pages[nextDocIdx];
+                    nextPage = canvasState.pages[nextEntry.fileName];
+                  }
+                  return Positioned(
+                    right: 0,
+                    top: 0, bottom: 0,
+                    width: MediaQuery.of(context).size.width * 0.35,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       decoration: BoxDecoration(
-                        color: Colors.blue.shade700.withValues(alpha: 0.9),
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                        color: Colors.grey.shade200,
+                        border: Border(left: BorderSide(color: Colors.grey.shade400, width: 1)),
+                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 12, offset: const Offset(-4, 0))],
                       ),
-                      child: const Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.arrow_forward_rounded, color: Colors.white, size: 32),
-                          SizedBox(height: 4),
-                          Text('Pagina seguente', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
-                        ],
-                      ),
+                      child: nextPage != null
+                          ? CustomPaint(
+                              painter: CanvasRenderEngine(
+                                pageData: nextPage,
+                                zoom: 1.0,
+                                panOffset: Offset.zero,
+                                imageCache: canvasState.imageCache,
+                              ),
+                              size: Size.infinite,
+                            )
+                          : Center(child: Icon(Icons.arrow_forward_rounded, color: Colors.grey.shade400, size: 40)),
                     ),
-                  ),
-                ),
+                  );
+                }),
 
               // Previous page drag-right hint
               if (_showPrevPageHint)
-                Positioned(
-                  left: 16,
-                  top: 0, bottom: 0,
-                  child: Center(
+                Builder(builder: (ctx) {
+                  final filtered = canvasState.filteredPageIndices;
+                  final curIdx = filtered.indexOf(canvasState.currentPageIndex);
+                  PageData? prevPage;
+                  if (curIdx > 0) {
+                    final prevDocIdx = filtered[curIdx - 1];
+                    final prevEntry = canvasState.document.pages[prevDocIdx];
+                    prevPage = canvasState.pages[prevEntry.fileName];
+                  }
+                  return Positioned(
+                    left: 0,
+                    top: 0, bottom: 0,
+                    width: MediaQuery.of(context).size.width * 0.35,
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                       decoration: BoxDecoration(
-                        color: Colors.blue.shade700.withValues(alpha: 0.9),
-                        borderRadius: BorderRadius.circular(16),
-                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                        color: Colors.grey.shade200,
+                        border: Border(right: BorderSide(color: Colors.grey.shade400, width: 1)),
+                        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 12, offset: const Offset(4, 0))],
                       ),
-                      child: const Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.arrow_back_rounded, color: Colors.white, size: 32),
-                          SizedBox(height: 4),
-                          Text('Pagina precedente', style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w600)),
-                        ],
-                      ),
+                      child: prevPage != null
+                          ? CustomPaint(
+                              painter: CanvasRenderEngine(
+                                pageData: prevPage,
+                                zoom: 1.0,
+                                panOffset: Offset.zero,
+                                imageCache: canvasState.imageCache,
+                              ),
+                              size: Size.infinite,
+                            )
+                          : Center(child: Icon(Icons.arrow_back_rounded, color: Colors.grey.shade400, size: 40)),
                     ),
-                  ),
-                ),
+                  );
+                }),
             ],
           ),
         );
@@ -2368,26 +2444,50 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
               scrollDirection: Axis.horizontal,
               padding: const EdgeInsets.symmetric(horizontal: 8),
               children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-                  child: ChoiceChip(
-                    label: const Text('Tutto', style: TextStyle(fontSize: 12)),
-                    selected: canvasState.activeChapterId == null,
-                    onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(null),
+                ...canvasState.metadata.chapters.asMap().entries.map((entry) {
+                  final chapIdx = entry.key;
+                  final chapter = entry.value;
+                  final isActive = canvasState.activeChapterId == chapter.id;
+                  final chip = ChoiceChip(
+                    label: Text(chapter.title, style: const TextStyle(fontSize: 12)),
+                    selected: isActive,
+                    onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(
+                      isActive ? null : chapter.id,
+                    ),
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                  ),
-                ),
-                ...canvasState.metadata.chapters.map((chapter) {
-                  final isActive = canvasState.activeChapterId == chapter.id;
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-                    child: ChoiceChip(
-                      label: Text(chapter.title, style: const TextStyle(fontSize: 12)),
-                      selected: isActive,
-                      onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(chapter.id),
-                      visualDensity: VisualDensity.compact,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  );
+                  return DragTarget<int>(
+                    onWillAcceptWithDetails: (d) => d.data != chapIdx,
+                    onAcceptWithDetails: (d) => ref.read(canvasProvider.notifier).reorderChapters(d.data, chapIdx),
+                    builder: (ctx, accepted, _) => LongPressDraggable<int>(
+                      data: chapIdx,
+                      axis: Axis.horizontal,
+                      delay: const Duration(milliseconds: 200),
+                      feedback: Material(
+                        elevation: 4,
+                        borderRadius: BorderRadius.circular(16),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          child: Text(chapter.title, style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500, decoration: TextDecoration.none, color: Colors.blue)),
+                        ),
+                      ),
+                      childWhenDragging: Opacity(
+                        opacity: 0.3,
+                        child: Padding(padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4), child: chip),
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                        child: accepted.isNotEmpty
+                            ? Container(
+                                decoration: BoxDecoration(
+                                  border: Border.all(color: Colors.blue, width: 2),
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                child: chip,
+                              )
+                            : chip,
+                      ),
                     ),
                   );
                 }),
@@ -2438,21 +2538,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                 splashRadius: 18,
               ),
               const Spacer(),
-              // Zoom indicator — tap to reset to 100%
+              // Zoom indicator — tap to reset to 200%
               GestureDetector(
                 onTap: () {
-                  ref.read(canvasProvider.notifier).setZoomAndPan(1.0, Offset.zero);
+                  ref.read(canvasProvider.notifier).resetZoom();
                 },
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   decoration: BoxDecoration(
-                    color: canvasState.zoom != 1.0 ? Colors.blue.shade50 : Colors.grey.shade100,
+                    color: canvasState.zoom != 2.0 ? Colors.blue.shade50 : Colors.grey.shade100,
                     borderRadius: BorderRadius.circular(8),
                   ),
                   child: Text(
                     '${(canvasState.zoom * 100).round()}%',
                     style: TextStyle(
-                      color: canvasState.zoom != 1.0 ? Colors.blue.shade700 : Colors.grey.shade600,
+                      color: canvasState.zoom != 2.0 ? Colors.blue.shade700 : Colors.grey.shade600,
                       fontSize: 11,
                       fontWeight: FontWeight.w500,
                     ),
@@ -2481,8 +2581,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     );
   }
 
-  Future<String?> _promptForText(BuildContext context, String title, String hintText) async {
-    final controller = TextEditingController();
+  Future<String?> _promptForText(BuildContext context, String title, String hintText, {String? initial}) async {
+    final controller = TextEditingController(text: initial);
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -2563,16 +2663,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           builder: (context, ref, _) {
             final liveState = ref.watch(canvasProvider) ?? canvasState;
             return DraggableScrollableSheet(
-              initialChildSize: 0.4,
-              maxChildSize: 0.7,
-              minChildSize: 0.25,
+              initialChildSize: 0.6,
+              maxChildSize: 0.9,
+              minChildSize: 0.3,
               expand: false,
               builder: (ctx, scrollController) {
                 final visibleIndices = liveState.filteredPageIndices;
                 return Column(
                   children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    // Drag handle
+                    Center(
+                      child: Container(
+                        width: 40, height: 4,
+                        margin: const EdgeInsets.only(top: 8, bottom: 4),
+                        decoration: BoxDecoration(color: Colors.grey.shade300, borderRadius: BorderRadius.circular(2)),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
@@ -2584,7 +2692,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                                 icon: const Icon(Icons.add_rounded, color: Colors.blue),
                                 onPressed: () {
                                   ref.read(canvasProvider.notifier).addPage();
-                                  Navigator.pop(ctx);
                                 },
                                 tooltip: 'Aggiungi pagina',
                               ),
@@ -2594,153 +2701,130 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                               ),
                             ],
                           ),
-                          const SizedBox(height: 8),
-                          Row(
-                            children: [
-                              const Text('Capitoli', style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                              const SizedBox(width: 12),
-                              TextButton.icon(
-                                onPressed: () async {
-                                  final title = await _promptForText(ctx, 'Nuovo capitolo', 'Nome capitolo');
-                                  if (title != null && title.trim().isNotEmpty) {
-                                    ref.read(canvasProvider.notifier).addChapter(title.trim());
-                                  }
-                                },
-                                icon: const Icon(Icons.add_rounded, size: 18),
-                                label: const Text('Aggiungi'),
-                              ),
-                            ],
-                          ),
+                          const SizedBox(height: 4),
+                          // Chapter filter chips — drag to reorder
                           if (liveState.metadata.chapters.isNotEmpty)
-                            Wrap(
-                              spacing: 8,
-                              runSpacing: 6,
-                              children: liveState.metadata.chapters.map((chapter) {
-                                final isActive = liveState.activeChapterId == chapter.id;
-                                return InputChip(
-                                  label: Text(chapter.title),
-                                  selected: isActive,
-                                  deleteIcon: Icon(Icons.close, size: 18, color: Colors.grey.shade700),
-                                  onDeleted: () {
-                                    ref.read(canvasProvider.notifier).deleteChapter(chapter.id);
-                                  },
-                                  onPressed: () {
-                                    ref.read(canvasProvider.notifier).setActiveChapter(
-                                      isActive ? null : chapter.id,
+                            SizedBox(
+                              height: 38,
+                              child: ListView(
+                                scrollDirection: Axis.horizontal,
+                                children: [
+                                  ...liveState.metadata.chapters.asMap().entries.map((entry) {
+                                    final chapIdx = entry.key;
+                                    final chapter = entry.value;
+                                    final isActive = liveState.activeChapterId == chapter.id;
+                                    final chip = ChoiceChip(
+                                      label: Text(chapter.title),
+                                      selected: isActive,
+                                      onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(
+                                        isActive ? null : chapter.id,
+                                      ),
+                                      visualDensity: VisualDensity.compact,
                                     );
-                                  },
-                                );
-                              }).toList(),
-                            )
-                          else
-                            const Text('Nessun capitolo. Aggiungi un capitolo per organizzare le pagine.', style: TextStyle(fontSize: 12, color: Colors.grey)),
+                                    return DragTarget<int>(
+                                      onWillAcceptWithDetails: (details) => details.data != chapIdx,
+                                      onAcceptWithDetails: (details) {
+                                        ref.read(canvasProvider.notifier).reorderChapters(details.data, chapIdx);
+                                      },
+                                      builder: (ctx, accepted, rejected) {
+                                        return LongPressDraggable<int>(
+                                          data: chapIdx,
+                                          axis: Axis.horizontal,
+                                          delay: const Duration(milliseconds: 200),
+                                          feedback: Material(
+                                            elevation: 4,
+                                            borderRadius: BorderRadius.circular(20),
+                                            child: Padding(
+                                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                              child: Text(chapter.title, style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, decoration: TextDecoration.none, color: Colors.blue)),
+                                            ),
+                                          ),
+                                          childWhenDragging: Opacity(
+                                            opacity: 0.3,
+                                            child: Padding(padding: const EdgeInsets.only(right: 6), child: chip),
+                                          ),
+                                          onDragCompleted: () {},
+                                          child: Padding(
+                                            padding: const EdgeInsets.only(right: 6),
+                                            child: GestureDetector(
+                                              onSecondaryTap: () => _showChapterEditMenu(ctx, ref, chapter),
+                                              child: accepted.isNotEmpty
+                                                  ? Container(
+                                                      decoration: BoxDecoration(
+                                                        border: Border.all(color: Colors.blue, width: 2),
+                                                        borderRadius: BorderRadius.circular(20),
+                                                      ),
+                                                      child: chip,
+                                                    )
+                                                  : chip,
+                                            ),
+                                          ),
+                                        );
+                                      },
+                                    );
+                                  }),
+                                  Padding(
+                                    padding: const EdgeInsets.only(right: 6),
+                                    child: ActionChip(
+                                      label: const Icon(Icons.add, size: 16),
+                                      onPressed: () async {
+                                        final title = await _promptForText(ctx, 'Nuovo capitolo', 'Nome capitolo');
+                                        if (title != null && title.trim().isNotEmpty) {
+                                          ref.read(canvasProvider.notifier).addChapter(title.trim());
+                                        }
+                                      },
+                                      visualDensity: VisualDensity.compact,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
                         ],
                       ),
                     ),
                     const Divider(height: 1),
+                    // Page grid with thumbnails — drag to reorder
                     Expanded(
-                      child: ListView.builder(
-                        controller: scrollController,
-                        // Each real page + an insert button between = 2*N + 1 items
-                        // (insert before first, page 0, insert, page 1, ..., page N-1, insert after last)
-                        itemCount: visibleIndices.length * 2 + 1,
-                        itemBuilder: (ctx, listIdx) {
-                          // Even indices = insert dividers, odd = page items
-                          if (listIdx.isEven) {
-                            final insertBefore = listIdx ~/ 2;
-                            // Actual document index where the new page will be inserted
-                            final docInsertIdx = insertBefore < visibleIndices.length
-                                ? visibleIndices[insertBefore]
-                                : (visibleIndices.isNotEmpty ? visibleIndices.last + 1 : 0);
-                            return _buildInsertDivider(ctx, ref, docInsertIdx);
-                          }
-
-                          final visIdx = listIdx ~/ 2;
-                          final index = visibleIndices[visIdx];
-                          final isCurrentPage = index == liveState.currentPageIndex;
-                          final entry = liveState.document.pages[index];
-                          final page = liveState.pages[entry.fileName];
-                          final elementCount = page?.layers.content.length ?? 0;
-
-                          final chapterName = () {
-                            for (final c in liveState.metadata.chapters) {
-                              if (c.id == entry.chapterId) return c.title;
-                            }
-                            return null;
-                          }();
-
-                          return ListTile(
-                            key: ValueKey(entry.pageId),
-                            selected: isCurrentPage,
-                            selectedTileColor: const Color(0xFFE3F2FD),
-                            leading: Container(
-                              width: 36,
-                              height: 48,
-                              decoration: BoxDecoration(
-                                color: Colors.white,
-                                border: Border.all(
-                                  color: isCurrentPage ? Colors.blue : Colors.grey.shade300,
-                                  width: isCurrentPage ? 2 : 1,
-                                ),
-                                borderRadius: BorderRadius.circular(4),
-                              ),
-                              child: Center(
-                                child: Text(
-                                  '${visIdx + 1}',
-                                  style: TextStyle(
-                                    fontSize: 14,
-                                    fontWeight: isCurrentPage ? FontWeight.bold : FontWeight.normal,
-                                    color: isCurrentPage ? Colors.blue : Colors.grey.shade600,
-                                  ),
-                                ),
-                              ),
-                            ),
-                            title: Text('Pagina ${visIdx + 1}'),
-                            subtitle: Text(
-                              chapterName != null && liveState.activeChapterId == null
-                                  ? '$elementCount elementi • $chapterName'
-                                  : '$elementCount elementi',
-                              style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
-                            ),
-                            trailing: PopupMenuButton<String>(
-                              icon: const Icon(Icons.more_vert_rounded, size: 20),
-                              onSelected: (action) {
-                                switch (action) {
-                                  case 'goto':
-                                    ref.read(canvasProvider.notifier).goToPage(index);
-                                    Navigator.pop(ctx);
-                                    break;
-                                  case 'duplicate':
-                                    ref.read(canvasProvider.notifier).duplicatePage(index);
-                                    break;
-                                  case 'move_chapter':
-                                    _showChapterPicker(ctx, liveState, index);
-                                    break;
-                                  case 'clear_chapter':
-                                    ref.read(canvasProvider.notifier).assignPageToChapter(index, null);
-                                    break;
-                                  case 'delete':
-                                    if (liveState.pageCount > 1) {
-                                      ref.read(canvasProvider.notifier).deletePage(index);
-                                    }
-                                    break;
-                                }
-                              },
-                              itemBuilder: (_) => [
-                                const PopupMenuItem(value: 'goto', child: Text('Vai a pagina')),
-                                const PopupMenuItem(value: 'duplicate', child: Text('Duplica')),
-                                const PopupMenuItem(value: 'move_chapter', child: Text('Sposta in capitolo')),
-                                if (chapterName != null)
-                                  const PopupMenuItem(value: 'clear_chapter', child: Text('Rimuovi da capitolo')),
-                                if (liveState.pageCount > 1)
-                                  const PopupMenuItem(value: 'delete', child: Text('Elimina', style: TextStyle(color: Colors.red))),
-                              ],
-                            ),
-                            onTap: () {
-                              ref.read(canvasProvider.notifier).goToPage(index);
+                      child: _PageGridReorderable(
+                        scrollController: scrollController,
+                        liveState: liveState,
+                        visibleIndices: visibleIndices,
+                        onReorder: (oldVisIdx, newVisIdx) {
+                          if (oldVisIdx == newVisIdx) return;
+                          final oldDocIdx = visibleIndices[oldVisIdx];
+                          // Compute new doc index: where it should be inserted after removal
+                          final newDocIdx = newVisIdx < visibleIndices.length
+                              ? visibleIndices[newVisIdx]
+                              : visibleIndices.last + 1;
+                          final adjustedNew = newDocIdx > oldDocIdx ? newDocIdx - 1 : newDocIdx;
+                          ref.read(canvasProvider.notifier).reorderPage(oldDocIdx, adjustedNew);
+                        },
+                        onTapPage: (index) {
+                          ref.read(canvasProvider.notifier).goToPage(index);
+                          Navigator.pop(ctx);
+                        },
+                        onPageAction: (docIndex, visIdx, action) {
+                          switch (action) {
+                            case 'goto':
+                              ref.read(canvasProvider.notifier).goToPage(docIndex);
                               Navigator.pop(ctx);
-                            },
-                          );
+                              break;
+                            case 'insert_before':
+                              ref.read(canvasProvider.notifier).insertPageAt(docIndex);
+                              break;
+                            case 'insert_after':
+                              ref.read(canvasProvider.notifier).insertPageAt(docIndex + 1);
+                              break;
+                            case 'duplicate':
+                              ref.read(canvasProvider.notifier).duplicatePage(docIndex);
+                              break;
+                            case 'chapter':
+                              _showChapterPicker(ctx, liveState, docIndex);
+                              break;
+                            case 'delete':
+                              ref.read(canvasProvider.notifier).deletePage(docIndex);
+                              break;
+                          }
                         },
                       ),
                     ),
@@ -2754,24 +2838,97 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     );
   }
 
-  /// Small "+" divider between pages to insert a new page at that position.
-  Widget _buildInsertDivider(BuildContext context, WidgetRef ref, int docInsertIdx) {
-    return InkWell(
-      onTap: () {
-        ref.read(canvasProvider.notifier).insertPageAt(docInsertIdx);
-        Navigator.pop(context);
-      },
-      child: Container(
-        height: 28,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(
+  void _showChapterEditMenu(BuildContext ctx, WidgetRef ref, Chapter chapter) async {
+    final action = await showModalBottomSheet<String>(
+      context: ctx,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(12))),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(child: Divider(color: Colors.grey.shade300, height: 1)),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Icon(Icons.add_circle_outline, size: 18, color: Colors.blue.shade400),
+            ListTile(
+              leading: const Icon(Icons.edit_rounded),
+              title: const Text('Rinomina'),
+              onTap: () => Navigator.pop(sheetCtx, 'rename'),
             ),
-            Expanded(child: Divider(color: Colors.grey.shade300, height: 1)),
+            ListTile(
+              leading: const Icon(Icons.delete_rounded, color: Colors.red),
+              title: const Text('Elimina', style: TextStyle(color: Colors.red)),
+              onTap: () => Navigator.pop(sheetCtx, 'delete'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == 'rename') {
+      final newTitle = await _promptForText(ctx, 'Rinomina capitolo', 'Nome', initial: chapter.title);
+      if (newTitle != null && newTitle.trim().isNotEmpty) {
+        ref.read(canvasProvider.notifier).renameChapter(chapter.id, newTitle.trim());
+      }
+    } else if (action == 'delete') {
+      ref.read(canvasProvider.notifier).deleteChapter(chapter.id);
+    }
+  }
+
+  void _showPageContextMenu(BuildContext ctx, WidgetRef ref, CanvasState state, int pageIndex, int visIdx, String? chapterName) {
+    showModalBottomSheet(
+      context: ctx,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(12))),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.open_in_new_rounded),
+              title: Text('Vai a pagina ${visIdx + 1}'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                ref.read(canvasProvider.notifier).goToPage(pageIndex);
+                Navigator.pop(ctx);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_all_rounded),
+              title: const Text('Duplica'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                ref.read(canvasProvider.notifier).duplicatePage(pageIndex);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_rounded),
+              title: const Text('Sposta in capitolo'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _showChapterPicker(ctx, state, pageIndex);
+              },
+            ),
+            if (chapterName != null)
+              ListTile(
+                leading: const Icon(Icons.folder_off_rounded),
+                title: const Text('Rimuovi da capitolo'),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  ref.read(canvasProvider.notifier).assignPageToChapter(pageIndex, null);
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.add_rounded),
+              title: const Text('Inserisci pagina dopo'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                ref.read(canvasProvider.notifier).insertPageAt(pageIndex + 1);
+              },
+            ),
+            if (state.pageCount > 1)
+              ListTile(
+                leading: const Icon(Icons.delete_rounded, color: Colors.red),
+                title: const Text('Elimina', style: TextStyle(color: Colors.red)),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  ref.read(canvasProvider.notifier).deletePage(pageIndex);
+                },
+              ),
           ],
         ),
       ),
@@ -2877,9 +3034,16 @@ class _ActiveStrokeNotifier extends ChangeNotifier {
   }
 
   void addPoint(Offset pos, double pressure) {
-    // Lightweight real-time smoothing: weighted average with last 2 points
+    // Real-time smoothing: weighted moving average with last 3 points for smoother curves
     double sx = pos.dx, sy = pos.dy, sp = pressure;
-    if (_points.length >= 2) {
+    if (_points.length >= 3) {
+      final p2 = _points[_points.length - 1];
+      final p1 = _points[_points.length - 2];
+      final p0 = _points[_points.length - 3];
+      sx = (p0.x + p1.x * 2 + p2.x * 4 + pos.dx * 8) / 15;
+      sy = (p0.y + p1.y * 2 + p2.y * 4 + pos.dy * 8) / 15;
+      sp = (p0.pressure + p1.pressure * 2 + p2.pressure * 4 + pressure * 8) / 15;
+    } else if (_points.length >= 2) {
       final p1 = _points[_points.length - 1];
       final p0 = _points[_points.length - 2];
       sx = (p0.x + p1.x * 2 + pos.dx * 4) / 7;
@@ -3125,4 +3289,198 @@ class _CropPainter extends CustomPainter {
   bool shouldRepaint(covariant _CropPainter old) =>
       cropLeft != old.cropLeft || cropTop != old.cropTop ||
       cropRight != old.cropRight || cropBottom != old.cropBottom;
+}
+
+/// Reorderable grid of page thumbnails with drag-and-drop support.
+class _PageGridReorderable extends StatefulWidget {
+  final ScrollController scrollController;
+  final CanvasState liveState;
+  final List<int> visibleIndices;
+  final void Function(int oldVisIdx, int newVisIdx) onReorder;
+  final void Function(int docIndex) onTapPage;
+  final void Function(int docIndex, int visIdx, String action) onPageAction;
+
+  const _PageGridReorderable({
+    required this.scrollController,
+    required this.liveState,
+    required this.visibleIndices,
+    required this.onReorder,
+    required this.onTapPage,
+    required this.onPageAction,
+  });
+
+  @override
+  State<_PageGridReorderable> createState() => _PageGridReorderableState();
+}
+
+class _PageGridReorderableState extends State<_PageGridReorderable> {
+  int? _dragFromVisIdx;
+  int? _dragOverVisIdx;
+
+  String? _chapterNameForPage(int docIdx) {
+    final entry = widget.liveState.document.pages[docIdx];
+    for (final c in widget.liveState.metadata.chapters) {
+      if (c.id == entry.chapterId) return c.title;
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GridView.builder(
+      controller: widget.scrollController,
+      padding: const EdgeInsets.all(12),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        childAspectRatio: 0.60,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+      ),
+      itemCount: widget.visibleIndices.length,
+      itemBuilder: (ctx, visIdx) {
+        final index = widget.visibleIndices[visIdx];
+        final isCurrentPage = index == widget.liveState.currentPageIndex;
+        final entry = widget.liveState.document.pages[index];
+        final page = widget.liveState.pages[entry.fileName];
+        final chapterName = _chapterNameForPage(index);
+        final isDragOver = _dragOverVisIdx == visIdx && _dragFromVisIdx != visIdx;
+
+        return DragTarget<int>(
+          onWillAcceptWithDetails: (details) {
+            if (details.data != visIdx) {
+              setState(() => _dragOverVisIdx = visIdx);
+            }
+            return true;
+          },
+          onLeave: (_) {
+            if (_dragOverVisIdx == visIdx) setState(() => _dragOverVisIdx = null);
+          },
+          onAcceptWithDetails: (details) {
+            setState(() => _dragOverVisIdx = null);
+            widget.onReorder(details.data, visIdx);
+          },
+          builder: (ctx, accepted, rejected) {
+            final tile = _buildTile(
+              ctx, visIdx, index, isCurrentPage, entry, page, chapterName, isDragOver,
+            );
+            return LongPressDraggable<int>(
+              data: visIdx,
+              delay: const Duration(milliseconds: 150),
+              hapticFeedbackOnStart: true,
+              onDragStarted: () => setState(() => _dragFromVisIdx = visIdx),
+              onDragEnd: (_) => setState(() { _dragFromVisIdx = null; _dragOverVisIdx = null; }),
+              feedback: Material(
+                elevation: 8,
+                borderRadius: BorderRadius.circular(8),
+                child: Opacity(
+                  opacity: 0.85,
+                  child: SizedBox(
+                    width: 110, height: 150,
+                    child: _buildThumbnail(index, isCurrentPage, page, widget.liveState),
+                  ),
+                ),
+              ),
+              childWhenDragging: Opacity(opacity: 0.2, child: tile),
+              child: tile,
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildTile(
+    BuildContext ctx, int visIdx, int index, bool isCurrentPage,
+    PageEntry entry, PageData? page, String? chapterName, bool isDragOver,
+  ) {
+    return GestureDetector(
+      onTap: () => widget.onTapPage(index),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        decoration: isDragOver
+            ? BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.blue, width: 2),
+              )
+            : null,
+        child: Column(
+          children: [
+            Expanded(
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: _buildThumbnail(index, isCurrentPage, page, widget.liveState),
+                  ),
+                  // 3-dot menu button
+                  Positioned(
+                    top: 2, right: 2,
+                    child: PopupMenuButton<String>(
+                      icon: Icon(Icons.more_vert, size: 18, color: Colors.grey.shade600),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                      itemBuilder: (_) => [
+                        const PopupMenuItem(value: 'goto', child: ListTile(dense: true, leading: Icon(Icons.open_in_new_rounded, size: 18), title: Text('Vai a pagina', style: TextStyle(fontSize: 13)))),
+                        const PopupMenuItem(value: 'insert_before', child: ListTile(dense: true, leading: Icon(Icons.add_rounded, size: 18), title: Text('Inserisci prima', style: TextStyle(fontSize: 13)))),
+                        const PopupMenuItem(value: 'insert_after', child: ListTile(dense: true, leading: Icon(Icons.add_rounded, size: 18), title: Text('Inserisci dopo', style: TextStyle(fontSize: 13)))),
+                        const PopupMenuItem(value: 'duplicate', child: ListTile(dense: true, leading: Icon(Icons.copy_all_rounded, size: 18), title: Text('Duplica', style: TextStyle(fontSize: 13)))),
+                        const PopupMenuItem(value: 'chapter', child: ListTile(dense: true, leading: Icon(Icons.folder_rounded, size: 18), title: Text('Capitolo...', style: TextStyle(fontSize: 13)))),
+                        if (widget.liveState.pageCount > 1)
+                          const PopupMenuItem(value: 'delete', child: ListTile(dense: true, leading: Icon(Icons.delete_rounded, size: 18, color: Colors.red), title: Text('Elimina', style: TextStyle(fontSize: 13, color: Colors.red)))),
+                      ],
+                      onSelected: (action) => widget.onPageAction(index, visIdx, action),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              chapterName != null ? '${visIdx + 1} • $chapterName' : '${visIdx + 1}',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: isCurrentPage ? FontWeight.bold : FontWeight.normal,
+                color: isCurrentPage ? Colors.blue : Colors.grey.shade700,
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildThumbnail(int docIndex, bool isCurrentPage, PageData? page, CanvasState state) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(
+          color: isCurrentPage ? Colors.blue : Colors.grey.shade300,
+          width: isCurrentPage ? 2.5 : 1,
+        ),
+        borderRadius: BorderRadius.circular(6),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.08),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(5),
+        child: page != null
+            ? CustomPaint(
+                painter: CanvasRenderEngine(
+                  pageData: page,
+                  zoom: 1.0,
+                  panOffset: Offset.zero,
+                  imageCache: state.imageCache,
+                ),
+                size: Size.infinite,
+              )
+            : const Center(child: Icon(Icons.description_outlined, color: Colors.grey)),
+      ),
+    );
+  }
 }
