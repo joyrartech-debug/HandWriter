@@ -437,6 +437,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       }
       // Stop touch-panning so the scale handler takes over exclusively
       _isTouchPanning = false;
+      // Cancel long-press timer so context menu doesn't fire during pinch
+      _cancelLongPressTimer();
       return;
     }
 
@@ -997,11 +999,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     final state = ref.read(canvasProvider);
     if (state == null) return;
 
-    // Use _baseZoom (from _onScaleStart) as the oldZoom baseline for consistency
-    final oldZoom = _baseZoom;
     final newZoom = (_baseZoom * details.scale).clamp(0.3, 5.0);
 
-    // Correct zoom centering: keep the content under the focal point fixed
+    // Use the CURRENT zoom (not _baseZoom) for pan calculation so the
+    // focal-point anchor stays stable across incremental updates.
+    final oldZoom = state.zoom;
     final focalPoint = details.localFocalPoint;
     final newPan = state.panOffset + (focalPoint - state.panOffset) * (1 - (newZoom / oldZoom));
 
