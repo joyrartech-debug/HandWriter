@@ -20,6 +20,7 @@ import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
 import 'package:handwriter/features/canvas/presentation/symbol_library_panel.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
+import 'package:pasteboard/pasteboard.dart';
 
 class CanvasScreen extends ConsumerStatefulWidget {
   const CanvasScreen({super.key});
@@ -77,6 +78,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   // ── Auto-save timer ──
   Timer? _autoSaveTimer;
   static const _autoSaveInterval = Duration(seconds: 30);
+
+  // Key for the canvas Stack to convert coordinates properly
+  final _canvasStackKey = GlobalKey();
 
   // ── Keyboard shortcuts ──
   final _focusNode = FocusNode();
@@ -162,7 +166,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
           ref.read(canvasProvider.notifier).cutSelection();
           return KeyEventResult.handled;
         case LogicalKeyboardKey.keyV:
-          ref.read(canvasProvider.notifier).paste();
+          _pasteFromClipboard();
           return KeyEventResult.handled;
         case LogicalKeyboardKey.keyD:
           ref.read(canvasProvider.notifier).duplicateSelection();
@@ -827,7 +831,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
     if (_isDraggingSelection) {
       _isDraggingSelection = false;
-      ref.read(canvasProvider.notifier).applySelectionTransform();
+      // Removed immediate applySelectionTransform to allow cumulative transforms
+      // It will be baked into the canvas when the user clicks away or changes tools.
       return;
     }
 
@@ -1047,6 +1052,41 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     if (text != null && text.isNotEmpty) {
       ref.read(canvasProvider.notifier).addTextElement(pagePos, text);
     }
+  }
+
+  // ── Clipboard paste (system image or internal) ──
+
+  Future<void> _pasteFromClipboard() async {
+    // If the internal clipboard has content, prefer it
+    final cs = ref.read(canvasProvider);
+    if (cs != null && cs.clipboard != null) {
+      ref.read(canvasProvider.notifier).paste();
+      return;
+    }
+
+    // Otherwise try to read an image from the system clipboard
+    if (!kIsWeb && (io.Platform.isWindows || io.Platform.isMacOS || io.Platform.isLinux)) {
+      try {
+        final imageBytes = await Pasteboard.image;
+        if (imageBytes != null && imageBytes.isNotEmpty) {
+          // Place the image at the center of the current viewport
+          final s = ref.read(canvasProvider);
+          if (s == null) return;
+          final viewSize = (context.findRenderObject() as RenderBox?)?.size ?? const Size(400, 600);
+          final center = Offset(
+            (-s.panOffset.dx + viewSize.width / 2) / s.zoom,
+            (-s.panOffset.dy + viewSize.height / 2) / s.zoom,
+          );
+          _insertImage(imageBytes, 'clipboard_image.png', center);
+          return;
+        }
+      } catch (_) {
+        // Pasteboard not available or no image — fall through
+      }
+    }
+
+    // Final fallback: try internal paste anyway (handles pendingPaste, etc.)
+    ref.read(canvasProvider.notifier).paste();
   }
 
   // ── Image / PDF insertion ──
@@ -1368,6 +1408,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         return MouseRegion(
           cursor: cursor,
           child: Stack(
+            key: _canvasStackKey,
             children: [
               // Canvas painter
               Positioned.fill(
@@ -1970,9 +2011,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
     final screenTL = _toScreenCoords(scaledBounds.topLeft, state, canvasSize);
     final screenBR = _toScreenCoords(scaledBounds.bottomRight, state, canvasSize);
     final screenRect = Rect.fromPoints(screenTL, screenBR);
-    final centerTop = Offset(screenRect.center.dx, screenRect.top - 40);
+    final selRotation = sel.rotation;
 
-    Widget buildCornerHandle(Offset screenPos, MouseCursor cursor) {
+    Offset rotateScreenPoint(Offset point) {
+      if (selRotation == 0.0) return point;
+      final dx = point.dx - screenRect.center.dx;
+      final dy = point.dy - screenRect.center.dy;
+      final cosA = cos(selRotation);
+      final sinA = sin(selRotation);
+      return Offset(
+        screenRect.center.dx + dx * cosA - dy * sinA,
+        screenRect.center.dy + dx * sinA + dy * cosA,
+      );
+    }
+
+    final unrotatedCenterTop = Offset(screenRect.center.dx, screenRect.top - 40);
+    final centerTop = rotateScreenPoint(unrotatedCenterTop);
+
+    Widget buildCornerHandle(Offset unrotatedPos, MouseCursor cursor) {
+      final screenPos = rotateScreenPoint(unrotatedPos);
       return Positioned(
         left: screenPos.dx - 7,
         top: screenPos.dy - 7,
@@ -1984,16 +2041,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
               _resizeInitialScale = sel.scale;
             },
             onPanUpdate: (d) {
-              final centerScreen = screenRect.center;
-              final startDist = (_resizeDragStart - centerScreen).distance;
-              final currentDist = (d.globalPosition - centerScreen).distance;
+              // Convert screenRect.center to global coordinates via the canvas Stack
+              final stackBox = _canvasStackKey.currentContext?.findRenderObject() as RenderBox?;
+              final centerGlobal = stackBox != null
+                  ? stackBox.localToGlobal(screenRect.center)
+                  : screenRect.center;
+              final startDist = (_resizeDragStart - centerGlobal).distance;
+              final currentDist = (d.globalPosition - centerGlobal).distance;
               if (startDist > 5) {
                 final newScale = _resizeInitialScale * (currentDist / startDist);
                 ref.read(canvasProvider.notifier).scaleSelectionPreview(newScale.clamp(0.1, 10.0));
               }
-            },
-            onPanEnd: (_) {
-              ref.read(canvasProvider.notifier).applySelectionTransform();
             },
             child: Container(
               width: 14, height: 14,
@@ -2020,38 +2078,42 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       Positioned(
         left: centerTop.dx - 14,
         top: centerTop.dy - 14,
-        child: Column(
-          children: [
-            GestureDetector(
-              onPanUpdate: (d) {
-                // Convert screenRect center to global coords for correct rotation
-                final box = context.findRenderObject() as RenderBox?;
-                final centerGlobal = box != null
-                    ? box.localToGlobal(screenRect.center)
-                    : screenRect.center;
-                final prev = d.globalPosition - d.delta;
-                final startAngle = atan2(prev.dy - centerGlobal.dy, prev.dx - centerGlobal.dx);
-                final currentAngle = atan2(d.globalPosition.dy - centerGlobal.dy, d.globalPosition.dx - centerGlobal.dx);
-                final deltaAngle = currentAngle - startAngle;
-                ref.read(canvasProvider.notifier).rotateSelection(deltaAngle);
-              },
-              onPanEnd: (_) {
-                ref.read(canvasProvider.notifier).applySelectionTransform();
-              },
-              child: Container(
-                width: 28, height: 28,
-                decoration: BoxDecoration(
-                  color: Colors.white, shape: BoxShape.circle,
-                  border: Border.all(color: Colors.blue, width: 2),
-                  boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 3)],
+        child: Transform.rotate(
+          angle: selRotation,
+          origin: const Offset(0, -13), // Shift origin from the center of the 54px col (y=27) pointing to circle (y=14)
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              GestureDetector(
+                onPanUpdate: (d) {
+                  // Use the canvas Stack's RenderBox for proper coordinate conversion
+                  final stackBox = _canvasStackKey.currentContext?.findRenderObject() as RenderBox?;
+                  final centerGlobal = stackBox != null
+                      ? stackBox.localToGlobal(screenRect.center)
+                      : screenRect.center;
+                  final prev = d.globalPosition - d.delta;
+                  final startAngle = atan2(prev.dy - centerGlobal.dy, prev.dx - centerGlobal.dx);
+                  final currentAngle = atan2(d.globalPosition.dy - centerGlobal.dy, d.globalPosition.dx - centerGlobal.dx);
+                  var deltaAngle = currentAngle - startAngle;
+                  if (deltaAngle > pi) deltaAngle -= 2 * pi;
+                  if (deltaAngle < -pi) deltaAngle += 2 * pi;
+                  ref.read(canvasProvider.notifier).rotateSelection(deltaAngle);
+                },
+                child: Container(
+                  width: 28, height: 28,
+                  decoration: BoxDecoration(
+                    color: Colors.white, shape: BoxShape.circle,
+                    border: Border.all(color: Colors.blue, width: 2),
+                    boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 3)],
+                  ),
+                  child: const Icon(Icons.rotate_right_rounded, size: 16, color: Colors.blue),
                 ),
-                child: const Icon(Icons.rotate_right_rounded, size: 16, color: Colors.blue),
               ),
-            ),
-            IgnorePointer(
-              child: Container(width: 1.5, height: 26, color: Colors.blue.withValues(alpha: 0.5)),
-            ),
-          ],
+              IgnorePointer(
+                child: Container(width: 1.5, height: 26, color: Colors.blue.withValues(alpha: 0.5)),
+              ),
+            ],
+          ),
         ),
       ),
     ];

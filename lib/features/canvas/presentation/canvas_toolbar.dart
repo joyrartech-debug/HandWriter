@@ -376,6 +376,7 @@ class CanvasToolbar extends StatelessWidget {
       ('rectangle', Icons.rectangle_outlined, 'Rettangolo'),
       ('circle', Icons.circle_outlined, 'Cerchio'),
       ('triangle', Icons.change_history, 'Triangolo'),
+      ('rhombus', Icons.diamond_outlined, 'Rombo'),
       ('line', Icons.remove, 'Linea'),
       ('arrow', Icons.arrow_forward, 'Freccia'),
       ('xy_plane', Icons.grid_3x3_rounded, 'Piano XY'),

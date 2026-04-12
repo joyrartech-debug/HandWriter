@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 
 // ═══════════════════════════════════════════════════════════════
@@ -456,6 +457,53 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, Uint8List>? assets,
     List<SymbolLibrary>? symbolLibraries,
   }) {
+    // Try to restore the last viewed chapter and page for this notebook
+    _restoreLastPosition(metadata, document, pages, remotePath, assets, symbolLibraries);
+  }
+
+  Future<void> _restoreLastPosition(
+    NotebookMetadata metadata,
+    DocumentStructure document,
+    Map<String, PageData> pages,
+    String remotePath,
+    Map<String, Uint8List>? assets,
+    List<SymbolLibrary>? symbolLibraries,
+  ) async {
+    String? restoredChapterId;
+    int startPageIndex = 0;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final nbId = metadata.id;
+      final savedChapter = prefs.getString('last_chapter_$nbId');
+      final savedPage = prefs.getInt('last_page_$nbId') ?? 0;
+
+      // Validate saved chapter still exists
+      if (savedChapter != null && metadata.chapters.any((c) => c.id == savedChapter)) {
+        restoredChapterId = savedChapter;
+        // Validate saved page index is within range and belongs to the chapter
+        if (savedPage >= 0 && savedPage < document.pages.length) {
+          startPageIndex = savedPage;
+        } else {
+          // Page index out of range, find first page of the chapter
+          final idx = document.pages.indexWhere((p) => p.chapterId == savedChapter);
+          if (idx >= 0) startPageIndex = idx;
+        }
+      } else if (metadata.chapters.isNotEmpty) {
+        // No saved position or chapter was deleted — default to first chapter
+        restoredChapterId = metadata.chapters.first.id;
+        final idx = document.pages.indexWhere((p) => p.chapterId == restoredChapterId);
+        if (idx >= 0) startPageIndex = idx;
+      }
+    } catch (_) {
+      // SharedPreferences failed — fall back to first chapter
+      if (metadata.chapters.isNotEmpty) {
+        restoredChapterId = metadata.chapters.first.id;
+        final idx = document.pages.indexWhere((p) => p.chapterId == restoredChapterId);
+        if (idx >= 0) startPageIndex = idx;
+      }
+    }
+
     state = CanvasState(
       metadata: metadata,
       document: document,
@@ -463,6 +511,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       remotePath: remotePath,
       assetBytes: assets != null ? Map.of(assets) : const {},
       symbolLibraries: symbolLibraries ?? const [],
+      activeChapterId: restoredChapterId,
+      currentPageIndex: startPageIndex,
     );
     // Decode all asset images into the render cache
     if (assets != null) {
@@ -472,12 +522,37 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
   }
 
-  void closeNotebook() => state = null;
+  void closeNotebook() {
+    _saveLastPosition();
+    state = null;
+  }
+
+  Future<void> _saveLastPosition() async {
+    if (state == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final nbId = state!.metadata.id;
+      await prefs.setInt('last_page_$nbId', state!.currentPageIndex);
+      if (state!.activeChapterId != null) {
+        await prefs.setString('last_chapter_$nbId', state!.activeChapterId!);
+      } else {
+        await prefs.remove('last_chapter_$nbId');
+      }
+    } catch (_) {
+      // Non-critical — silently ignore
+    }
+  }
 
   // ── Tool management ──
 
   void setTool(CanvasTool tool) {
     if (state == null) return;
+    
+    // Bake any pending lasso transformations before switching tools
+    if (tool != CanvasTool.lasso && state!.lassoSelection != null) {
+      applySelectionTransform();
+    }
+
     // Auto-set highlighter to yellow, restore black for pens
     ToolSettings? updatedSettings;
     if (tool == CanvasTool.highlighter && state!.toolSettings.color == 0xFF000000) {
@@ -1080,6 +1155,51 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       );
     }
 
+    // ── RHOMBUS (4 corners with roughly equal edge lengths, diamond shape) ──
+    if (corners.length == 4) {
+      // Check if all edge lengths are roughly equal (within 30%)
+      final edgeLengths = <double>[];
+      for (int i = 0; i < 4; i++) {
+        edgeLengths.add((corners[i] - corners[(i + 1) % 4]).distance);
+      }
+      final avgEdge = edgeLengths.reduce((a, b) => a + b) / 4;
+      final edgeVariation = edgeLengths.map((e) => (e - avgEdge).abs() / avgEdge).reduce(max);
+
+      if (edgeVariation < 0.30) {
+        // Check it's more diamond-like than rectangular:
+        // diagonals should be perpendicular (or close to it)
+        final d1 = corners[2] - corners[0]; // diagonal 1
+        final d2 = corners[3] - corners[1]; // diagonal 2
+        final dotProduct = (d1.dx * d2.dx + d1.dy * d2.dy).abs();
+        final d1Len = d1.distance;
+        final d2Len = d2.distance;
+        final cosAngle = (d1Len > 0 && d2Len > 0) ? dotProduct / (d1Len * d2Len) : 1.0;
+
+        // Also check the shape area vs bounding box area ratio
+        // A rhombus fills ~50% of its bounding box, a rectangle fills ~100%
+        double shapeArea = 0;
+        for (int i = 0; i < 4; i++) {
+          final p1 = corners[i];
+          final p2 = corners[(i + 1) % 4];
+          shapeArea += (p1.dx * p2.dy) - (p2.dx * p1.dy);
+        }
+        shapeArea = shapeArea.abs() / 2;
+        final bboxArea = width * height;
+        final fillRatio = bboxArea > 0 ? shapeArea / bboxArea : 1.0;
+
+        // Rhombus: near-perpendicular diagonals OR diamond-like fill ratio (<75%)
+        if (cosAngle < 0.3 || fillRatio < 0.75) {
+          return ShapeData(
+            shapeType: 'rhombus',
+            x1: minX, y1: minY,
+            x2: maxX, y2: maxY,
+            strokeColor: color, strokeWidth: visualWidth,
+            fillColor: autoFill,
+          );
+        }
+      }
+    }
+
     // ── RECTANGLE (With slant/rotation support) ──
     if (corners.length >= 4 && corners.length <= 6) {
       double maxEdgeLen = 0;
@@ -1341,6 +1461,160 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   // ── Eraser ──
 
+  /// Distance from point [p] to the line segment [a]-[b].
+  static double _distToSegment(Offset p, Offset a, Offset b) {
+    final l2 = (b - a).distanceSquared;
+    if (l2 == 0) return (p - a).distance;
+    var t = ((p.dx - a.dx) * (b.dx - a.dx) + (p.dy - a.dy) * (b.dy - a.dy)) / l2;
+    t = t.clamp(0.0, 1.0);
+    return (p - Offset(a.dx + t * (b.dx - a.dx), a.dy + t * (b.dy - a.dy))).distance;
+  }
+
+  /// Minimum distance from point [p] to the four edges of [rect].
+  static double _distToRectEdges(Offset p, Rect rect) {
+    final tl = rect.topLeft, tr = rect.topRight, bl = rect.bottomLeft, br = rect.bottomRight;
+    return [
+      _distToSegment(p, tl, tr),
+      _distToSegment(p, tr, br),
+      _distToSegment(p, br, bl),
+      _distToSegment(p, bl, tl),
+    ].reduce(min);
+  }
+
+  /// Whether the standard eraser (precise) hits the outline of a shape.
+  static bool _standardEraserHitsShape(ShapeData sh, Offset position, double eraseRadius) {
+    // Transform position to unrotated space if shape is rotated
+    Offset p = position;
+    if (sh.rotation != 0) {
+      final cx = (sh.x1 + sh.x2) / 2;
+      final cy = (sh.y1 + sh.y2) / 2;
+      final cosA = cos(-sh.rotation);
+      final sinA = sin(-sh.rotation);
+      final dx = position.dx - cx;
+      final dy = position.dy - cy;
+      p = Offset(cx + dx * cosA - dy * sinA, cy + dx * sinA + dy * cosA);
+    }
+
+    switch (sh.shapeType) {
+      case 'line':
+      case 'arrow':
+        return _distToSegment(p, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2)) < eraseRadius;
+      case 'circle':
+        final center = Offset((sh.x1 + sh.x2) / 2, (sh.y1 + sh.y2) / 2);
+        final radius = Offset(sh.x2 - sh.x1, sh.y2 - sh.y1).distance / 2;
+        final distToCenter = (p - center).distance;
+        // Hit if near circumference
+        return (distToCenter - radius).abs() < eraseRadius;
+      case 'triangle':
+        final tLeft = min(sh.x1, sh.x2);
+        final tRight = max(sh.x1, sh.x2);
+        final top = min(sh.y1, sh.y2);
+        final bottom = max(sh.y1, sh.y2);
+        final apex = Offset((tLeft + tRight) / 2, top);
+        final bl = Offset(tLeft, bottom);
+        final br = Offset(tRight, bottom);
+        return [
+          _distToSegment(p, apex, bl),
+          _distToSegment(p, bl, br),
+          _distToSegment(p, br, apex),
+        ].reduce(min) < eraseRadius;
+      default: // rectangle and others
+        final rect = Rect.fromPoints(Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2));
+        return _distToRectEdges(p, rect) < eraseRadius;
+    }
+  }
+
+  /// Convert a shape outline into sampled edge segments (list of point lists).
+  /// Each edge is densely sampled so point-by-point erasure works.
+  /// Points are in final (rotated) coordinates.
+  static List<List<StrokePoint>> _shapeToSampledEdges(ShapeData sh, double stepSize) {
+    final rawEdges = <List<Offset>>[];
+
+    switch (sh.shapeType) {
+      case 'line':
+      case 'arrow':
+        rawEdges.add([Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2)]);
+        break;
+      case 'rectangle':
+        final l = min(sh.x1, sh.x2), r = max(sh.x1, sh.x2);
+        final t = min(sh.y1, sh.y2), b = max(sh.y1, sh.y2);
+        rawEdges.addAll([
+          [Offset(l, t), Offset(r, t)],
+          [Offset(r, t), Offset(r, b)],
+          [Offset(r, b), Offset(l, b)],
+          [Offset(l, b), Offset(l, t)],
+        ]);
+        break;
+      case 'triangle':
+        final tLeft = min(sh.x1, sh.x2), tRight = max(sh.x1, sh.x2);
+        final top = min(sh.y1, sh.y2), bottom = max(sh.y1, sh.y2);
+        final apex = Offset((tLeft + tRight) / 2, top);
+        final bl = Offset(tLeft, bottom), br = Offset(tRight, bottom);
+        rawEdges.addAll([[apex, bl], [bl, br], [br, apex]]);
+        break;
+      case 'circle':
+        final cx = (sh.x1 + sh.x2) / 2;
+        final cy = (sh.y1 + sh.y2) / 2;
+        final radius = Offset(sh.x2 - sh.x1, sh.y2 - sh.y1).distance / 2;
+        final n = max(36, (2 * pi * radius / stepSize).ceil());
+        // Circle as one continuous edge of n+1 points
+        final pts = <Offset>[];
+        for (int i = 0; i <= n; i++) {
+          final a = 2 * pi * i / n;
+          pts.add(Offset(cx + radius * cos(a), cy + radius * sin(a)));
+        }
+        rawEdges.add(pts);
+        break;
+      default:
+        final l = min(sh.x1, sh.x2), r = max(sh.x1, sh.x2);
+        final t = min(sh.y1, sh.y2), b = max(sh.y1, sh.y2);
+        rawEdges.addAll([
+          [Offset(l, t), Offset(r, t)],
+          [Offset(r, t), Offset(r, b)],
+          [Offset(r, b), Offset(l, b)],
+          [Offset(l, b), Offset(l, t)],
+        ]);
+        break;
+    }
+
+    // Rotation transform
+    final cx = (sh.x1 + sh.x2) / 2;
+    final cy = (sh.y1 + sh.y2) / 2;
+    final hasRotation = sh.rotation != 0;
+    final cosA = hasRotation ? cos(sh.rotation) : 1.0;
+    final sinA = hasRotation ? sin(sh.rotation) : 0.0;
+
+    Offset _rot(Offset p) {
+      if (!hasRotation) return p;
+      final dx = p.dx - cx;
+      final dy = p.dy - cy;
+      return Offset(cx + dx * cosA - dy * sinA, cy + dx * sinA + dy * cosA);
+    }
+
+    // Sample each edge and apply rotation
+    final result = <List<StrokePoint>>[];
+    for (final edge in rawEdges) {
+      final sampled = <StrokePoint>[];
+      // For multi-point edges (circles), sample between consecutive pairs
+      for (int i = 0; i < edge.length - 1; i++) {
+        final p1 = edge[i];
+        final p2 = edge[i + 1];
+        final dist = (p2 - p1).distance;
+        final count = max(2, (dist / stepSize).ceil() + 1);
+        // Don't duplicate the start point for interior segments
+        final startIdx = (i == 0) ? 0 : 1;
+        for (int j = startIdx; j < count; j++) {
+          final t = j / (count - 1);
+          final raw = Offset(p1.dx + (p2.dx - p1.dx) * t, p1.dy + (p2.dy - p1.dy) * t);
+          final rotated = _rot(raw);
+          sampled.add(StrokePoint(x: rotated.dx, y: rotated.dy, pressure: 0.5));
+        }
+      }
+      if (sampled.length >= 2) result.add(sampled);
+    }
+    return result;
+  }
+
   void _eraseAt(Offset position) {
     if (state == null) return;
     final s = state!;
@@ -1349,6 +1623,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final eraseRadius = eraserSizeToRadius(s.toolSettings.eraserSize);
     final fileName = s.currentPageFileName;
+    final isStrokeEraser = s.currentTool == CanvasTool.eraserStroke;
 
     final newContent = <ContentElement>[];
     bool changed = false;
@@ -1356,44 +1631,176 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     for (final element in page.layers.content) {
       bool shouldRemoveWhole = false;
 
-      // Both erasers remove entire elements. Standard eraser uses a smaller
-      // radius for precision, stroke eraser is more aggressive.
+      // Check non-stroke elements (text, symbols, shapes).
+      // Per-tratto eraser: remove whole element if within bounding box.
+      // Standard eraser: only remove if the eraser touches the actual outline/edge.
       element.map(
-        stroke: (stroke) {
-          for (final point in stroke.data.points) {
-            final dx = point.x - position.dx;
-            final dy = point.y - position.dy;
-            if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
-              shouldRemoveWhole = true;
-              break;
+        stroke: (_) {},
+        text: (t) {
+          final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
+          if (isStrokeEraser) {
+            if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+          } else {
+            // Standard: check proximity to edges of text box
+            if (_distToRectEdges(position, rect) < eraseRadius) shouldRemoveWhole = true;
+          }
+        },
+        image: (img) {
+          if (img.data.assetPath.startsWith('symbol_')) {
+            final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
+            if (isStrokeEraser) {
+              if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+            } else {
+              // Standard: check proximity to edges of symbol bounding box
+              if (_distToRectEdges(position, rect) < eraseRadius) shouldRemoveWhole = true;
             }
           }
         },
-        text: (t) {
-          final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
-          if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
-        },
-        image: (img) {
-          // Allow erasing symbols (placed via symbol library) but not imported images/PDFs
-          if (img.data.assetPath.startsWith('symbol_')) {
-            final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
+        shape: (sh) {
+          if (isStrokeEraser) {
+            final rect = Rect.fromPoints(
+              Offset(sh.data.x1, sh.data.y1),
+              Offset(sh.data.x2, sh.data.y2),
+            );
             if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
           }
-        },
-        shape: (sh) {
-          final rect = Rect.fromPoints(
-            Offset(sh.data.x1, sh.data.y1),
-            Offset(sh.data.x2, sh.data.y2),
-          );
-          if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+          // Standard eraser is handled below (partial erase, not whole removal)
         },
       );
 
       if (shouldRemoveWhole) {
         changed = true;
-        continue; // skip this element
+        continue;
       }
-      newContent.add(element);
+
+      // For strokes: stroke eraser removes entire stroke, standard eraser
+      // splits it into segments by erasing only the touched points.
+      // For shapes (standard eraser only): decompose outline into sampled
+      // points and apply the same splitting logic, so only the touched
+      // portion is erased.
+      bool handled = false;
+      element.map(
+        stroke: (stroke) {
+          handled = true;
+          if (isStrokeEraser) {
+            // Remove entire stroke if any point is within radius
+            for (final point in stroke.data.points) {
+              final dx = point.x - position.dx;
+              final dy = point.y - position.dy;
+              if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
+                changed = true;
+                return; // skip adding this element
+              }
+            }
+            newContent.add(element);
+          } else {
+            // Standard eraser: split stroke, keep segments outside eraser
+            final segments = <List<StrokePoint>>[];
+            var currentSegment = <StrokePoint>[];
+
+            for (final point in stroke.data.points) {
+              final dx = point.x - position.dx;
+              final dy = point.y - position.dy;
+              if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
+                if (currentSegment.length >= 2) {
+                  segments.add(currentSegment);
+                }
+                currentSegment = [];
+                changed = true;
+              } else {
+                currentSegment.add(point);
+              }
+            }
+            if (currentSegment.length >= 2) {
+              segments.add(currentSegment);
+            }
+
+            if (segments.isEmpty) {
+              changed = true;
+              return;
+            }
+
+            if (segments.length == 1 && segments[0].length == stroke.data.points.length) {
+              newContent.add(element);
+              return;
+            }
+
+            for (final seg in segments) {
+              newContent.add(ContentElement.stroke(
+                id: const Uuid().v4(),
+                zIndex: stroke.zIndex,
+                data: StrokeData(
+                  points: seg,
+                  toolType: stroke.data.toolType,
+                  color: stroke.data.color,
+                  baseWidth: stroke.data.baseWidth,
+                  isHighlighter: stroke.data.isHighlighter,
+                  opacity: stroke.data.opacity,
+                  timestamp: stroke.data.timestamp,
+                ),
+              ));
+            }
+          }
+        },
+        text: (_) {},
+        image: (_) {},
+        shape: (sh) {
+          // Standard eraser: decompose shape outline into sampled points,
+          // then erase only the touched portion (like stroke splitting).
+          // Per-tratto already handled above via shouldRemoveWhole.
+          if (!isStrokeEraser) {
+            handled = true;
+            final sampledEdges = _shapeToSampledEdges(sh.data, eraseRadius * 0.5);
+            bool anyErased = false;
+            final survivingStrokes = <ContentElement>[];
+
+            for (final edgePoints in sampledEdges) {
+              final segments = <List<StrokePoint>>[];
+              var currentSeg = <StrokePoint>[];
+
+              for (final point in edgePoints) {
+                final dx = point.x - position.dx;
+                final dy = point.y - position.dy;
+                if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
+                  if (currentSeg.length >= 2) segments.add(currentSeg);
+                  currentSeg = [];
+                  anyErased = true;
+                } else {
+                  currentSeg.add(point);
+                }
+              }
+              if (currentSeg.length >= 2) segments.add(currentSeg);
+
+              for (final seg in segments) {
+                survivingStrokes.add(ContentElement.stroke(
+                  id: const Uuid().v4(),
+                  zIndex: sh.zIndex,
+                  data: StrokeData(
+                    points: seg,
+                    toolType: 'pen',
+                    color: sh.data.strokeColor,
+                    baseWidth: sh.data.strokeWidth,
+                    isHighlighter: false,
+                    opacity: 1.0,
+                  ),
+                ));
+              }
+            }
+
+            if (anyErased) {
+              changed = true;
+              newContent.addAll(survivingStrokes);
+            } else {
+              // Nothing was erased, keep original shape
+              newContent.add(element);
+            }
+          }
+        },
+      );
+
+      if (!handled) {
+        newContent.add(element);
+      }
     }
 
     if (!changed) return;
@@ -1429,7 +1836,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state!.lassoSelection != null) {
       final sel = state!.lassoSelection!;
       final dragBounds = sel.bounds.translate(sel.dragOffset.dx, sel.dragOffset.dy);
+      // Wait, is it clicking inside the lasso to drag?
       if (dragBounds.contains(position)) return;
+      applySelectionTransform(); // Bake if clicking outside
       state = state!.copyWith(clearLasso: true, lassoPath: []);
     }
     state = state!.copyWith(lassoPath: [position]);
@@ -1437,6 +1846,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void clearLassoPath() {
     if (state == null) return;
+    if (state!.lassoSelection != null) applySelectionTransform();
     state = state!.copyWith(clearLasso: true, lassoPath: []);
   }
 
@@ -1477,6 +1887,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Rect? selectionBounds;
 
     for (final element in page.layers.content) {
+      // Skip PDF images from lasso selection — they are only selectable via double-tap
+      final isPdfImage = element.mapOrNull(
+        image: (img) => img.data.assetPath.contains('.pdf_p'),
+      ) ?? false;
+      if (isPdfImage) continue;
+
       final elementBounds = _getElementBounds(element);
       if (elementBounds == null) continue;
 
@@ -1552,6 +1968,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   Rect? _getElementBounds(ContentElement element) {
+    Rect getRotatedBounds(Rect rect, double rotation) {
+      if (rotation == 0.0) return rect;
+      final c = rect.center;
+      final cosA = cos(rotation);
+      final sinA = sin(rotation);
+      Offset r(Offset p) {
+        final dx = p.dx - c.dx;
+        final dy = p.dy - c.dy;
+        return Offset(c.dx + dx * cosA - dy * sinA, c.dy + dx * sinA + dy * cosA);
+      }
+      final pts = [r(rect.topLeft), r(rect.topRight), r(rect.bottomLeft), r(rect.bottomRight)];
+      final xs = pts.map((p) => p.dx);
+      final ys = pts.map((p) => p.dy);
+      return Rect.fromLTRB(xs.reduce(min), ys.reduce(min), xs.reduce(max), ys.reduce(max));
+    }
+
     return element.map(
       stroke: (e) {
         if (e.data.points.isEmpty) return null;
@@ -1561,10 +1993,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         return Rect.fromLTRB(xs.reduce(min) - halfW, ys.reduce(min) - halfW, xs.reduce(max) + halfW, ys.reduce(max) + halfW);
       },
       text: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
-      image: (e) => Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height),
+      image: (e) {
+        final rect = Rect.fromLTWH(e.data.x, e.data.y, e.data.width, e.data.height);
+        return getRotatedBounds(rect, e.data.rotation);
+      },
       shape: (e) {
         final halfW = e.data.strokeWidth / 2.0;
-        return Rect.fromPoints(Offset(e.data.x1, e.data.y1), Offset(e.data.x2, e.data.y2)).inflate(halfW);
+        final baseRect = Rect.fromPoints(Offset(e.data.x1, e.data.y1), Offset(e.data.x2, e.data.y2)).inflate(halfW);
+        return getRotatedBounds(baseRect, e.data.rotation);
       },
     );
   }
@@ -1736,11 +2172,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         );
       },
       image: (e) {
-        final rp = rotatePoint(e.data.x, e.data.y);
+        // Rotate only the element center around the selection center,
+        // then translate the bounding box by the center offset.
+        // The internal rotation is incremented to match the visual preview.
+        final oldCx = e.data.x + e.data.width / 2;
+        final oldCy = e.data.y + e.data.height / 2;
+        final rCenter = rotatePoint(oldCx, oldCy);
+        final dx = rCenter.dx - oldCx;
+        final dy = rCenter.dy - oldCy;
         return ContentElement.image(
           id: e.id, zIndex: e.zIndex,
           data: ImageData(
-            x: rp.dx, y: rp.dy,
+            x: e.data.x + dx, y: e.data.y + dy,
             width: e.data.width, height: e.data.height,
             assetPath: e.data.assetPath,
             rotation: e.data.rotation + angle,
@@ -1751,14 +2194,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         );
       },
       shape: (e) {
-        final rp1 = rotatePoint(e.data.x1, e.data.y1);
-        final rp2 = rotatePoint(e.data.x2, e.data.y2);
+        // Rotate only the element center around the selection center,
+        // then translate the bounding box by the center offset.
+        final oldCx = (e.data.x1 + e.data.x2) / 2;
+        final oldCy = (e.data.y1 + e.data.y2) / 2;
+        final rCenter = rotatePoint(oldCx, oldCy);
+        final dx = rCenter.dx - oldCx;
+        final dy = rCenter.dy - oldCy;
         return ContentElement.shape(
           id: e.id, zIndex: e.zIndex,
           data: ShapeData(
             shapeType: e.data.shapeType,
-            x1: rp1.dx, y1: rp1.dy,
-            x2: rp2.dx, y2: rp2.dy,
+            x1: e.data.x1 + dx, y1: e.data.y1 + dy,
+            x2: e.data.x2 + dx, y2: e.data.y2 + dy,
             strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
             fillColor: e.data.fillColor, rotation: e.data.rotation + angle,
           ),
@@ -1803,7 +2251,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void clearSelection() {
     if (state == null) return;
-    state = state!.copyWith(clearLasso: true, lassoPath: []);
+    if (state!.lassoSelection != null) applySelectionTransform();
+    state = state!.copyWith(clearLasso: true, lassoPath: [], selectedElementId: null, clearSelectedElement: true);
   }
 
   /// Change the color of all selected strokes/shapes/text.
@@ -2051,23 +2500,54 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final s = state!;
     final now = DateTime.now();
     final chapterId = const Uuid().v4();
+    final uuid = const Uuid();
 
-    // Assign the current page to the new chapter
-    final currentEntry = s.document.pages[s.currentPageIndex];
-    final chapter = Chapter(id: chapterId, title: title, pageIds: [currentEntry.pageId]);
+    // Create a new blank page for the chapter instead of reassigning the current page
+    final pageId = uuid.v4();
+    final pageNum = s.pageCount + 1;
+    final fileName = 'page_${pageNum.toString().padLeft(3, '0')}.json';
 
-    // Update the current page's chapterId
-    final pages = List<PageEntry>.from(s.document.pages);
-    pages[s.currentPageIndex] = currentEntry.copyWith(chapterId: chapterId);
-    final updatedDoc = s.document.copyWith(pages: pages);
+    final currentBg = s.currentPage?.layers.background;
+    final bgType = currentBg?.type ?? 'blank';
+    final lineSpacing = currentBg?.lineSpacing ?? 30.0;
+
+    final newPage = PageData(
+      pageId: pageId, pageNumber: pageNum,
+      width: AppConfig.defaultPageWidth, height: AppConfig.defaultPageHeight,
+      layers: RenderingLayers(
+        background: BackgroundLayer(type: bgType, lineSpacing: lineSpacing),
+        content: const [],
+      ),
+      createdAt: now, modifiedAt: now,
+    );
+
+    final newEntry = PageEntry(
+      pageId: pageId, pageNumber: pageNum, fileName: fileName,
+      lastModified: now, chapterId: chapterId,
+    );
+
+    final chapter = Chapter(id: chapterId, title: title, pageIds: [pageId]);
+
+    // Insert the new page after current position
+    final insertIndex = s.currentPageIndex + 1;
+    final pageList = List<PageEntry>.from(s.document.pages)..insert(insertIndex, newEntry);
+    final updatedDoc = s.document.copyWith(pages: pageList);
+
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[fileName] = newPage;
 
     state = s.copyWith(
       metadata: s.metadata.copyWith(
         chapters: [...s.metadata.chapters, chapter],
+        pageCount: pageNum,
         modifiedAt: now,
       ),
       document: updatedDoc,
+      pages: updatedPages,
+      currentPageIndex: insertIndex,
       activeChapterId: chapterId,
+      zoom: 2.0,
+      panOffset: _centeredPanOffset(2.0),
       isDirty: true,
     );
   }
@@ -2318,6 +2798,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void selectElement(String elementId) {
     if (state == null) return;
+    if (state!.lassoSelection != null) applySelectionTransform();
     state = state!.copyWith(selectedElementId: elementId, clearLasso: true, lassoPath: []);
   }
 
@@ -3695,5 +4176,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       metadata: updatedMeta,
       isDirty: changedDuringSave,
     );
+
+    // Also persist last viewed position locally
+    _saveLastPosition();
   }
 }

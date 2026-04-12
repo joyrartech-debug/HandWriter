@@ -47,6 +47,8 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
   Offset _dragStart = Offset.zero;
   Rect _initialBounds = Rect.zero;
   double _initialRotation = 0;
+  Offset _rotationCenter = Offset.zero;
+  double _lastRotationAngle = 0;
 
   static const _handleSize = 12.0;
   static const _rotateHandleDistance = 30.0;
@@ -130,6 +132,8 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
       );
     }
 
+    // Wrap in a non-rotated widget so _outerKey gives us global coords
+    // unaffected by the internal Transform.rotate.
     return handleStack;
   }
 
@@ -206,17 +210,33 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           GestureDetector(
             onPanStart: (d) {
               _activeHandle = 'rotate';
-              _dragStart = d.globalPosition;
               _initialRotation = widget.rotation;
+              // Compute element center in global coords from the handle position.
+              // The handle is above the element center by a known distance
+              // (half the element height + the handle gap). After rotation,
+              // this vector is rotated, so we undo it to find the center.
+              final dist = widget.bounds.height / 2 + _rotateHandleDistance;
+              _rotationCenter = d.globalPosition + Offset(
+                -dist * sin(widget.rotation),
+                dist * cos(widget.rotation),
+              );
+              _lastRotationAngle = atan2(
+                d.globalPosition.dy - _rotationCenter.dy,
+                d.globalPosition.dx - _rotationCenter.dx,
+              );
               widget.onDragStart?.call();
             },
             onPanUpdate: (d) {
-              final centerGlobal = _centerToGlobal(widget.bounds.center);
-              final startAngle = atan2(_dragStart.dy - centerGlobal.dy, _dragStart.dx - centerGlobal.dx);
-              final currentAngle = atan2(d.globalPosition.dy - centerGlobal.dy, d.globalPosition.dx - centerGlobal.dx);
-              final deltaAngle = currentAngle - startAngle;
-              _dragStart = d.globalPosition;
-              widget.onRotate(deltaAngle);
+              final currentAngle = atan2(
+                d.globalPosition.dy - _rotationCenter.dy,
+                d.globalPosition.dx - _rotationCenter.dx,
+              );
+              // Incremental delta, normalized to handle atan2 wrapping at ±π
+              var delta = currentAngle - _lastRotationAngle;
+              if (delta > pi) delta -= 2 * pi;
+              if (delta < -pi) delta += 2 * pi;
+              _lastRotationAngle = currentAngle;
+              widget.onRotate(delta);
             },
             onPanEnd: (_) => _activeHandle = null,
             child: Container(
@@ -242,14 +262,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
         ],
       ),
     );
-  }
-
-  Offset _centerToGlobal(Offset localCenter) {
-    final renderObject = context.findRenderObject();
-    if (renderObject is RenderBox) {
-      return renderObject.localToGlobal(localCenter);
-    }
-    return localCenter;
   }
 
   Widget _buildActionBar() {

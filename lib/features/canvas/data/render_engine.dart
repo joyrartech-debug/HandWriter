@@ -708,6 +708,22 @@ class CanvasRenderEngine extends CustomPainter {
         if (fillPaint != null) canvas.drawPath(tPath, fillPaint);
         canvas.drawPath(tPath, strokePaint);
         break;
+      case 'rhombus':
+        final rLeft = min(shape.x1, shape.x2);
+        final rRight = max(shape.x1, shape.x2);
+        final rTop = min(shape.y1, shape.y2);
+        final rBottom = max(shape.y1, shape.y2);
+        final rCx = (rLeft + rRight) / 2;
+        final rCy = (rTop + rBottom) / 2;
+        final rPath = Path()
+          ..moveTo(rCx, rTop)       // top
+          ..lineTo(rRight, rCy)     // right
+          ..lineTo(rCx, rBottom)    // bottom
+          ..lineTo(rLeft, rCy)      // left
+          ..close();
+        if (fillPaint != null) canvas.drawPath(rPath, fillPaint);
+        canvas.drawPath(rPath, strokePaint);
+        break;
       case 'xy_plane':
         // XY plane: two arrows from an origin, with optional grid lines
         final ox = shape.x1;
@@ -797,6 +813,21 @@ class CanvasRenderEngine extends CustomPainter {
           ..lineTo(tRight, tBottom)
           ..close();
         canvas.drawPath(tPath, previewPaint);
+        break;
+      case 'rhombus':
+        final rLeft = min(start.dx, end.dx);
+        final rRight = max(start.dx, end.dx);
+        final rTop = min(start.dy, end.dy);
+        final rBottom = max(start.dy, end.dy);
+        final rCx = (rLeft + rRight) / 2;
+        final rCy = (rTop + rBottom) / 2;
+        final rPath = Path()
+          ..moveTo(rCx, rTop)
+          ..lineTo(rRight, rCy)
+          ..lineTo(rCx, rBottom)
+          ..lineTo(rLeft, rCy)
+          ..close();
+        canvas.drawPath(rPath, previewPaint);
         break;
       case 'xy_plane':
         canvas.drawLine(Offset(start.dx, end.dy), Offset(end.dx, end.dy), previewPaint);
@@ -903,8 +934,18 @@ class CanvasRenderEngine extends CustomPainter {
     ).translate(sel.dragOffset.dx, sel.dragOffset.dy);
     final selRect = scaledBounds.inflate(4);
 
+    canvas.save();
+    if (sel.rotation != 0.0) {
+      final transformCenter = scaledBounds.center;
+      canvas.translate(transformCenter.dx, transformCenter.dy);
+      canvas.rotate(sel.rotation);
+      canvas.translate(-transformCenter.dx, -transformCenter.dy);
+    }
+
     // Dashed border
     _paintDashedRect(canvas, selRect, const Color(0xFF2196F3), 1.0);
+    
+    canvas.restore();
   }
 
   void _paintDashedRect(Canvas canvas, Rect rect, Color color, double strokeWidth) {
