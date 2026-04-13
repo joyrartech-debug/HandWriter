@@ -61,33 +61,62 @@ class NotebookListNotifier
 
   /// Carica la lista dei notebook dal server, con fallback locale offline.
   Future<void> refresh() async {
-    state = const AsyncValue.loading();
     final fileService = _ref.read(fileServiceProvider);
 
+    // ── Step 1: Show cached notebooks instantly from local DB ──
+    await _loadFromLocalDb(fileService);
+
+    // ── Step 2: Sync with server in background ──
     try {
       final syncService = _ref.read(syncServiceProvider);
       final webdav = _ref.read(webdavServiceProvider);
-      if (syncService == null || webdav == null) {
-        // No credentials — try local-only
-        await _loadFromLocalCache(fileService);
-        return;
-      }
+      if (syncService == null || webdav == null) return;
 
-      // Try remote refresh
-      await _refreshFromServer(syncService, webdav, fileService);
-    } catch (e, st) {
-      debugPrint('[Library] Remote refresh failed: $e — falling back to local cache');
-      // Fallback: show locally cached notebooks
-      try {
-        await _loadFromLocalCache(fileService);
-      } catch (localErr) {
-        state = AsyncValue.error(e, st);
-      }
+      await _syncWithServer(syncService, webdav, fileService);
+    } catch (e) {
+      debugPrint('[Library] Remote sync failed: $e');
+      // Local data is already shown — no need to show error
     }
   }
 
-  /// Load notebook list from server and cache locally.
-  Future<void> _refreshFromServer(
+  /// Build notebook entries directly from local SQLite metadata (no ZIP parsing).
+  Future<void> _loadFromLocalDb(FileService fileService) async {
+    final allMeta = await fileService.getAllNotebookMeta();
+    if (allMeta.isEmpty) {
+      state = const AsyncValue.data([]);
+      return;
+    }
+
+    final entries = <NotebookEntry>[];
+    for (final row in allMeta) {
+      entries.add(_notebookEntryFromRow(row));
+    }
+    entries.sort((a, b) => b.metadata.modifiedAt.compareTo(a.metadata.modifiedAt));
+    state = AsyncValue.data(entries);
+  }
+
+  /// Create a NotebookEntry from a DB row without parsing ZIP.
+  NotebookEntry _notebookEntryFromRow(Map<String, dynamic> row) {
+    return NotebookEntry(
+      metadata: NotebookMetadata(
+        id: row['id'] as String,
+        title: row['title'] as String? ?? 'Untitled',
+        createdAt: DateTime.tryParse(row['created_at'] as String? ?? '') ?? DateTime.now(),
+        modifiedAt: DateTime.tryParse(row['local_modified_at'] as String? ?? '') ?? DateTime.now(),
+        coverColor: row['cover_color'] as int? ?? 0xFF1565C0,
+        paperType: row['paper_type'] as String? ?? 'lined',
+        pageCount: row['page_count'] as int? ?? 0,
+      ),
+      remotePath: row['remote_path'] as String? ?? '',
+      lastSynced: row['remote_modified_at'] != null
+          ? DateTime.tryParse(row['remote_modified_at'] as String)
+          : null,
+      isLocal: row['sync_status'] != 'synced',
+    );
+  }
+
+  /// Sync with server: only download notebooks whose ETag has changed.
+  Future<void> _syncWithServer(
     SyncService syncService,
     dynamic webdav,
     FileService fileService,
@@ -96,43 +125,54 @@ class NotebookListNotifier
     final remoteFiles = await syncService.listRemoteNotebooks();
     debugPrint('[Library] PROPFIND returned ${remoteFiles.length} .ncnote files');
 
-    final entries = <NotebookEntry>[];
+    // Build map of locally cached ETags
+    final localRows = await fileService.getAllNotebookMeta();
+    final localEtagByPath = <String, String?>{};
+    final localIdByPath = <String, String>{};
+    for (final row in localRows) {
+      final rp = row['remote_path'] as String? ?? '';
+      localEtagByPath[rp] = row['etag'] as String?;
+      localIdByPath[rp] = row['id'] as String;
+    }
+
+    var changed = false;
     final skipped = <String>[];
+
     for (final file in remoteFiles) {
+      final remotePath = '${AppConfig.defaultRemotePath}${file.name}';
+      final localEtag = localEtagByPath[remotePath];
+
+      // Skip if ETag matches — notebook hasn't changed
+      if (localEtag != null && localEtag == file.etag) {
+        localEtagByPath.remove(remotePath); // mark as seen
+        continue;
+      }
+
+      // Need to download this notebook (new or changed)
       const maxRetries = 2;
       var success = false;
       for (var attempt = 0; attempt < maxRetries && !success; attempt++) {
         try {
-          final remotePath = '${AppConfig.defaultRemotePath}${file.name}';
-          final result = await syncService.downloadNotebook(remotePath);
+          final fullData = await webdav.downloadFile(remotePath);
+          final result = syncService.parseNcnoteMetadata(fullData);
 
-          // Cache the full notebook locally for offline access
-          try {
-            final fullData = await webdav.downloadFile(remotePath);
-            await fileService.saveNotebookFile(result.metadata.id, fullData);
-            await fileService.upsertNotebookMeta(
-              id: result.metadata.id,
-              title: result.metadata.title,
-              remotePath: remotePath,
-              etag: file.etag,
-              localModifiedAt: result.metadata.modifiedAt,
-              remoteModifiedAt: file.lastModified,
-              syncStatus: 'synced',
-              fileSize: fullData.length,
-              coverColor: result.metadata.coverColor,
-              paperType: result.metadata.paperType,
-              pageCount: result.metadata.pageCount,
-              createdAt: result.metadata.createdAt,
-            );
-          } catch (cacheErr) {
-            debugPrint('[Library] Cache write failed for ${file.name}: $cacheErr');
-          }
-
-          entries.add(NotebookEntry(
-            metadata: result.metadata,
+          // Save locally
+          await fileService.saveNotebookFile(result.metadata.id, fullData);
+          await fileService.upsertNotebookMeta(
+            id: result.metadata.id,
+            title: result.metadata.title,
             remotePath: remotePath,
-            lastSynced: DateTime.now(),
-          ));
+            etag: file.etag,
+            localModifiedAt: result.metadata.modifiedAt,
+            remoteModifiedAt: file.lastModified,
+            syncStatus: 'synced',
+            fileSize: fullData.length,
+            coverColor: result.metadata.coverColor,
+            paperType: result.metadata.paperType,
+            pageCount: result.metadata.pageCount,
+            createdAt: result.metadata.createdAt,
+          );
+          changed = true;
           success = true;
         } catch (e) {
           if (e is CorruptedArchiveException) {
@@ -154,20 +194,9 @@ class NotebookListNotifier
     final localMeta = await fileService.getDirtyNotebooks();
     for (final row in localMeta) {
       final id = row['id'] as String;
-      if (!entries.any((e) => e.metadata.id == id)) {
-        try {
-          final localData = await fileService.readNotebookFile(id);
-          if (localData != null) {
-            final parsed = syncService.parseNcnoteMetadata(localData);
-            entries.add(NotebookEntry(
-              metadata: parsed.metadata,
-              remotePath: row['remote_path'] as String,
-              isLocal: true,
-            ));
-          }
-        } catch (e) {
-          debugPrint('[Library] Could not load local-only notebook $id: $e');
-        }
+      // These are already in the DB, no need to re-download
+      if (!localIdByPath.containsValue(id)) {
+        changed = true; // new local notebook appeared
       }
     }
 
@@ -175,41 +204,16 @@ class NotebookListNotifier
       debugPrint('[Library] Skipped ${skipped.length} notebooks: $skipped');
     }
 
-    entries.sort((a, b) => b.metadata.modifiedAt.compareTo(a.metadata.modifiedAt));
-    state = AsyncValue.data(entries);
+    // Reload from DB if anything changed
+    if (changed) {
+      await _loadFromLocalDb(fileService);
+    }
   }
 
   /// Load notebooks from local SQLite + filesystem cache.
+  /// Falls back to ZIP parsing only if DB metadata is incomplete.
   Future<void> _loadFromLocalCache(FileService fileService) async {
-    final syncService = _ref.read(syncServiceProvider);
-    final allMeta = await fileService.getAllNotebookMeta();
-    debugPrint('[Library] Loading ${allMeta.length} notebooks from local cache');
-
-    final entries = <NotebookEntry>[];
-    for (final row in allMeta) {
-      final id = row['id'] as String;
-      try {
-        final localData = await fileService.readNotebookFile(id);
-        if (localData != null) {
-          if (syncService != null) {
-            final parsed = syncService.parseNcnoteMetadata(localData);
-            entries.add(NotebookEntry(
-              metadata: parsed.metadata,
-              remotePath: row['remote_path'] as String,
-              lastSynced: row['remote_modified_at'] != null
-                  ? DateTime.tryParse(row['remote_modified_at'] as String)
-                  : null,
-              isLocal: row['sync_status'] != 'synced',
-            ));
-          }
-        }
-      } catch (e) {
-        debugPrint('[Library] Skipping cached notebook $id: $e');
-      }
-    }
-
-    entries.sort((a, b) => b.metadata.modifiedAt.compareTo(a.metadata.modifiedAt));
-    state = AsyncValue.data(entries);
+    await _loadFromLocalDb(fileService);
   }
 
   /// Crea un nuovo notebook vuoto. Salva localmente e tenta upload remoto.

@@ -2813,7 +2813,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                           if (liveState.metadata.chapters.isNotEmpty)
                             SizedBox(
                               height: 38,
-                              child: ListView(
+                              child: ScrollConfiguration(
+                                behavior: ScrollConfiguration.of(ctx).copyWith(
+                                  dragDevices: {
+                                    PointerDeviceKind.touch,
+                                    PointerDeviceKind.mouse,
+                                    PointerDeviceKind.trackpad,
+                                  },
+                                ),
+                                child: ListView(
                                 scrollDirection: Axis.horizontal,
                                 children: [
                                   ...liveState.metadata.chapters.asMap().entries.map((entry) {
@@ -2885,6 +2893,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
                                   ),
                                 ],
                               ),
+                            ),
                             ),
                         ],
                       ),
