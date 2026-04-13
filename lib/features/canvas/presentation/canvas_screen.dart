@@ -1084,14 +1084,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       String fileName = 'clipboard_image.png';
 
       if (reader.canProvide(Formats.png)) {
-        final data = await reader.readValue(Formats.png);
-        if (data != null) imageBytes = data;
+        final completer = Completer<Uint8List?>();
+        reader.getFile(Formats.png, (file) async {
+          final bytes = await file.readAll();
+          completer.complete(bytes);
+        }, onError: (_) => completer.complete(null));
+        imageBytes = await completer.future;
       } else if (reader.canProvide(Formats.jpeg)) {
-        final data = await reader.readValue(Formats.jpeg);
-        if (data != null) {
-          imageBytes = data;
-          fileName = 'clipboard_image.jpg';
-        }
+        final completer = Completer<Uint8List?>();
+        reader.getFile(Formats.jpeg, (file) async {
+          final bytes = await file.readAll();
+          completer.complete(bytes);
+        }, onError: (_) => completer.complete(null));
+        imageBytes = await completer.future;
+        if (imageBytes != null) fileName = 'clipboard_image.jpg';
       }
 
       if (imageBytes != null && imageBytes.isNotEmpty) {
