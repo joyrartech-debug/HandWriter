@@ -1,0 +1,23 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:handwriter/core/providers/auth_provider.dart';
+import 'package:handwriter/core/services/connectivity_service.dart';
+import 'package:handwriter/core/services/file_service.dart';
+
+/// Singleton FileService provider — must be initialized before use.
+final fileServiceProvider = Provider<FileService>((ref) {
+  return FileService();
+});
+
+/// ConnectivityService provider — depends on server URL from credentials.
+final connectivityServiceProvider = Provider<ConnectivityService?>((ref) {
+  final creds = ref.watch(credentialsProvider);
+  if (creds == null) return null;
+
+  final uri = Uri.parse(creds.serverUrl);
+  final service = ConnectivityService(
+    serverHost: uri.host,
+    serverPort: uri.hasPort ? uri.port : (uri.scheme == 'https' ? 443 : 80),
+  );
+  ref.onDispose(() => service.dispose());
+  return service;
+});

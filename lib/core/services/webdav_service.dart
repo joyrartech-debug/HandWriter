@@ -240,6 +240,35 @@ class WebDavService {
     await createDirectory(basePath);
   }
 
+  /// Ottieni la dimensione di un file remoto (Content-Length).
+  /// Returns null if the file doesn't exist or size can't be determined.
+  Future<int?> getContentLength(String remotePath) async {
+    final request = http.Request('PROPFIND', Uri.parse(_fullUrl(remotePath)));
+    request.headers.addAll({
+      ..._authHeaders,
+      'Depth': '0',
+      'Content-Type': 'application/xml; charset=utf-8',
+    });
+    request.body = '''<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:getcontentlength/>
+  </d:prop>
+</d:propfind>''';
+
+    final streamedResponse = await _client
+        .send(request)
+        .timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
+
+    if (streamedResponse.statusCode != 207) return null;
+
+    final body = await streamedResponse.stream.bytesToString();
+    final document = XmlDocument.parse(body);
+    final clElements = document.findAllElements('d:getcontentlength');
+    if (clElements.isEmpty || clElements.first.innerText.isEmpty) return null;
+    return int.tryParse(clElements.first.innerText);
+  }
+
   /// Parsa la risposta XML Multi-Status di PROPFIND.
   List<WebDavItem> _parseMultiStatus(String xml, String requestPath) {
     final document = XmlDocument.parse(xml);

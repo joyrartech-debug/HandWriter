@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/services/webdav_service.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
@@ -48,6 +49,53 @@ class SyncService {
 
   SyncService(this._webdav);
 
+  // ── Integrity Protection ──
+
+  /// Validates that a byte buffer is a well-formed ZIP with the required
+  /// ncnote entries (metadata.json + document.json).
+  /// Throws [CorruptedArchiveException] on failure.
+  static void validateNcnoteArchive(Uint8List data, {String context = ''}) {
+    if (data.length < 22) {
+      throw CorruptedArchiveException(
+        'Archive too small (${data.length} bytes)${context.isNotEmpty ? ' [$context]' : ''}',
+      );
+    }
+    // Quick check: ZIP magic number
+    if (data[0] != 0x50 || data[1] != 0x4B) {
+      throw CorruptedArchiveException(
+        'Not a ZIP file (bad magic)${context.isNotEmpty ? ' [$context]' : ''}',
+      );
+    }
+    // Full parse to find End of Central Directory
+    try {
+      final archive = ZipDecoder().decodeBytes(data);
+      final hasMetadata = archive.findFile(AppConfig.metadataFile) != null;
+      final hasDocument = archive.findFile(AppConfig.documentFile) != null;
+      if (!hasMetadata || !hasDocument) {
+        throw CorruptedArchiveException(
+          'Missing required files (metadata=$hasMetadata, document=$hasDocument)'
+          '${context.isNotEmpty ? ' [$context]' : ''}',
+        );
+      }
+    } on CorruptedArchiveException {
+      rethrow;
+    } catch (e) {
+      throw CorruptedArchiveException(
+        'ZIP parse failed: $e${context.isNotEmpty ? ' [$context]' : ''}',
+      );
+    }
+  }
+
+  /// Checks if the WebDAV server is reachable before starting a sync.
+  /// Returns true if a lightweight PROPFIND succeeds within timeout.
+  Future<bool> isServerReachable() async {
+    try {
+      return await _webdav.testConnection();
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Avvia il sync automatico periodico.
   void startAutoSync() {
     _autoSyncTimer?.cancel();
@@ -82,11 +130,18 @@ class SyncService {
   }
 
   /// Sincronizza tutti i notebook nella coda.
+  /// Checks network connectivity before starting.
   Future<void> syncAll() async {
     if (_isSyncing) return;
     _isSyncing = true;
 
     try {
+      // ── Network pre-check ──
+      if (!await isServerReachable()) {
+        debugPrint('[Sync] Server unreachable, skipping sync cycle.');
+        return;
+      }
+
       final entries = _syncQueue.values
           .where((e) => e.status == SyncStatus.modified)
           .toList();
@@ -181,9 +236,27 @@ class SyncService {
 
   /// Scarica un notebook dal server e lo decomprime.
   /// Ritorna metadata e document structure.
+  /// Validates ZIP integrity before parsing.
   Future<({NotebookMetadata metadata, DocumentStructure document})>
       downloadNotebook(String remotePath) async {
     final data = await _webdav.downloadFile(remotePath);
+
+    // ── Post-download size verification ──
+    try {
+      final expectedSize = await _webdav.getContentLength(remotePath);
+      if (expectedSize != null && expectedSize != data.length) {
+        throw CorruptedArchiveException(
+          'Download truncated for $remotePath: expected $expectedSize bytes, '
+          'got ${data.length} bytes',
+        );
+      }
+    } catch (e) {
+      if (e is CorruptedArchiveException) rethrow;
+      // Non-critical — proceed with ZIP validation
+    }
+
+    // ── Validate archive integrity ──
+    validateNcnoteArchive(data, context: 'download $remotePath');
     return _parseNcnoteArchive(data);
   }
 
@@ -295,19 +368,21 @@ class SyncService {
     return (metadata: metadata, document: document);
   }
 
+  /// Public wrapper for parsing .ncnote metadata from raw bytes.
+  /// Used by the library to read from local cache.
+  ({NotebookMetadata metadata, DocumentStructure document})
+      parseNcnoteMetadata(Uint8List data) => _parseNcnoteArchive(data);
+
   /// Lista i notebook .ncnote presenti sul server nella cartella base.
+  /// Throws on network/server errors so the UI can show them.
   Future<List<WebDavItem>> listRemoteNotebooks() async {
-    try {
-      await _webdav.ensureBaseDirectory();
-      final items = await _webdav.listDirectory(_webdav.basePath);
-      return items
-          .where((item) =>
-              !item.isDirectory &&
-              item.name.endsWith(AppConfig.fileExtension))
-          .toList();
-    } catch (e) {
-      return [];
-    }
+    await _webdav.ensureBaseDirectory();
+    final items = await _webdav.listDirectory(_webdav.basePath);
+    return items
+        .where((item) =>
+            !item.isDirectory &&
+            item.name.endsWith(AppConfig.fileExtension))
+        .toList();
   }
 
   /// Upload di un notebook completo sul server.
@@ -340,10 +415,36 @@ class SyncService {
       symbolLibraries: symbolLibraries,
     );
 
+    // ── Pre-upload validation ──
+    validateNcnoteArchive(package, context: 'pre-upload ${metadata.title}');
+    debugPrint('[Sync] Validated package for "${metadata.title}": '
+        '${package.length} bytes, uploading...');
+
     final etag = await _webdav.uploadFile(remotePath, package);
     if (etag != null) {
       _etagCache[metadata.id] = etag;
     }
+
+    // ── Post-upload size verification ──
+    try {
+      final remoteSize = await _webdav.getContentLength(remotePath);
+      if (remoteSize != null && remoteSize != package.length) {
+        debugPrint('[Sync] WARNING: Upload size mismatch for '
+            '"${metadata.title}": local=${package.length}, '
+            'remote=$remoteSize — upload may be corrupted!');
+        throw CorruptedArchiveException(
+          'Upload size mismatch: expected ${package.length} bytes, '
+          'server has $remoteSize bytes. Upload corrupted.',
+        );
+      }
+      debugPrint('[Sync] Upload verified for "${metadata.title}": '
+          '$remoteSize bytes on server.');
+    } catch (e) {
+      if (e is CorruptedArchiveException) rethrow;
+      // Non-critical: size check failed but upload itself succeeded
+      debugPrint('[Sync] Could not verify upload size: $e');
+    }
+
     return etag;
   }
 
@@ -365,9 +466,14 @@ class SyncService {
   }
 
   /// Scarica un notebook completo con tutte le pagine.
+  /// Validates ZIP integrity before parsing.
   Future<({NotebookMetadata metadata, DocumentStructure document, Map<String, PageData> pages, Map<String, Uint8List> assets, List<Map<String, dynamic>> symbolLibraries})>
       downloadNotebookFull(String remotePath) async {
     final data = await _webdav.downloadFile(remotePath);
+
+    // ── Validate before any parsing ──
+    validateNcnoteArchive(data, context: 'downloadFull $remotePath');
+
     final result = _parseNcnoteArchive(data);
     final pages = extractAllPages(data);
     final assets = extractAllAssets(data);
@@ -399,4 +505,13 @@ class SyncService {
   void dispose() {
     stopAutoSync();
   }
+}
+
+/// Exception thrown when a .ncnote archive is detected as corrupted.
+class CorruptedArchiveException implements Exception {
+  final String message;
+  CorruptedArchiveException(this.message);
+
+  @override
+  String toString() => 'CorruptedArchiveException: $message';
 }

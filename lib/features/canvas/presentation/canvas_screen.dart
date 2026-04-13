@@ -20,7 +20,7 @@ import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
 import 'package:handwriter/features/canvas/presentation/symbol_library_panel.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
-import 'package:pasteboard/pasteboard.dart';
+import 'package:super_clipboard/super_clipboard.dart';
 
 class CanvasScreen extends ConsumerStatefulWidget {
   const CanvasScreen({super.key});
@@ -1071,25 +1071,42 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
       return;
     }
 
-    // Otherwise try to read an image from the system clipboard
-    if (!kIsWeb && (io.Platform.isWindows || io.Platform.isMacOS || io.Platform.isLinux)) {
-      try {
-        final imageBytes = await Pasteboard.image;
-        if (imageBytes != null && imageBytes.isNotEmpty) {
-          // Place the image at the center of the current viewport
-          final s = ref.read(canvasProvider);
-          if (s == null) return;
-          final viewSize = (context.findRenderObject() as RenderBox?)?.size ?? const Size(400, 600);
-          final center = Offset(
-            (-s.panOffset.dx + viewSize.width / 2) / s.zoom,
-            (-s.panOffset.dy + viewSize.height / 2) / s.zoom,
-          );
-          _insertImage(imageBytes, 'clipboard_image.png', center);
-          return;
-        }
-      } catch (_) {
-        // Pasteboard not available or no image — fall through
+    // Try to read an image from the system clipboard (works on iOS, macOS, Windows, Linux, Android)
+    try {
+      final clipboard = SystemClipboard.instance;
+      if (clipboard == null) {
+        ref.read(canvasProvider.notifier).paste();
+        return;
       }
+      final reader = await clipboard.read();
+      // Check for PNG first, then JPEG, then any image format
+      Uint8List? imageBytes;
+      String fileName = 'clipboard_image.png';
+
+      if (reader.canProvide(Formats.png)) {
+        final data = await reader.readValue(Formats.png);
+        if (data != null) imageBytes = data;
+      } else if (reader.canProvide(Formats.jpeg)) {
+        final data = await reader.readValue(Formats.jpeg);
+        if (data != null) {
+          imageBytes = data;
+          fileName = 'clipboard_image.jpg';
+        }
+      }
+
+      if (imageBytes != null && imageBytes.isNotEmpty) {
+        final s = ref.read(canvasProvider);
+        if (s == null) return;
+        final viewSize = (context.findRenderObject() as RenderBox?)?.size ?? const Size(400, 600);
+        final center = Offset(
+          (-s.panOffset.dx + viewSize.width / 2) / s.zoom,
+          (-s.panOffset.dy + viewSize.height / 2) / s.zoom,
+        );
+        _insertImage(imageBytes, fileName, center);
+        return;
+      }
+    } catch (_) {
+      // Clipboard read failed — fall through
     }
 
     // Final fallback: try internal paste anyway (handles pendingPaste, etc.)

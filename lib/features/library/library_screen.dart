@@ -3,7 +3,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
+import 'package:handwriter/core/providers/offline_providers.dart';
+import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_screen.dart';
+import 'package:handwriter/shared/models/ncnote_format.dart';
 
 class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
@@ -16,7 +19,61 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   @override
   void initState() {
     super.initState();
-    Future.microtask(() => ref.read(notebookListProvider.notifier).refresh());
+    Future.microtask(() {
+      ref.read(notebookListProvider.notifier).refresh();
+      _startConnectivityMonitor();
+    });
+  }
+
+  void _startConnectivityMonitor() {
+    final connectivity = ref.read(connectivityServiceProvider);
+    if (connectivity == null) return;
+
+    connectivity.onReconnected = () {
+      // Auto-sync dirty notebooks when back online
+      _syncDirtyNotebooks();
+      // Refresh library to pick up remote changes
+      ref.read(notebookListProvider.notifier).refresh();
+    };
+    connectivity.startMonitoring();
+  }
+
+  Future<void> _syncDirtyNotebooks() async {
+    final fileService = ref.read(fileServiceProvider);
+    final syncService = ref.read(syncServiceProvider);
+    if (syncService == null) return;
+
+    final dirtyRows = await fileService.getDirtyNotebooks();
+    if (dirtyRows.isEmpty) return;
+
+    debugPrint('[Library] Syncing ${dirtyRows.length} dirty notebooks after reconnection');
+    for (final row in dirtyRows) {
+      final id = row['id'] as String;
+      final remotePath = row['remote_path'] as String;
+      try {
+        final localData = await fileService.readNotebookFile(id);
+        if (localData == null) continue;
+
+        SyncService.validateNcnoteArchive(localData, context: 'reconnect-sync $id');
+        final parsed = syncService.parseNcnoteMetadata(localData);
+        final pages = syncService.extractAllPages(localData);
+        final assets = syncService.extractAllAssets(localData);
+        final symbols = syncService.extractSymbolLibraries(localData);
+
+        final etag = await syncService.uploadNotebook(
+          remotePath: remotePath,
+          metadata: parsed.metadata,
+          document: parsed.document,
+          pages: pages,
+          assets: assets.isNotEmpty ? assets : null,
+          symbolLibraries: symbols.isNotEmpty ? symbols : null,
+        );
+        await fileService.markNotebookSynced(id, etag);
+        debugPrint('[Library] Synced $id (${parsed.metadata.title})');
+      } catch (e) {
+        debugPrint('[Library] Failed to sync $id: $e');
+      }
+    }
   }
 
   Future<void> _createNotebook() async {
@@ -175,9 +232,50 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
     try {
       final syncService = ref.read(syncServiceProvider);
-      if (syncService == null) return;
+      final fileService = ref.read(fileServiceProvider);
+
+      // Try local cache first (instant, works offline)
+      final localData = await fileService.readNotebookFile(entry.metadata.id);
+
+      if (localData != null && syncService != null) {
+        SyncService.validateNcnoteArchive(localData, context: 'open local ${entry.metadata.title}');
+        final result = syncService.parseNcnoteMetadata(localData);
+        final pages = syncService.extractAllPages(localData);
+        final assets = syncService.extractAllAssets(localData);
+        final symbols = syncService.extractSymbolLibraries(localData);
+
+        ref.read(canvasProvider.notifier).openNotebook(
+          metadata: result.metadata,
+          document: result.document,
+          pages: pages,
+          remotePath: entry.remotePath,
+          assets: assets,
+          symbolLibraries: symbols.isNotEmpty
+              ? symbols.map((j) => SymbolLibrary.fromJson(j)).toList()
+              : null,
+        );
+
+        if (mounted) {
+          Navigator.pop(context);
+          Navigator.push(context, MaterialPageRoute(builder: (_) => const CanvasScreen()));
+        }
+        return;
+      }
+
+      // No local cache — must download from server
+      if (syncService == null) throw Exception('Non connesso e nessuna copia locale');
 
       final result = await syncService.downloadNotebookFull(entry.remotePath);
+
+      // Cache it locally for next time
+      try {
+        final webdav = ref.read(webdavServiceProvider);
+        if (webdav != null) {
+          final rawData = await webdav.downloadFile(entry.remotePath);
+          await fileService.saveNotebookFile(entry.metadata.id, rawData);
+        }
+      } catch (_) {}
+
       ref.read(canvasProvider.notifier).openNotebook(
         metadata: result.metadata,
         document: result.document,

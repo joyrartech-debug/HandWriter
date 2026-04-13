@@ -5,16 +5,20 @@
 import FlutterMacOS
 import Foundation
 
+import device_info_plus
 import file_picker
-import pasteboard
+import irondash_engine_context
 import printing
 import shared_preferences_foundation
 import sqflite_darwin
+import super_native_extensions
 
 func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
+  DeviceInfoPlusMacosPlugin.register(with: registry.registrar(forPlugin: "DeviceInfoPlusMacosPlugin"))
   FilePickerPlugin.register(with: registry.registrar(forPlugin: "FilePickerPlugin"))
-  PasteboardPlugin.register(with: registry.registrar(forPlugin: "PasteboardPlugin"))
+  IrondashEngineContextPlugin.register(with: registry.registrar(forPlugin: "IrondashEngineContextPlugin"))
   PrintingPlugin.register(with: registry.registrar(forPlugin: "PrintingPlugin"))
   SharedPreferencesPlugin.register(with: registry.registrar(forPlugin: "SharedPreferencesPlugin"))
   SqflitePlugin.register(with: registry.registrar(forPlugin: "SqflitePlugin"))
+  SuperNativeExtensionsPlugin.register(with: registry.registrar(forPlugin: "SuperNativeExtensionsPlugin"))
 }

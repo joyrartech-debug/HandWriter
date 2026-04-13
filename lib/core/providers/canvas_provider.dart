@@ -5,6 +5,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
+import 'package:handwriter/core/providers/offline_providers.dart';
+import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -4153,12 +4155,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null || !state!.isDirty) return;
     final s = state!;
     final syncService = _ref.read(syncServiceProvider);
+    final fileService = _ref.read(fileServiceProvider);
     if (syncService == null) return;
 
     final updatedMeta = s.metadata.copyWith(modifiedAt: DateTime.now());
 
-    await syncService.uploadNotebook(
-      remotePath: s.remotePath,
+    // 1. Build the package once
+    final package = syncService.createNcnotePackage(
       metadata: updatedMeta,
       document: s.document,
       pages: s.pages,
@@ -4167,6 +4170,45 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           ? s.symbolLibraries.map((l) => l.toJson()).toList()
           : null,
     );
+
+    // 2. Validate before persisting
+    SyncService.validateNcnoteArchive(package, context: 'save ${updatedMeta.title}');
+
+    // 3. Always save locally first (instant, works offline)
+    await fileService.saveNotebookFile(updatedMeta.id, package);
+    await fileService.upsertNotebookMeta(
+      id: updatedMeta.id,
+      title: updatedMeta.title,
+      remotePath: s.remotePath,
+      localModifiedAt: updatedMeta.modifiedAt,
+      syncStatus: 'modified',
+      fileSize: package.length,
+      coverColor: updatedMeta.coverColor,
+      paperType: updatedMeta.paperType,
+      pageCount: updatedMeta.pageCount,
+      createdAt: updatedMeta.createdAt,
+    );
+    debugPrint('[Canvas] Saved locally: ${updatedMeta.title} (${package.length} bytes)');
+
+    // 4. Try remote upload (non-blocking: failure = stays in dirty queue)
+    try {
+      final etag = await syncService.uploadNotebook(
+        remotePath: s.remotePath,
+        metadata: updatedMeta,
+        document: s.document,
+        pages: s.pages,
+        assets: s.assetBytes.isNotEmpty ? s.assetBytes : null,
+        symbolLibraries: s.symbolLibraries.isNotEmpty
+            ? s.symbolLibraries.map((l) => l.toJson()).toList()
+            : null,
+      );
+      await fileService.markNotebookSynced(updatedMeta.id, etag);
+      debugPrint('[Canvas] Synced to server: ${updatedMeta.title}');
+    } catch (e) {
+      // Offline or server error — local copy is safe, will sync later
+      debugPrint('[Canvas] Remote sync deferred (offline?): $e');
+      await fileService.markNotebookDirty(updatedMeta.id);
+    }
 
     // Merge into the CURRENT state (not the stale snapshot) so strokes
     // drawn during the async upload are preserved.
