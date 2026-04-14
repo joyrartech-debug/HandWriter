@@ -3,8 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 
 /// A slim animated banner that slides in from the top when remote changes
-/// are detected. Tapping it opens a detail sheet; the user can accept
-/// or dismiss the incoming edits.
+/// are detected. Tapping it opens a detail sheet where the user can see
+/// per-page diffs and navigate directly to changed pages.
 class RemoteChangesBanner extends ConsumerWidget {
   const RemoteChangesBanner({super.key});
 
@@ -63,6 +63,7 @@ class _AnimatedBannerState extends ConsumerState<_AnimatedBanner>
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
+      isScrollControlled: true,
       builder: (_) => _RemoteChangesSheet(pending: widget.pending, ref: ref),
     );
   }
@@ -115,11 +116,9 @@ class _AnimatedBannerState extends ConsumerState<_AnimatedBanner>
                   ),
                   const SizedBox(width: 8),
                   _ActionChip(
-                    label: 'Accetta',
-                    color: const Color(0xFF22C55E),
-                    onTap: () {
-                      ref.read(canvasProvider.notifier).acceptRemoteChanges();
-                    },
+                    label: 'Vedi dettagli',
+                    color: const Color(0xFF3B82F6),
+                    onTap: _showDetails,
                   ),
                   const SizedBox(width: 6),
                   _ActionChip(
@@ -183,7 +182,10 @@ class _RemoteChangesSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final maxHeight = MediaQuery.of(context).size.height * 0.65;
+
     return Container(
+      constraints: BoxConstraints(maxHeight: maxHeight),
       decoration: const BoxDecoration(
         color: Color(0xFF1E293B),
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -215,72 +217,71 @@ class _RemoteChangesSheet extends StatelessWidget {
                 child: const Icon(Icons.devices, color: Color(0xFF3B82F6), size: 24),
               ),
               const SizedBox(width: 14),
-              const Expanded(
-                child: Text(
-                  'Modifiche in arrivo',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                  ),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Modifiche in arrivo',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Tocca una pagina per applicare e andare lì',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.5),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 20),
+          const SizedBox(height: 16),
 
-          // ── Change list ──
-          if (pending.modifiedPageCount > 0)
-            _ChangeRow(
-              icon: Icons.edit_note,
-              iconColor: const Color(0xFFFBBF24),
-              label: pending.modifiedPageCount == 1
-                  ? '1 pagina modificata'
-                  : '${pending.modifiedPageCount} pagine modificate',
-            ),
-          if (pending.newPageCount > 0)
-            _ChangeRow(
-              icon: Icons.add_circle_outline,
-              iconColor: const Color(0xFF22C55E),
-              label: pending.newPageCount == 1
-                  ? '1 nuova pagina'
-                  : '${pending.newPageCount} nuove pagine',
-            ),
-          if (pending.deletedPageCount > 0)
-            _ChangeRow(
-              icon: Icons.remove_circle_outline,
-              iconColor: const Color(0xFFEF4444),
-              label: pending.deletedPageCount == 1
-                  ? '1 pagina rimossa'
-                  : '${pending.deletedPageCount} pagine rimosse',
-            ),
+          // ── Summary counts ──
           if (pending.newAssetCount > 0)
-            _ChangeRow(
-              icon: Icons.image_outlined,
-              iconColor: const Color(0xFF8B5CF6),
-              label: pending.newAssetCount == 1
-                  ? '1 nuova immagine'
-                  : '${pending.newAssetCount} nuove immagini',
-            ),
-
-          // ── Affected pages ──
-          if (pending.changedPageNames.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.05),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                pending.changedPageNames.join(', '),
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Row(
+                children: [
+                  const Icon(Icons.image_outlined, color: Color(0xFF8B5CF6), size: 18),
+                  const SizedBox(width: 8),
+                  Text(
+                    pending.newAssetCount == 1
+                        ? '1 nuova immagine'
+                        : '${pending.newAssetCount} nuove immagini',
+                    style: const TextStyle(color: Colors.white54, fontSize: 13),
+                  ),
+                ],
               ),
             ),
-          ],
 
-          const SizedBox(height: 24),
+          // ── Per-page change list ──
+          Flexible(
+            child: ListView.separated(
+              shrinkWrap: true,
+              itemCount: pending.changedPages.length,
+              separatorBuilder: (_, __) => const SizedBox(height: 6),
+              itemBuilder: (context, index) {
+                final detail = pending.changedPages[index];
+                return _PageChangeCard(
+                  detail: detail,
+                  onTap: () {
+                    ref.read(canvasProvider.notifier).acceptAndGoToPage(detail.pageIndex);
+                    Navigator.of(context).pop();
+                  },
+                );
+              },
+            ),
+          ),
+
+          const SizedBox(height: 20),
 
           // ── Action buttons ──
           Row(
@@ -310,7 +311,7 @@ class _RemoteChangesSheet extends StatelessWidget {
                     Navigator.of(context).pop();
                   },
                   icon: const Icon(Icons.check, size: 18),
-                  label: const Text('Applica'),
+                  label: const Text('Applica tutto'),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF22C55E),
                     foregroundColor: Colors.white,
@@ -329,31 +330,162 @@ class _RemoteChangesSheet extends StatelessWidget {
   }
 }
 
-class _ChangeRow extends StatelessWidget {
-  final IconData icon;
-  final Color iconColor;
-  final String label;
+// ─── Per-page change card ─────────────────────────────────────
 
-  const _ChangeRow({
-    required this.icon,
-    required this.iconColor,
-    required this.label,
-  });
+class _PageChangeCard extends StatelessWidget {
+  final PageChangeDetail detail;
+  final VoidCallback onTap;
+
+  const _PageChangeCard({required this.detail, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 5),
-      child: Row(
-        children: [
-          Icon(icon, color: iconColor, size: 20),
-          const SizedBox(width: 10),
-          Text(
-            label,
-            style: const TextStyle(color: Colors.white70, fontSize: 14),
+    final isNew = detail.changeType == PageChangeType.added;
+    final badgeColor = isNew ? const Color(0xFF22C55E) : const Color(0xFFFBBF24);
+    final badgeLabel = isNew ? 'NUOVA' : 'MODIFICATA';
+    final badgeIcon = isNew ? Icons.add_circle_outline : Icons.edit_note;
+
+    return Material(
+      color: Colors.white.withValues(alpha: 0.05),
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              // Page number square
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: badgeColor.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  '${detail.pageNumber}',
+                  style: TextStyle(
+                    color: badgeColor,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+
+              // Page info
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Title row: "Pagina 3" + chapter badge
+                    Row(
+                      children: [
+                        Text(
+                          'Pagina ${detail.pageNumber}',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (detail.chapterName != null) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFF3B82F6).withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              detail.chapterName!,
+                              style: const TextStyle(
+                                color: Color(0xFF93C5FD),
+                                fontSize: 10,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+
+                    // Element diff summary
+                    if (detail.hasElementDiff)
+                      _ElementDiffRow(detail: detail)
+                    else
+                      Row(
+                        children: [
+                          Icon(badgeIcon, color: badgeColor, size: 14),
+                          const SizedBox(width: 4),
+                          Text(
+                            badgeLabel,
+                            style: TextStyle(color: badgeColor, fontSize: 11, fontWeight: FontWeight.w600),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ),
+
+              // Navigate arrow
+              const Icon(Icons.chevron_right, color: Colors.white30, size: 22),
+            ],
           ),
-        ],
+        ),
       ),
+    );
+  }
+}
+
+// ─── Element diff summary for a page ──────────────────────────
+
+class _ElementDiffRow extends StatelessWidget {
+  final PageChangeDetail detail;
+  const _ElementDiffRow({required this.detail});
+
+  @override
+  Widget build(BuildContext context) {
+    final diffs = <Widget>[];
+
+    void addDiff(IconData icon, int local, int remote) {
+      final delta = remote - local;
+      if (delta == 0) return;
+      final color = delta > 0 ? const Color(0xFF22C55E) : const Color(0xFFEF4444);
+      final sign = delta > 0 ? '+' : '';
+      diffs.add(
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: Colors.white38, size: 13),
+            const SizedBox(width: 2),
+            Text(
+              '$sign$delta',
+              style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      );
+    }
+
+    addDiff(Icons.gesture, detail.localStrokeCount, detail.remoteStrokeCount);
+    addDiff(Icons.image_outlined, detail.localImageCount, detail.remoteImageCount);
+    addDiff(Icons.crop_square, detail.localShapeCount, detail.remoteShapeCount);
+    addDiff(Icons.text_fields, detail.localTextCount, detail.remoteTextCount);
+
+    if (diffs.isEmpty) {
+      return const Text(
+        'Contenuto aggiornato',
+        style: TextStyle(color: Colors.white38, fontSize: 11),
+      );
+    }
+
+    return Wrap(
+      spacing: 10,
+      children: diffs,
     );
   }
 }
@@ -361,7 +493,7 @@ class _ChangeRow extends StatelessWidget {
 String _buildSummaryText(PendingRemoteChanges p) {
   final parts = <String>[];
   if (p.modifiedPageCount > 0) {
-    parts.add('${p.modifiedPageCount} modificat${p.modifiedPageCount == 1 ? 'a' : 'e'}');
+    parts.add('${p.modifiedPageCount} pag. modificat${p.modifiedPageCount == 1 ? 'a' : 'e'}');
   }
   if (p.newPageCount > 0) {
     parts.add('${p.newPageCount} nuov${p.newPageCount == 1 ? 'a' : 'e'}');

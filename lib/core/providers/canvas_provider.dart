@@ -247,14 +247,55 @@ class SymbolLibrary {
 //  PENDING REMOTE CHANGES — shown to user for accept/dismiss
 // ═══════════════════════════════════════════════════════════════
 
+enum PageChangeType { modified, added, deleted }
+
+class PageChangeDetail {
+  final String fileName;
+  final int pageNumber;
+  final int pageIndex;
+  final String? chapterName;
+  final PageChangeType changeType;
+  /// Element count diff: e.g. {strokes: +3, images: -1}
+  final int localStrokeCount;
+  final int remoteStrokeCount;
+  final int localImageCount;
+  final int remoteImageCount;
+  final int localShapeCount;
+  final int remoteShapeCount;
+  final int localTextCount;
+  final int remoteTextCount;
+
+  const PageChangeDetail({
+    required this.fileName,
+    required this.pageNumber,
+    required this.pageIndex,
+    this.chapterName,
+    required this.changeType,
+    this.localStrokeCount = 0,
+    this.remoteStrokeCount = 0,
+    this.localImageCount = 0,
+    this.remoteImageCount = 0,
+    this.localShapeCount = 0,
+    this.remoteShapeCount = 0,
+    this.localTextCount = 0,
+    this.remoteTextCount = 0,
+  });
+
+  bool get hasElementDiff =>
+      localStrokeCount != remoteStrokeCount ||
+      localImageCount != remoteImageCount ||
+      localShapeCount != remoteShapeCount ||
+      localTextCount != remoteTextCount;
+}
+
 class PendingRemoteChanges {
   final NotebookMetadata metadata;
   final DocumentStructure document;
   final Map<String, PageData> pages;
   final Map<String, Uint8List> assets;
 
-  /// Human-readable summary of what changed.
-  final List<String> changedPageNames;
+  /// Per-page change details for the UI.
+  final List<PageChangeDetail> changedPages;
   final int newPageCount;
   final int modifiedPageCount;
   final int deletedPageCount;
@@ -265,7 +306,7 @@ class PendingRemoteChanges {
     required this.document,
     required this.pages,
     required this.assets,
-    this.changedPageNames = const [],
+    this.changedPages = const [],
     this.newPageCount = 0,
     this.modifiedPageCount = 0,
     this.deletedPageCount = 0,
@@ -4577,21 +4618,32 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     if (anyPageChanged && state != null && !state!.isDirty && !_isSyncing) {
-      // ── Build diff summary for the user ──
-      final changedNames = <String>[];
+      // ── Build per-page change details ──
+      final details = <PageChangeDetail>[];
       var newCount = 0;
       var modCount = 0;
       for (final fileName in pagesToPull) {
         final remotePage = updatedPages[fileName];
         final localPage = s.pages[fileName];
         if (remotePage == null) continue;
-        final label = 'Pagina ${remotePage.pageNumber}';
-        changedNames.add(label);
-        if (localPage == null) {
-          newCount++;
-        } else {
-          modCount++;
-        }
+        final isNew = localPage == null;
+        if (isNew) newCount++; else modCount++;
+        final pageIndex = remoteMeta.document.pages.indexWhere((e) => e.fileName == fileName);
+        final pageEntry = pageIndex >= 0 ? remoteMeta.document.pages[pageIndex] : null;
+        final chapterName = _chapterNameForPage(pageEntry, remoteMeta.metadata);
+        final localCounts = _elementCounts(localPage);
+        final remoteCounts = _elementCounts(remotePage);
+        details.add(PageChangeDetail(
+          fileName: fileName,
+          pageNumber: remotePage.pageNumber,
+          pageIndex: pageIndex >= 0 ? pageIndex : 0,
+          chapterName: chapterName,
+          changeType: isNew ? PageChangeType.added : PageChangeType.modified,
+          localStrokeCount: localCounts.$1, remoteStrokeCount: remoteCounts.$1,
+          localImageCount: localCounts.$2, remoteImageCount: remoteCounts.$2,
+          localShapeCount: localCounts.$3, remoteShapeCount: remoteCounts.$3,
+          localTextCount: localCounts.$4, remoteTextCount: remoteCounts.$4,
+        ));
       }
 
       final pending = PendingRemoteChanges(
@@ -4599,7 +4651,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         document: remoteMeta.document,
         pages: updatedPages,
         assets: updatedAssets,
-        changedPageNames: changedNames,
+        changedPages: details,
         newPageCount: newCount,
         modifiedPageCount: modCount,
         newAssetCount: missingAssets.length,
@@ -4650,23 +4702,35 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     if (anyChanged && state != null && !state!.isDirty && !_isSyncing) {
-      // ── Build diff summary ──
-      final changedNames = <String>[];
+      // ── Build per-page change details ──
+      final details = <PageChangeDetail>[];
       var newCount = 0;
       var modCount = 0;
       for (final entry in remoteData.pages.entries) {
         final localPage = s.pages[entry.key];
-        if (localPage == null ||
+        final isChanged = localPage == null ||
             localPage.modifiedAt == null ||
             (entry.value.modifiedAt != null &&
-             entry.value.modifiedAt!.isAfter(localPage.modifiedAt!))) {
-          final label = 'Pagina ${entry.value.pageNumber}';
-          changedNames.add(label);
-          if (localPage == null) {
-            newCount++;
-          } else {
-            modCount++;
-          }
+             entry.value.modifiedAt!.isAfter(localPage.modifiedAt!));
+        if (isChanged) {
+          final isNew = localPage == null;
+          if (isNew) newCount++; else modCount++;
+          final pageIndex = remoteData.document.pages.indexWhere((e) => e.fileName == entry.key);
+          final pageEntry = pageIndex >= 0 ? remoteData.document.pages[pageIndex] : null;
+          final chapterName = _chapterNameForPage(pageEntry, remoteData.metadata);
+          final localCounts = _elementCounts(localPage);
+          final remoteCounts = _elementCounts(entry.value);
+          details.add(PageChangeDetail(
+            fileName: entry.key,
+            pageNumber: entry.value.pageNumber,
+            pageIndex: pageIndex >= 0 ? pageIndex : 0,
+            chapterName: chapterName,
+            changeType: isNew ? PageChangeType.added : PageChangeType.modified,
+            localStrokeCount: localCounts.$1, remoteStrokeCount: remoteCounts.$1,
+            localImageCount: localCounts.$2, remoteImageCount: remoteCounts.$2,
+            localShapeCount: localCounts.$3, remoteShapeCount: remoteCounts.$3,
+            localTextCount: localCounts.$4, remoteTextCount: remoteCounts.$4,
+          ));
         }
       }
 
@@ -4679,7 +4743,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         document: remoteData.document,
         pages: updatedPages,
         assets: updatedAssets,
-        changedPageNames: changedNames,
+        changedPages: details,
         newPageCount: newCount,
         modifiedPageCount: modCount,
         newAssetCount: newAssets,
@@ -4724,6 +4788,36 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null) return;
     state = state!.copyWith(clearPendingRemoteChanges: true);
     print('[Canvas] User dismissed remote changes');
+  }
+
+  /// Accept remote changes and navigate to a specific page.
+  void acceptAndGoToPage(int pageIndex) {
+    acceptRemoteChanges();
+    if (state != null && pageIndex >= 0 && pageIndex < state!.document.pages.length) {
+      goToPage(pageIndex);
+    }
+  }
+
+  /// Resolve chapter name for a page entry.
+  static String? _chapterNameForPage(PageEntry? pageEntry, NotebookMetadata meta) {
+    if (pageEntry == null || pageEntry.chapterId == null) return null;
+    final idx = meta.chapters.indexWhere((c) => c.id == pageEntry.chapterId);
+    return idx >= 0 ? meta.chapters[idx].title : null;
+  }
+
+  /// Count elements by type in a page: (strokes, images, shapes, texts).
+  static (int, int, int, int) _elementCounts(PageData? page) {
+    if (page == null) return (0, 0, 0, 0);
+    var strokes = 0, images = 0, shapes = 0, texts = 0;
+    for (final el in page.layers.content) {
+      el.map(
+        stroke: (_) => strokes++,
+        image: (_) => images++,
+        shape: (_) => shapes++,
+        text: (_) => texts++,
+      );
+    }
+    return (strokes, images, shapes, texts);
   }
 
   /// Track an asset as dirty when added/modified (e.g. image paste/add).
