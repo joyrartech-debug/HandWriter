@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:printing/printing.dart';
 import 'package:pdf/pdf.dart' as pw_pdf;
 import 'package:pdf/widgets.dart' as pw;
@@ -1139,6 +1140,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
   // ── Image / PDF insertion ──
 
+  Future<void> _captureAndInsertImage(Offset pagePos) async {
+    final picker = ImagePicker();
+    final photo = await picker.pickImage(source: ImageSource.camera);
+    if (photo == null) return;
+    final bytes = await photo.readAsBytes();
+    _insertImage(bytes, photo.name, pagePos);
+  }
+
   Future<void> _pickAndInsertImage(Offset pagePos) async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
@@ -2212,6 +2221,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         const PopupMenuItem(value: 'paste_clipboard_image', child: _MenuRow(Icons.content_paste_rounded, 'Incolla immagine', null)),
         // Insert
         const PopupMenuItem(value: 'insert_image', child: _MenuRow(Icons.image_rounded, 'Inserisci immagine', null)),
+        const PopupMenuItem(value: 'insert_camera', child: _MenuRow(Icons.camera_alt_rounded, 'Scatta foto', null)),
         const PopupMenuItem(value: 'insert_text', child: _MenuRow(Icons.text_fields_rounded, 'Inserisci testo', null)),
         // Symbols
         if (hasSymbols)
@@ -2240,6 +2250,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         case 'select_all': notifier.selectAll(); break;
         case 'clear_page': _confirmClearPage(); break;
         case 'insert_image': _pickAndInsertImage(pagePos); break;
+        case 'insert_camera': _captureAndInsertImage(pagePos); break;
         case 'insert_text': _handleTextTool(localPos, state, canvasSize); break;
         case 'select_element':
           if (tappedElement != null) notifier.selectElement(tappedElement);
