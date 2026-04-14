@@ -1141,11 +1141,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   // ── Image / PDF insertion ──
 
   Future<void> _captureAndInsertImage(Offset pagePos) async {
+    // Capture ref before the async gap — the widget may be unmounted
+    // when the camera activity returns on Android.
+    final notifier = ref.read(canvasProvider.notifier);
     final picker = ImagePicker();
     final photo = await picker.pickImage(source: ImageSource.camera);
     if (photo == null) return;
-    final bytes = await photo.readAsBytes();
-    _insertImage(bytes, photo.name, pagePos);
+    final file = io.File(photo.path);
+    if (!await file.exists()) return;
+    final bytes = await file.readAsBytes();
+    final dims = _decodeImageDimensions(bytes);
+    double w = dims?.width.toDouble() ?? 300;
+    double h = dims?.height.toDouble() ?? 200;
+    if (w > 300) {
+      final s = 300 / w;
+      w *= s;
+      h *= s;
+    }
+    notifier.addImageElement(pagePos, photo.name, bytes, w, h);
   }
 
   Future<void> _pickAndInsertImage(Offset pagePos) async {

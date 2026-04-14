@@ -4294,6 +4294,35 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, Uint8List>? dirtyAssets,
     List<Map<String, dynamic>>? symbolLibraries,
   }) async {
+    _isSyncing = true;
+    try {
+      await _persistAndSyncInner(
+        fileService: fileService,
+        syncService: syncService,
+        package: package,
+        updatedMeta: updatedMeta,
+        document: document,
+        remotePath: remotePath,
+        dirtyPages: dirtyPages,
+        dirtyAssets: dirtyAssets,
+        symbolLibraries: symbolLibraries,
+      );
+    } finally {
+      _isSyncing = false;
+    }
+  }
+
+  Future<void> _persistAndSyncInner({
+    required dynamic fileService,
+    required SyncService syncService,
+    required Uint8List package,
+    required NotebookMetadata updatedMeta,
+    required DocumentStructure document,
+    required String remotePath,
+    required Map<String, PageData> dirtyPages,
+    Map<String, Uint8List>? dirtyAssets,
+    List<Map<String, dynamic>>? symbolLibraries,
+  }) async {
     // Local file write (full ZIP for offline cache)
     try {
       await fileService.saveNotebookFile(updatedMeta.id, package);
@@ -4373,12 +4402,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   bool _isPulling = false;
+  bool _isSyncing = false; // true while _persistAndSyncAsync is running
 
   /// Checks if the remote metadata.json ETag has changed, then pulls
   /// only the pages that differ. Falls back to checking the .ncnote ZIP
   /// for devices that don't use delta sync. Merges into the live canvas.
   Future<void> _pullRemoteChanges() async {
-    if (_isPulling || state == null || state!.isDirty) return;
+    if (_isPulling || _isSyncing || state == null || state!.isDirty) return;
     _isPulling = true;
 
     try {
@@ -4509,7 +4539,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       print('[Canvas] Pulled ${assetResults.where((r) => r.$2 != null).length} assets in parallel');
     }
 
-    if (anyPageChanged && state != null && !state!.isDirty) {
+    if (anyPageChanged && state != null && !state!.isDirty && !_isSyncing) {
       _lastSyncedPages = Map.of(updatedPages);
       state = state!.copyWith(
         metadata: remoteMeta.metadata,
@@ -4566,7 +4596,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
-    if (anyChanged && state != null && !state!.isDirty) {
+    if (anyChanged && state != null && !state!.isDirty && !_isSyncing) {
       _lastSyncedPages = Map.of(updatedPages);
       state = state!.copyWith(
         metadata: remoteData.metadata,

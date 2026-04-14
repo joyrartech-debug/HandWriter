@@ -459,10 +459,14 @@ class SyncService {
       if (remoteSize != null && remoteSize != package.length) {
         debugPrint('[Sync] WARNING: Upload size mismatch for '
             '"${metadata.title}": local=${package.length}, '
-            'remote=$remoteSize — upload may be corrupted!');
+            'remote=$remoteSize — deleting corrupted upload!');
+        // Remove the corrupted file so other devices don't download it.
+        try {
+          await _webdav.delete(remotePath);
+        } catch (_) {}
         throw CorruptedArchiveException(
           'Upload size mismatch: expected ${package.length} bytes, '
-          'server has $remoteSize bytes. Upload corrupted.',
+          'server has $remoteSize bytes. Upload corrupted and removed.',
         );
       }
       debugPrint('[Sync] Upload verified for "${metadata.title}": '
@@ -490,10 +494,13 @@ class SyncService {
       final remoteSize = await _webdav.getContentLength(remotePath);
       if (remoteSize != null && remoteSize != package.length) {
         debugPrint('[Sync] WARNING: Upload size mismatch: '
-            'local=${package.length}, remote=$remoteSize');
+            'local=${package.length}, remote=$remoteSize — deleting corrupted upload!');
+        try {
+          await _webdav.delete(remotePath);
+        } catch (_) {}
         throw CorruptedArchiveException(
           'Upload size mismatch: expected ${package.length} bytes, '
-          'server has $remoteSize bytes.',
+          'server has $remoteSize bytes. Upload corrupted and removed.',
         );
       }
       debugPrint('[Sync] Upload verified: $remoteSize bytes on server.');
@@ -519,30 +526,25 @@ class SyncService {
       '${_webdav.basePath}${AppConfig.deltaSyncDir}$notebookId/';
 
   /// Creates the exploded folder structure on the server (idempotent).
+  /// Throws if any directory creation fails (except 405 = already exists).
   Future<void> _ensureDeltaDir(String notebookId) async {
     if (_explodedDirsReady.contains(notebookId)) return;
     final dir = _deltaDir(notebookId);
     debugPrint('[Sync] Ensuring delta dir: $dir');
+
+    // Each MKCOL tolerates 405 (already exists) inside createDirectory().
+    // If it fails for a real reason we must NOT mark the dir as ready.
     try {
-      await _webdav.createDirectory('${_webdav.basePath}${AppConfig.deltaSyncDir}');
+      await _webdav.createDirectory(
+          '${_webdav.basePath}${AppConfig.deltaSyncDir}');
     } catch (e) {
       debugPrint('[Sync] MKCOL .sync/ failed (may already exist): $e');
     }
-    try {
-      await _webdav.createDirectory(dir);
-    } catch (e) {
-      debugPrint('[Sync] MKCOL $dir failed: $e');
-    }
-    try {
-      await _webdav.createDirectory('${dir}pages/');
-    } catch (e) {
-      debugPrint('[Sync] MKCOL ${dir}pages/ failed: $e');
-    }
-    try {
-      await _webdav.createDirectory('${dir}assets/');
-    } catch (e) {
-      debugPrint('[Sync] MKCOL ${dir}assets/ failed: $e');
-    }
+    // These are critical — propagate real errors.
+    await _webdav.createDirectory(dir);
+    await _webdav.createDirectory('${dir}pages/');
+    await _webdav.createDirectory('${dir}assets/');
+
     _explodedDirsReady.add(notebookId);
   }
 
@@ -556,9 +558,15 @@ class SyncService {
   /// Delta upload: sends only the changed pages + metadata + document.
   /// Returns the ETag from the metadata upload (used as sync token).
   ///
-  /// Typical payload for a single-page edit:
-  ///   metadata.json (~500 B) + document.json (~2 KB) + page_XXX.json (~50 KB)
-  ///   ≈ 50 KB instead of the full 12 MB+ .ncnote ZIP.
+  /// Upload order ensures consistency:
+  ///  1. Assets + pages in parallel (data files)
+  ///  2. document.json (structure)
+  ///  3. metadata.json LAST (acts as "commit" — other devices detect
+  ///     changes via the metadata ETag, so updating it last guarantees
+  ///     that all referenced data is already on the server).
+  ///
+  /// If any data upload fails, metadata is NOT updated → other devices
+  /// see the old consistent state rather than a partial one.
   Future<String?> syncDelta({
     required String notebookId,
     required NotebookMetadata metadata,
@@ -570,51 +578,51 @@ class SyncService {
     await _ensureDeltaDir(notebookId);
     final dir = _deltaDir(notebookId);
 
-    // Upload dirty pages in parallel
-    final pageFutures = dirtyPages.entries.map((e) {
+    // ── Phase 1: Upload data files (pages + assets + symbols) in parallel ──
+    final dataFutures = <Future<String?>>[];
+
+    // Dirty pages
+    for (final e in dirtyPages.entries) {
       final bytes = Uint8List.fromList(
         utf8.encode(jsonEncode(e.value.toJson())),
       );
-      return _webdav.uploadFile('${dir}pages/${e.key}', bytes);
-    });
+      dataFutures.add(_webdav.uploadFile('${dir}pages/${e.key}', bytes));
+    }
 
-    // Upload metadata + document in parallel with pages
-    final metaBytes = Uint8List.fromList(
-      utf8.encode(jsonEncode(metadata.toJson())),
-    );
-    final docBytes = Uint8List.fromList(
-      utf8.encode(jsonEncode(document.toJson())),
-    );
-
-    final allFutures = <Future<String?>>[
-      ...pageFutures,
-      _webdav.uploadFile('${dir}metadata.json', metaBytes),
-      _webdav.uploadFile('${dir}document.json', docBytes),
-    ];
-
-    // Upload dirty assets
+    // Dirty assets
     if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
       for (final e in dirtyAssets.entries) {
-        allFutures.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
+        dataFutures.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
       }
     }
 
-    // Upload symbols if provided
+    // Symbols
     if (symbolLibraries != null && symbolLibraries.isNotEmpty) {
       final symBytes = Uint8List.fromList(
         utf8.encode(jsonEncode(symbolLibraries)),
       );
-      allFutures.add(_webdav.uploadFile('${dir}symbols.json', symBytes));
+      dataFutures.add(_webdav.uploadFile('${dir}symbols.json', symBytes));
     }
 
-    final results = await Future.wait(allFutures);
+    // All data uploads must succeed before we update the "pointers".
+    await Future.wait(dataFutures);
+
+    // ── Phase 2: Upload document.json ──
+    final docBytes = Uint8List.fromList(
+      utf8.encode(jsonEncode(document.toJson())),
+    );
+    await _webdav.uploadFile('${dir}document.json', docBytes);
+
+    // ── Phase 3: Upload metadata.json LAST (commit marker) ──
+    final metaBytes = Uint8List.fromList(
+      utf8.encode(jsonEncode(metadata.toJson())),
+    );
+    final metaEtag = await _webdav.uploadFile('${dir}metadata.json', metaBytes);
 
     debugPrint('[Sync] Delta sync: ${dirtyPages.length} pages, '
         '${dirtyAssets?.length ?? 0} assets → $dir');
 
-    // Return the ETag from the metadata upload (second-to-last in our list)
-    final metaEtagIndex = pageFutures.length; // index of metadata upload
-    return results[metaEtagIndex];
+    return metaEtag;
   }
 
   /// Gets ETags for all pages in the exploded folder.
