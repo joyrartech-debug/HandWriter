@@ -6,13 +6,19 @@ class AppConfig {
 
   // ── WebDAV / Nextcloud ──
   static const String defaultRemotePath = '/HandWriter/';
-  static const int webdavTimeoutSeconds = 30;
+  static const int webdavTimeoutSeconds = 120;
   static const int maxRetries = 3;
 
   // ── Sync ──
   static const Duration syncDebounce = Duration(seconds: 5);
   static const Duration syncInterval = Duration(minutes: 5);
   static const int maxConcurrentSyncs = 3;
+
+  // ── Delta Sync ──
+  /// How often the canvas checks for remote page changes from other devices.
+  static const Duration deltaPullInterval = Duration(seconds: 10);
+  /// Remote sub-folder that holds exploded per-page files for each notebook.
+  static const String deltaSyncDir = '_delta/';
 
   // ── Canvas ──
   static const double defaultStrokeWidth = 2.0;

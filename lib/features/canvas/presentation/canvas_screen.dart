@@ -66,6 +66,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   // Track last stroke activity to suppress long-press menu while drawing
   DateTime _lastStrokeActivity = DateTime(0);
 
+  // Track whether the stylus is physically touching the screen right now
+  bool _stylusDown = false;
+
   // Double-tap detection for element selection
   DateTime _lastTapTime = DateTime(0);
   Offset _lastTapPos = Offset.zero;
@@ -356,8 +359,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
   void _startLongPressTimer(Offset globalPos, Offset localPos, CanvasState state, Size canvasSize) {
     _cancelLongPressTimer();
+    // Never show context menu while stylus is actively touching the screen
+    // (the touch event is almost certainly a palm)
+    if (_stylusDown) return;
     // Suppress context menu if user was drawing recently (palm rest while writing)
-    if (DateTime.now().difference(_lastStrokeActivity).inMilliseconds < 1500) return;
+    if (DateTime.now().difference(_lastStrokeActivity).inMilliseconds < 3000) return;
     _longPressGlobalPos = globalPos;
     _longPressLocalPos = localPos;
     _longPressFired = false;
@@ -438,6 +444,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
 
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
     _activePointers++;
+
+    // Track stylus presence so we can suppress palm-triggered long-press
+    if (event.kind == PointerDeviceKind.stylus || event.kind == PointerDeviceKind.invertedStylus) {
+      _stylusDown = true;
+      _cancelLongPressTimer(); // kill any pending palm long-press immediately
+    }
+
     if (_activePointers >= 2) {
       // Cancel any active stroke when multi-touch starts (pinch-to-zoom)
       if (_activeStrokeNotifier.isActive) {
@@ -806,6 +819,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
   void _onPointerUp(PointerUpEvent event) {
     final wasMultiTouch = _activePointers >= 2;
     _activePointers = max(0, _activePointers - 1);
+
+    // Clear stylus tracking when stylus lifts
+    if (event.kind == PointerDeviceKind.stylus || event.kind == PointerDeviceKind.invertedStylus) {
+      _stylusDown = false;
+    }
 
     // Don't commit anything if this was a multi-touch gesture (pinch-to-zoom)
     if (wasMultiTouch || _activePointers >= 1) return;

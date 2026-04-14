@@ -7,6 +7,7 @@ import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/file_service.dart';
 import 'package:handwriter/core/services/sync_service.dart';
+import 'package:handwriter/core/services/webdav_service.dart';
 
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:uuid/uuid.dart';
@@ -116,6 +117,7 @@ class NotebookListNotifier
   }
 
   /// Sync with server: only download notebooks whose ETag has changed.
+  /// Detects remote deletions and parallelizes downloads.
   Future<void> _syncWithServer(
     SyncService syncService,
     dynamic webdav,
@@ -125,78 +127,63 @@ class NotebookListNotifier
     final remoteFiles = await syncService.listRemoteNotebooks();
     debugPrint('[Library] PROPFIND returned ${remoteFiles.length} .ncnote files');
 
-    // Build map of locally cached ETags
+    // Build map of locally cached ETags keyed by remote path
     final localRows = await fileService.getAllNotebookMeta();
-    final localEtagByPath = <String, String?>{};
-    final localIdByPath = <String, String>{};
+    final localByPath = <String, Map<String, dynamic>>{};
     for (final row in localRows) {
       final rp = row['remote_path'] as String? ?? '';
-      localEtagByPath[rp] = row['etag'] as String?;
-      localIdByPath[rp] = row['id'] as String;
+      if (rp.isNotEmpty) localByPath[rp] = row;
     }
 
+    // Track which remote paths we've seen (to detect deletions)
+    final seenRemotePaths = <String>{};
     var changed = false;
     final skipped = <String>[];
 
+    // ── Identify which notebooks need downloading ──
+    final toDownload = <({String remotePath, WebDavItem file})>[];
     for (final file in remoteFiles) {
       final remotePath = '${AppConfig.defaultRemotePath}${file.name}';
-      final localEtag = localEtagByPath[remotePath];
+      seenRemotePaths.add(remotePath);
+
+      final localRow = localByPath[remotePath];
+      final localEtag = localRow?['etag'] as String?;
 
       // Skip if ETag matches — notebook hasn't changed
-      if (localEtag != null && localEtag == file.etag) {
-        localEtagByPath.remove(remotePath); // mark as seen
-        continue;
-      }
+      if (localEtag != null && localEtag == file.etag) continue;
 
-      // Need to download this notebook (new or changed)
-      const maxRetries = 2;
-      var success = false;
-      for (var attempt = 0; attempt < maxRetries && !success; attempt++) {
-        try {
-          final fullData = await webdav.downloadFile(remotePath);
-          final result = syncService.parseNcnoteMetadata(fullData);
+      toDownload.add((remotePath: remotePath, file: file));
+    }
 
-          // Save locally
-          await fileService.saveNotebookFile(result.metadata.id, fullData);
-          await fileService.upsertNotebookMeta(
-            id: result.metadata.id,
-            title: result.metadata.title,
-            remotePath: remotePath,
-            etag: file.etag,
-            localModifiedAt: result.metadata.modifiedAt,
-            remoteModifiedAt: file.lastModified,
-            syncStatus: 'synced',
-            fileSize: fullData.length,
-            coverColor: result.metadata.coverColor,
-            paperType: result.metadata.paperType,
-            pageCount: result.metadata.pageCount,
-            createdAt: result.metadata.createdAt,
-          );
-          changed = true;
-          success = true;
-        } catch (e) {
-          if (e is CorruptedArchiveException) {
-            debugPrint('[Library] CORRUPTED notebook ${file.name}: $e');
-            skipped.add('${file.name} (corrupted)');
-            break;
-          }
-          if (attempt == maxRetries - 1) {
-            debugPrint('[Library] FAILED to load ${file.name} after $maxRetries attempts: $e');
-            skipped.add(file.name);
-          } else {
-            await Future.delayed(const Duration(milliseconds: 500));
-          }
-        }
+    // ── Download changed/new notebooks in parallel (max 4 concurrent) ──
+    if (toDownload.isNotEmpty) {
+      debugPrint('[Library] Downloading ${toDownload.length} changed notebooks');
+      const maxConcurrent = 4;
+      for (var i = 0; i < toDownload.length; i += maxConcurrent) {
+        if (!mounted) return; // notifier disposed
+        final batch = toDownload.skip(i).take(maxConcurrent);
+        final futures = batch.map((item) =>
+            _downloadAndCache(webdav, syncService, fileService, item.remotePath, item.file));
+        final results = await Future.wait(futures);
+        if (results.any((ok) => ok)) changed = true;
+        skipped.addAll(results
+            .asMap()
+            .entries
+            .where((e) => !e.value)
+            .map((e) => toDownload[i + e.key].file.name));
       }
     }
 
-    // Also include local-only notebooks (created offline, not yet synced)
-    final localMeta = await fileService.getDirtyNotebooks();
-    for (final row in localMeta) {
-      final id = row['id'] as String;
-      // These are already in the DB, no need to re-download
-      if (!localIdByPath.containsValue(id)) {
-        changed = true; // new local notebook appeared
+    // ── Detect remote deletions: remove notebooks no longer on server ──
+    for (final row in localRows) {
+      final rp = row['remote_path'] as String? ?? '';
+      final syncStatus = row['sync_status'] as String? ?? '';
+      // Only remove synced notebooks (keep local-only ones)
+      if (rp.isNotEmpty && syncStatus == 'synced' && !seenRemotePaths.contains(rp)) {
+        final id = row['id'] as String;
+        debugPrint('[Library] Notebook $id removed from server, cleaning local cache');
+        await fileService.deleteNotebook(id);
+        changed = true;
       }
     }
 
@@ -205,15 +192,58 @@ class NotebookListNotifier
     }
 
     // Reload from DB if anything changed
-    if (changed) {
+    if (changed && mounted) {
       await _loadFromLocalDb(fileService);
     }
   }
 
-  /// Load notebooks from local SQLite + filesystem cache.
-  /// Falls back to ZIP parsing only if DB metadata is incomplete.
-  Future<void> _loadFromLocalCache(FileService fileService) async {
-    await _loadFromLocalDb(fileService);
+  /// Download a single notebook, parse metadata off main thread, and cache it.
+  /// Returns true on success, false on failure.
+  Future<bool> _downloadAndCache(
+    dynamic webdav,
+    SyncService syncService,
+    FileService fileService,
+    String remotePath,
+    WebDavItem file,
+  ) async {
+    const maxRetries = 2;
+    for (var attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        final Uint8List fullData = await webdav.downloadFile(remotePath);
+
+        // Parse metadata off the main thread
+        final metadata = await SyncService.parseNcnoteMetadataIsolate(fullData);
+
+        // Save file + DB entry
+        await fileService.saveNotebookFile(metadata.id, fullData);
+        await fileService.upsertNotebookMeta(
+          id: metadata.id,
+          title: metadata.title,
+          remotePath: remotePath,
+          etag: file.etag,
+          localModifiedAt: metadata.modifiedAt,
+          remoteModifiedAt: file.lastModified,
+          syncStatus: 'synced',
+          fileSize: fullData.length,
+          coverColor: metadata.coverColor,
+          paperType: metadata.paperType,
+          pageCount: metadata.pageCount,
+          createdAt: metadata.createdAt,
+        );
+        return true;
+      } catch (e) {
+        if (e is CorruptedArchiveException) {
+          debugPrint('[Library] CORRUPTED notebook ${file.name}: $e');
+          return false;
+        }
+        if (attempt == maxRetries - 1) {
+          debugPrint('[Library] FAILED to load ${file.name} after $maxRetries attempts: $e');
+          return false;
+        }
+        await Future.delayed(const Duration(milliseconds: 500));
+      }
+    }
+    return false;
   }
 
   /// Crea un nuovo notebook vuoto. Salva localmente e tenta upload remoto.

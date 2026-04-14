@@ -1,6 +1,11 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
@@ -433,6 +438,30 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   bool _eraserUndoPushed = false;
   Size? _viewportSize;
 
+  /// Page file names modified since the last successful delta sync.
+  /// Cleared after each sync cycle. Used to upload only changed pages.
+  final Set<String> _dirtyPageFileNames = {};
+
+  /// Asset keys modified since last sync (e.g. "images/foo.png").
+  final Set<String> _dirtyAssetKeys = {};
+
+  /// Snapshot of page map references from the last sync.
+  /// Used for identity-based dirty detection: if `pages[fileName]` is a
+  /// different object than `_lastSyncedPages[fileName]`, it was edited.
+  Map<String, PageData> _lastSyncedPages = {};
+
+  /// ETag of the remote metadata.json — used to detect remote changes.
+  String? _remoteMetaEtag;
+
+  /// ETag of the remote .ncnote ZIP — fallback for devices without delta sync.
+  String? _remoteNcnoteEtag;
+
+  /// Per-page WebDAV ETags from the last pull — used to detect which pages changed.
+  Map<String, String> _lastPageEtags = {};
+
+  /// Timer for pulling remote changes from other devices.
+  Timer? _pullTimer;
+
   CanvasNotifier(this._ref) : super(null);
 
   void setViewportSize(Size size) {
@@ -440,7 +469,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _viewportSize = size;
     // On first layout, centre the page if zoom != 1.0
     if (wasNull && state != null && state!.zoom != 1.0) {
-      state = state!.copyWith(panOffset: _centeredPanOffset(state!.zoom));
+      // Defer state update to avoid modifying state during build phase
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (state != null) {
+          state = state!.copyWith(panOffset: _centeredPanOffset(state!.zoom));
+        }
+      });
     }
   }
 
@@ -516,6 +550,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       activeChapterId: restoredChapterId,
       currentPageIndex: startPageIndex,
     );
+
+    // Initialize delta sync tracking
+    _lastSyncedPages = Map.of(pages);
+    _dirtyPageFileNames.clear();
+    _dirtyAssetKeys.clear();
+    _startPullTimer();
+
     // Decode all asset images into the render cache
     if (assets != null) {
       for (final entry in assets.entries) {
@@ -526,6 +567,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void closeNotebook() {
     _saveLastPosition();
+    _pullTimer?.cancel();
+    _pullTimer = null;
+    _dirtyPageFileNames.clear();
+    _dirtyAssetKeys.clear();
+    _lastSyncedPages = {};
+    // Keep _remoteMetaEtag, _remoteNcnoteEtag, _lastPageEtags across
+    // close/open to avoid re-pulling all pages on re-enter.
     state = null;
   }
 
@@ -3139,7 +3187,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       ),
     );
 
-    final updatedPage = _pageWithNewElement(page, newElement);
+    final updatedPage = _pageWithNewElement(page, newElement).copyWith(
+      assetReferences: [...page.assetReferences, assetId],
+    );
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[pageFileName] = updatedPage;
 
@@ -3147,6 +3197,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final newAssetBytes = Map<String, Uint8List>.from(s.assetBytes);
     newAssetBytes[assetId] = bytes;
     _decodeAndCacheImage(assetId, bytes);
+    _markAssetDirty(assetId);
 
     state = s.copyWith(
       pages: updatedPages,
@@ -3276,6 +3327,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     newCache[newAssetId] = croppedImage;
     final newAssets = Map<String, Uint8List>.from(s.assetBytes);
     newAssets[newAssetId] = croppedBytes;
+    _markAssetDirty(newAssetId);
 
     state = s.copyWith(
       pages: updatedPages,
@@ -3593,6 +3645,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     newAssets[assetId] = symbolImage.$1;
     final newCache = Map<String, ui.Image>.from(current.imageCache);
     newCache[assetId] = symbolImage.$2;
+    _markAssetDirty(assetId);
 
     state = current.copyWith(
       pages: updatedPages,
@@ -4160,8 +4213,33 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final updatedMeta = s.metadata.copyWith(modifiedAt: DateTime.now());
 
-    // 1. Build the package once
-    final package = syncService.createNcnotePackage(
+    // ── Detect which pages actually changed (identity comparison) ──
+    final changedPages = <String, PageData>{};
+    for (final entry in s.pages.entries) {
+      if (!identical(entry.value, _lastSyncedPages[entry.key])) {
+        changedPages[entry.key] = entry.value;
+      }
+    }
+    // Also detect new pages (added since last sync)
+    for (final key in s.pages.keys) {
+      if (!_lastSyncedPages.containsKey(key)) {
+        changedPages[key] = s.pages[key]!;
+      }
+    }
+
+    // Detect changed assets
+    final changedAssets = <String, Uint8List>{};
+    for (final key in _dirtyAssetKeys) {
+      if (s.assetBytes.containsKey(key)) {
+        changedAssets[key] = s.assetBytes[key]!;
+      }
+    }
+
+    debugPrint('[Canvas] Dirty: ${changedPages.length} pages, '
+        '${changedAssets.length} assets');
+
+    // 1. Build the ZIP package in a background isolate (for local cache).
+    final package = await compute(_buildPackageInIsolate, _PackageParams(
       metadata: updatedMeta,
       document: s.document,
       pages: s.pages,
@@ -4169,57 +4247,441 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       symbolLibraries: s.symbolLibraries.isNotEmpty
           ? s.symbolLibraries.map((l) => l.toJson()).toList()
           : null,
-    );
+    ));
 
-    // 2. Validate before persisting
-    SyncService.validateNcnoteArchive(package, context: 'save ${updatedMeta.title}');
+    debugPrint('[Canvas] Package built off-thread: ${package.length} bytes');
 
-    // 3. Always save locally first (instant, works offline)
-    await fileService.saveNotebookFile(updatedMeta.id, package);
-    await fileService.upsertNotebookMeta(
-      id: updatedMeta.id,
-      title: updatedMeta.title,
-      remotePath: s.remotePath,
-      localModifiedAt: updatedMeta.modifiedAt,
-      syncStatus: 'modified',
-      fileSize: package.length,
-      coverColor: updatedMeta.coverColor,
-      paperType: updatedMeta.paperType,
-      pageCount: updatedMeta.pageCount,
-      createdAt: updatedMeta.createdAt,
-    );
-    debugPrint('[Canvas] Saved locally: ${updatedMeta.title} (${package.length} bytes)');
-
-    // 4. Try remote upload (non-blocking: failure = stays in dirty queue)
-    try {
-      final etag = await syncService.uploadNotebook(
-        remotePath: s.remotePath,
+    // 2. Update state IMMEDIATELY so the user sees "saved" — no more waiting.
+    if (state != null) {
+      final changedDuringSave = !identical(state!.pages, s.pages);
+      state = state!.copyWith(
         metadata: updatedMeta,
-        document: s.document,
-        pages: s.pages,
-        assets: s.assetBytes.isNotEmpty ? s.assetBytes : null,
-        symbolLibraries: s.symbolLibraries.isNotEmpty
-            ? s.symbolLibraries.map((l) => l.toJson()).toList()
-            : null,
+        isDirty: changedDuringSave,
       );
-      await fileService.markNotebookSynced(updatedMeta.id, etag);
-      debugPrint('[Canvas] Synced to server: ${updatedMeta.title}');
+    }
+    _saveLastPosition();
+
+    // 3. Update the snapshot so future diffs are against this save.
+    _lastSyncedPages = Map.of(s.pages);
+    _dirtyAssetKeys.clear();
+
+    // 4. Fire-and-forget: local write + delta upload in background.
+    _persistAndSyncAsync(
+      fileService: fileService,
+      syncService: syncService,
+      package: package,
+      updatedMeta: updatedMeta,
+      document: s.document,
+      remotePath: s.remotePath,
+      dirtyPages: changedPages,
+      dirtyAssets: changedAssets.isNotEmpty ? changedAssets : null,
+      symbolLibraries: s.symbolLibraries.isNotEmpty
+          ? s.symbolLibraries.map((l) => l.toJson()).toList()
+          : null,
+    );
+  }
+
+  /// Writes to local storage and uploads to server — fully background,
+  /// never blocks the UI thread.
+  Future<void> _persistAndSyncAsync({
+    required dynamic fileService,
+    required SyncService syncService,
+    required Uint8List package,
+    required NotebookMetadata updatedMeta,
+    required DocumentStructure document,
+    required String remotePath,
+    required Map<String, PageData> dirtyPages,
+    Map<String, Uint8List>? dirtyAssets,
+    List<Map<String, dynamic>>? symbolLibraries,
+  }) async {
+    // Local file write (full ZIP for offline cache)
+    try {
+      await fileService.saveNotebookFile(updatedMeta.id, package);
+      await fileService.upsertNotebookMeta(
+        id: updatedMeta.id,
+        title: updatedMeta.title,
+        remotePath: remotePath,
+        localModifiedAt: updatedMeta.modifiedAt,
+        syncStatus: 'modified',
+        fileSize: package.length,
+        coverColor: updatedMeta.coverColor,
+        paperType: updatedMeta.paperType,
+        pageCount: updatedMeta.pageCount,
+        createdAt: updatedMeta.createdAt,
+      );
+      debugPrint('[Canvas] Saved locally: ${updatedMeta.title}');
     } catch (e) {
-      // Offline or server error — local copy is safe, will sync later
+      debugPrint('[Canvas] Local save failed: $e');
+      return;
+    }
+
+    // Remote sync — delta when possible, full upload as fallback
+    try {
+      // First ensure the exploded folder exists (one-time migration)
+      final hasDelta = await syncService.deltaFolderExists(updatedMeta.id);
+      debugPrint('[Canvas] Delta folder exists: $hasDelta');
+      if (!hasDelta) {
+        debugPrint('[Canvas] Migrating to exploded format...');
+        await syncService.migrateToExploded(updatedMeta.id, package);
+        debugPrint('[Canvas] Migration complete');
+      }
+
+      // Delta upload: only the changed pages + metadata + document
+      debugPrint('[Canvas] Starting delta sync: ${dirtyPages.length} pages');
+      final etag = await syncService.syncDelta(
+        notebookId: updatedMeta.id,
+        metadata: updatedMeta,
+        document: document,
+        dirtyPages: dirtyPages,
+        dirtyAssets: dirtyAssets,
+        symbolLibraries: symbolLibraries,
+      );
+
+      _remoteMetaEtag = etag;
+      // Snapshot ETags to avoid re-pulling our own save
+      try {
+        _remoteNcnoteEtag = await syncService.getNcnoteEtag(remotePath);
+        _lastPageEtags = await syncService.getRemotePageEtags(updatedMeta.id);
+      } catch (_) {}
+      await fileService.markNotebookSynced(updatedMeta.id, etag);
+      print('[Canvas] Delta synced: ${dirtyPages.length} pages → server');
+
+      // Also update the .ncnote ZIP on server so other devices
+      // (that may not use delta sync / library refresh) get the latest
+      try {
+        final ncEtag = await syncService.uploadNcnoteZip(remotePath, package);
+        if (ncEtag != null) _remoteNcnoteEtag = ncEtag;
+        debugPrint('[Canvas] Updated .ncnote ZIP on server');
+      } catch (e) {
+        debugPrint('[Canvas] .ncnote ZIP upload failed (non-critical): $e');
+      }
+    } catch (e) {
       debugPrint('[Canvas] Remote sync deferred (offline?): $e');
       await fileService.markNotebookDirty(updatedMeta.id);
     }
-
-    // Merge into the CURRENT state (not the stale snapshot) so strokes
-    // drawn during the async upload are preserved.
-    if (state == null) return;
-    final changedDuringSave = !identical(state!.pages, s.pages);
-    state = state!.copyWith(
-      metadata: updatedMeta,
-      isDirty: changedDuringSave,
-    );
-
-    // Also persist last viewed position locally
-    _saveLastPosition();
   }
+
+  // ══════════════════════════════════════════════════════════════
+  //  PULL TIMER — receive remote changes from other devices
+  // ══════════════════════════════════════════════════════════════
+
+  void _startPullTimer() {
+    _pullTimer?.cancel();
+    _pullTimer = Timer.periodic(AppConfig.deltaPullInterval, (_) {
+      _pullRemoteChanges();
+    });
+  }
+
+  bool _isPulling = false;
+
+  /// Checks if the remote metadata.json ETag has changed, then pulls
+  /// only the pages that differ. Falls back to checking the .ncnote ZIP
+  /// for devices that don't use delta sync. Merges into the live canvas.
+  Future<void> _pullRemoteChanges() async {
+    if (_isPulling || state == null || state!.isDirty) return;
+    _isPulling = true;
+
+    try {
+      final s = state!;
+      final syncService = _ref.read(syncServiceProvider);
+      if (syncService == null) return;
+
+      // ── Strategy 1: Check the exploded _delta/ folder ──
+      final remoteEtag = await syncService.getDeltaMetaEtag(s.metadata.id);
+      if (remoteEtag != null && remoteEtag != _remoteMetaEtag) {
+        print('[Canvas] Delta metadata changed, pulling delta...');
+        final pulled = await _pullFromDelta(s, syncService);
+        _remoteMetaEtag = remoteEtag;
+        if (pulled) return; // delta pull handled the merge
+      }
+
+      // ── Strategy 2: Check the .ncnote ZIP (fallback for non-delta devices) ──
+      final ncnoteEtag = await syncService.getNcnoteEtag(s.remotePath);
+      if (ncnoteEtag != null && ncnoteEtag != _remoteNcnoteEtag) {
+        print('[Canvas] Remote .ncnote ZIP changed, pulling full...');
+        await _pullFromZip(s, syncService);
+        _remoteNcnoteEtag = ncnoteEtag;
+      }
+    } catch (e) {
+      print('[Canvas] Pull failed: $e');
+    } finally {
+      _isPulling = false;
+    }
+  }
+
+  /// Pull changed pages from the exploded _delta/ folder.
+  /// Uses per-page WebDAV ETags to detect which pages actually changed.
+  /// Returns true if any pages were merged.
+  Future<bool> _pullFromDelta(CanvasState s, SyncService syncService) async {
+    final remotePageEtags =
+        await syncService.getRemotePageEtags(s.metadata.id);
+    print('[Canvas] Remote has ${remotePageEtags.length} pages, local cache has ${_lastPageEtags.length} ETags');
+
+    // Find pages whose WebDAV ETag changed since last pull
+    final pagesToPull = <String>[];
+    for (final entry in remotePageEtags.entries) {
+      if (_lastPageEtags[entry.key] != entry.value) {
+        pagesToPull.add(entry.key);
+      }
+    }
+
+    if (pagesToPull.isEmpty) {
+      print('[Canvas] Delta pull: no page ETags changed');
+      _lastPageEtags = Map.of(remotePageEtags);
+      return false;
+    }
+
+    print('[Canvas] Delta pull: ${pagesToPull.length} pages changed');
+    final remoteMeta = await syncService.downloadDeltaMeta(s.metadata.id);
+
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    final updatedAssets = Map<String, Uint8List>.from(s.assetBytes);
+    var anyPageChanged = false;
+
+    // Download all changed pages in parallel
+    final results = await Future.wait(
+      pagesToPull.map((pageFileName) async {
+        try {
+          final remotePage = await syncService.downloadDeltaPage(
+            s.metadata.id,
+            pageFileName,
+          );
+          return (pageFileName, remotePage, null as Object?);
+        } catch (e) {
+          return (pageFileName, null as PageData?, e);
+        }
+      }),
+    );
+    for (final (fileName, page, error) in results) {
+      if (page != null) {
+        updatedPages[fileName] = page;
+        anyPageChanged = true;
+      } else {
+        print('[Canvas] Failed to pull page $fileName: $error');
+      }
+    }
+    if (anyPageChanged) {
+      print('[Canvas] Pulled ${results.where((r) => r.$2 != null).length} pages in parallel');
+    }
+
+    // Download new assets in parallel
+    // Collect asset references from both assetReferences list AND image elements
+    final missingAssets = <String>{};
+    for (final page in updatedPages.values) {
+      for (final ref in page.assetReferences) {
+        if (!updatedAssets.containsKey(ref)) {
+          missingAssets.add(ref);
+        }
+      }
+      // Also scan image elements directly (assetReferences may be out of date)
+      for (final el in page.layers.content) {
+        el.map(
+          stroke: (_) {},
+          text: (_) {},
+          shape: (_) {},
+          image: (img) {
+            final path = img.data.assetPath;
+            if (path.isNotEmpty && !updatedAssets.containsKey(path)) {
+              missingAssets.add(path);
+            }
+          },
+        );
+      }
+    }
+    if (missingAssets.isNotEmpty) {
+      final assetResults = await Future.wait(
+        missingAssets.map((ref) async {
+          try {
+            final data = await syncService.downloadDeltaAsset(s.metadata.id, ref);
+            return (ref, data, null as Object?);
+          } catch (e) {
+            return (ref, null as Uint8List?, e);
+          }
+        }),
+      );
+      for (final (ref, data, _) in assetResults) {
+        if (data != null) {
+          updatedAssets[ref] = data;
+          _decodeAndCacheImage(ref, data);
+          anyPageChanged = true;
+        }
+      }
+      print('[Canvas] Pulled ${assetResults.where((r) => r.$2 != null).length} assets in parallel');
+    }
+
+    if (anyPageChanged && state != null && !state!.isDirty) {
+      _lastSyncedPages = Map.of(updatedPages);
+      state = state!.copyWith(
+        metadata: remoteMeta.metadata,
+        document: remoteMeta.document,
+        pages: updatedPages,
+        assetBytes: updatedAssets,
+      );
+      print('[Canvas] Merged delta changes: ${pagesToPull.length} pages');
+
+      // Persist to local ZIP so the changes survive close/reopen
+      _savePulledChangesLocally(
+        remoteMeta.metadata, remoteMeta.document,
+        updatedPages, updatedAssets,
+      );
+    }
+    _lastPageEtags = Map.of(remotePageEtags);
+    return anyPageChanged;
+  }
+
+  /// Pull the full .ncnote ZIP when another device saved without delta sync.
+  /// Downloads the ZIP, extracts pages/assets, diffs against local, and merges.
+  Future<void> _pullFromZip(CanvasState s, SyncService syncService) async {
+    final remoteData = await syncService.downloadNotebookFull(s.remotePath);
+
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    final updatedAssets = Map<String, Uint8List>.from(s.assetBytes);
+    var anyChanged = false;
+
+    // Diff pages: pull if new, local has no modifiedAt, or remote is newer
+    for (final entry in remoteData.pages.entries) {
+      final localPage = s.pages[entry.key];
+      bool shouldPull = localPage == null;
+      if (!shouldPull) {
+        final localMod = localPage!.modifiedAt;
+        final remoteMod = entry.value.modifiedAt;
+        if (localMod == null || (remoteMod != null && remoteMod.isAfter(localMod))) {
+          shouldPull = true;
+        }
+      }
+      if (shouldPull) {
+        updatedPages[entry.key] = entry.value;
+        anyChanged = true;
+        print('[Canvas] Pulled ZIP page: ${entry.key}');
+      }
+    }
+
+    // Merge new/updated assets
+    for (final entry in remoteData.assets.entries) {
+      if (!updatedAssets.containsKey(entry.key)) {
+        updatedAssets[entry.key] = entry.value;
+        _decodeAndCacheImage(entry.key, entry.value);
+        anyChanged = true;
+        print('[Canvas] Pulled ZIP asset: ${entry.key}');
+      }
+    }
+
+    if (anyChanged && state != null && !state!.isDirty) {
+      _lastSyncedPages = Map.of(updatedPages);
+      state = state!.copyWith(
+        metadata: remoteData.metadata,
+        document: remoteData.document,
+        pages: updatedPages,
+        assetBytes: updatedAssets,
+      );
+      print('[Canvas] Merged ZIP changes into canvas');
+
+      // Save the pulled data locally so it persists across restarts
+      try {
+        final fileService = _ref.read(fileServiceProvider);
+        final rawZip = await syncService.downloadFile(s.remotePath);
+        await fileService.saveNotebookFile(s.metadata.id, rawZip);
+        print('[Canvas] Saved pulled ZIP locally');
+
+        // Re-migrate _delta/ folder so future saves use delta sync
+        await syncService.migrateToExploded(s.metadata.id, rawZip);
+        print('[Canvas] Re-migrated _delta/ after ZIP pull');
+      } catch (e) {
+        print('[Canvas] Local save after pull failed: $e');
+      }
+    }
+  }
+
+  /// Track an asset as dirty when added/modified (e.g. image paste/add).
+  void _markAssetDirty(String assetKey) {
+    _dirtyAssetKeys.add(assetKey);
+  }
+
+  /// Build a ZIP from the pulled state and save it locally so changes
+  /// survive close/reopen without re-downloading.
+  Future<void> _savePulledChangesLocally(
+    NotebookMetadata metadata,
+    DocumentStructure document,
+    Map<String, PageData> pages,
+    Map<String, Uint8List> assets,
+  ) async {
+    try {
+      final fileService = _ref.read(fileServiceProvider);
+      final symbolLibs = state?.symbolLibraries
+          .map((l) => l.toJson())
+          .toList();
+      final package = await compute(_buildPackageInIsolate, _PackageParams(
+        metadata: metadata,
+        document: document,
+        pages: pages,
+        assets: assets.isNotEmpty ? assets : null,
+        symbolLibraries: symbolLibs,
+      ));
+      await fileService.saveNotebookFile(metadata.id, package);
+      print('[Canvas] Saved pulled changes locally (${package.length} bytes)');
+    } catch (e) {
+      print('[Canvas] Failed to save pulled changes locally: $e');
+    }
+  }
+}
+
+/// Parameters for the isolate packaging function.
+class _PackageParams {
+  final NotebookMetadata metadata;
+  final DocumentStructure document;
+  final Map<String, PageData> pages;
+  final Map<String, Uint8List>? assets;
+  final List<Map<String, dynamic>>? symbolLibraries;
+
+  _PackageParams({
+    required this.metadata,
+    required this.document,
+    required this.pages,
+    this.assets,
+    this.symbolLibraries,
+  });
+}
+
+/// Top-level function run inside [Isolate.run] via [compute].
+/// Builds + validates the .ncnote ZIP package off the main thread.
+Uint8List _buildPackageInIsolate(_PackageParams p) {
+  // Create a throwaway SyncService-less package builder (static-ish logic).
+  final archive = Archive();
+
+  final metaJson = jsonEncode(p.metadata.toJson());
+  archive.addFile(ArchiveFile(AppConfig.metadataFile, metaJson.length, utf8.encode(metaJson)));
+
+  final docJson = jsonEncode(p.document.toJson());
+  archive.addFile(ArchiveFile(AppConfig.documentFile, docJson.length, utf8.encode(docJson)));
+
+  for (final entry in p.pages.entries) {
+    final pageJson = jsonEncode(entry.value.toJson());
+    archive.addFile(ArchiveFile(
+      '${AppConfig.pagesDir}/${entry.key}',
+      pageJson.length,
+      utf8.encode(pageJson),
+    ));
+  }
+
+  if (p.assets != null) {
+    for (final entry in p.assets!.entries) {
+      archive.addFile(ArchiveFile(
+        '${AppConfig.assetsDir}/${entry.key}',
+        entry.value.length,
+        entry.value,
+      ));
+    }
+  }
+
+  if (p.symbolLibraries != null && p.symbolLibraries!.isNotEmpty) {
+    final symbolsJson = jsonEncode(p.symbolLibraries);
+    archive.addFile(ArchiveFile('symbols.json', symbolsJson.length, utf8.encode(symbolsJson)));
+  }
+
+  final bytes = Uint8List.fromList(ZipEncoder().encode(archive)!);
+
+  // Validate the produced archive
+  SyncService.validateNcnoteArchive(bytes, context: 'isolate-build ${p.metadata.title}');
+
+  return bytes;
 }

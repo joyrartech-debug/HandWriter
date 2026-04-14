@@ -41,6 +41,7 @@ class SyncService {
   final WebDavService _webdav;
   final Map<String, SyncQueueEntry> _syncQueue = {};
   final Map<String, String> _etagCache = {}; // notebookId → etag
+  final Set<String> _explodedDirsReady = {}; // notebook IDs with confirmed folders
   Timer? _autoSyncTimer;
   bool _isSyncing = false;
 
@@ -373,6 +374,33 @@ class SyncService {
   ({NotebookMetadata metadata, DocumentStructure document})
       parseNcnoteMetadata(Uint8List data) => _parseNcnoteArchive(data);
 
+  /// Lightweight metadata-only extraction: validates ZIP and returns metadata
+  /// in a single decode pass (no double decode).
+  NotebookMetadata parseNcnoteMetadataOnly(Uint8List data) {
+    final archive = ZipDecoder().decodeBytes(data);
+    final metadataFile = archive.findFile(AppConfig.metadataFile);
+    if (metadataFile == null) {
+      throw CorruptedArchiveException('Missing ${AppConfig.metadataFile}');
+    }
+    final json = jsonDecode(utf8.decode(metadataFile.content as List<int>));
+    return NotebookMetadata.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Parse .ncnote metadata off the main thread using compute().
+  static Future<NotebookMetadata> parseNcnoteMetadataIsolate(Uint8List data) {
+    return compute(_parseMetadataInIsolate, data);
+  }
+
+  static NotebookMetadata _parseMetadataInIsolate(Uint8List data) {
+    final archive = ZipDecoder().decodeBytes(data);
+    final metadataFile = archive.findFile(AppConfig.metadataFile);
+    if (metadataFile == null) {
+      throw Exception('Missing ${AppConfig.metadataFile}');
+    }
+    final json = jsonDecode(utf8.decode(metadataFile.content as List<int>));
+    return NotebookMetadata.fromJson(json as Map<String, dynamic>);
+  }
+
   /// Lista i notebook .ncnote presenti sul server nella cartella base.
   /// Throws on network/server errors so the UI can show them.
   Future<List<WebDavItem>> listRemoteNotebooks() async {
@@ -446,6 +474,329 @@ class SyncService {
     }
 
     return etag;
+  }
+
+  /// Upload a pre-built, pre-validated .ncnote package directly.
+  /// Skips redundant ZIP creation and validation — the caller already did it
+  /// (e.g. via a background isolate).
+  Future<String?> uploadRawPackage(String remotePath, Uint8List package) async {
+    debugPrint('[Sync] Uploading pre-built package: '
+        '${package.length} bytes → $remotePath');
+
+    final etag = await _webdav.uploadFile(remotePath, package);
+
+    // Post-upload size verification
+    try {
+      final remoteSize = await _webdav.getContentLength(remotePath);
+      if (remoteSize != null && remoteSize != package.length) {
+        debugPrint('[Sync] WARNING: Upload size mismatch: '
+            'local=${package.length}, remote=$remoteSize');
+        throw CorruptedArchiveException(
+          'Upload size mismatch: expected ${package.length} bytes, '
+          'server has $remoteSize bytes.',
+        );
+      }
+      debugPrint('[Sync] Upload verified: $remoteSize bytes on server.');
+    } catch (e) {
+      if (e is CorruptedArchiveException) rethrow;
+      debugPrint('[Sync] Could not verify upload size: $e');
+    }
+
+    return etag;
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  //  DELTA SYNC — exploded per-page storage on server
+  // ══════════════════════════════════════════════════════════════
+
+  /// Remote folder for a notebook's exploded files.
+  /// Layout:  /HandWriter/.sync/<id>/metadata.json
+  ///          /HandWriter/.sync/<id>/document.json
+  ///          /HandWriter/.sync/<id>/pages/page_001.json
+  ///          /HandWriter/.sync/<id>/assets/images/foo.png
+  ///          /HandWriter/.sync/<id>/symbols.json
+  String _deltaDir(String notebookId) =>
+      '${_webdav.basePath}${AppConfig.deltaSyncDir}$notebookId/';
+
+  /// Creates the exploded folder structure on the server (idempotent).
+  Future<void> _ensureDeltaDir(String notebookId) async {
+    if (_explodedDirsReady.contains(notebookId)) return;
+    final dir = _deltaDir(notebookId);
+    debugPrint('[Sync] Ensuring delta dir: $dir');
+    try {
+      await _webdav.createDirectory('${_webdav.basePath}${AppConfig.deltaSyncDir}');
+    } catch (e) {
+      debugPrint('[Sync] MKCOL .sync/ failed (may already exist): $e');
+    }
+    try {
+      await _webdav.createDirectory(dir);
+    } catch (e) {
+      debugPrint('[Sync] MKCOL $dir failed: $e');
+    }
+    try {
+      await _webdav.createDirectory('${dir}pages/');
+    } catch (e) {
+      debugPrint('[Sync] MKCOL ${dir}pages/ failed: $e');
+    }
+    try {
+      await _webdav.createDirectory('${dir}assets/');
+    } catch (e) {
+      debugPrint('[Sync] MKCOL ${dir}assets/ failed: $e');
+    }
+    _explodedDirsReady.add(notebookId);
+  }
+
+  /// Upload the full .ncnote ZIP to the server at the given remotePath.
+  /// This keeps the ZIP in sync with the delta folder so other devices
+  /// that download the .ncnote can see the latest changes.
+  Future<String?> uploadNcnoteZip(String remotePath, Uint8List package) async {
+    return _webdav.uploadFile(remotePath, package);
+  }
+
+  /// Delta upload: sends only the changed pages + metadata + document.
+  /// Returns the ETag from the metadata upload (used as sync token).
+  ///
+  /// Typical payload for a single-page edit:
+  ///   metadata.json (~500 B) + document.json (~2 KB) + page_XXX.json (~50 KB)
+  ///   ≈ 50 KB instead of the full 12 MB+ .ncnote ZIP.
+  Future<String?> syncDelta({
+    required String notebookId,
+    required NotebookMetadata metadata,
+    required DocumentStructure document,
+    required Map<String, PageData> dirtyPages,
+    Map<String, Uint8List>? dirtyAssets,
+    List<Map<String, dynamic>>? symbolLibraries,
+  }) async {
+    await _ensureDeltaDir(notebookId);
+    final dir = _deltaDir(notebookId);
+
+    // Upload dirty pages in parallel
+    final pageFutures = dirtyPages.entries.map((e) {
+      final bytes = Uint8List.fromList(
+        utf8.encode(jsonEncode(e.value.toJson())),
+      );
+      return _webdav.uploadFile('${dir}pages/${e.key}', bytes);
+    });
+
+    // Upload metadata + document in parallel with pages
+    final metaBytes = Uint8List.fromList(
+      utf8.encode(jsonEncode(metadata.toJson())),
+    );
+    final docBytes = Uint8List.fromList(
+      utf8.encode(jsonEncode(document.toJson())),
+    );
+
+    final allFutures = <Future<String?>>[
+      ...pageFutures,
+      _webdav.uploadFile('${dir}metadata.json', metaBytes),
+      _webdav.uploadFile('${dir}document.json', docBytes),
+    ];
+
+    // Upload dirty assets
+    if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
+      for (final e in dirtyAssets.entries) {
+        allFutures.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
+      }
+    }
+
+    // Upload symbols if provided
+    if (symbolLibraries != null && symbolLibraries.isNotEmpty) {
+      final symBytes = Uint8List.fromList(
+        utf8.encode(jsonEncode(symbolLibraries)),
+      );
+      allFutures.add(_webdav.uploadFile('${dir}symbols.json', symBytes));
+    }
+
+    final results = await Future.wait(allFutures);
+
+    debugPrint('[Sync] Delta sync: ${dirtyPages.length} pages, '
+        '${dirtyAssets?.length ?? 0} assets → $dir');
+
+    // Return the ETag from the metadata upload (second-to-last in our list)
+    final metaEtagIndex = pageFutures.length; // index of metadata upload
+    return results[metaEtagIndex];
+  }
+
+  /// Gets ETags for all pages in the exploded folder.
+  /// Returns {pageFileName: etag}.
+  Future<Map<String, String>> getRemotePageEtags(String notebookId) async {
+    final dir = _deltaDir(notebookId);
+    try {
+      final items = await _webdav.listDirectory('${dir}pages/');
+      return {
+        for (final item in items)
+          if (!item.isDirectory &&
+              item.name.endsWith('.json') &&
+              item.etag != null)
+            item.name: item.etag!,
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  /// Gets the ETag of the remote metadata.json (cheap change-detection).
+  Future<String?> getDeltaMetaEtag(String notebookId) async {
+    try {
+      return await _webdav.getEtag('${_deltaDir(notebookId)}metadata.json');
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Gets the ETag of the remote .ncnote ZIP file (fallback change-detection).
+  Future<String?> getNcnoteEtag(String remotePath) async {
+    try {
+      return await _webdav.getEtag(remotePath);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Downloads raw bytes from a remote path.
+  Future<Uint8List> downloadFile(String remotePath) async {
+    return _webdav.downloadFile(remotePath);
+  }
+
+  /// Downloads a single page from the exploded folder.
+  Future<PageData> downloadDeltaPage(
+    String notebookId,
+    String pageFileName,
+  ) async {
+    final data = await _webdav.downloadFile(
+      '${_deltaDir(notebookId)}pages/$pageFileName',
+    );
+    final json = jsonDecode(utf8.decode(data));
+    return PageData.fromJson(json as Map<String, dynamic>);
+  }
+
+  /// Downloads metadata + document from the exploded folder.
+  Future<({NotebookMetadata metadata, DocumentStructure document})>
+      downloadDeltaMeta(String notebookId) async {
+    final dir = _deltaDir(notebookId);
+    final metaBytes = await _webdav.downloadFile('${dir}metadata.json');
+    final docBytes = await _webdav.downloadFile('${dir}document.json');
+
+    return (
+      metadata: NotebookMetadata.fromJson(
+        jsonDecode(utf8.decode(metaBytes)) as Map<String, dynamic>,
+      ),
+      document: DocumentStructure.fromJson(
+        jsonDecode(utf8.decode(docBytes)) as Map<String, dynamic>,
+      ),
+    );
+  }
+
+  /// Downloads an asset from the exploded folder.
+  Future<Uint8List> downloadDeltaAsset(
+    String notebookId,
+    String assetPath,
+  ) async {
+    return _webdav.downloadFile(
+      '${_deltaDir(notebookId)}assets/$assetPath',
+    );
+  }
+
+  /// Checks whether the exploded folder exists on the server.
+  Future<bool> deltaFolderExists(String notebookId) async {
+    try {
+      await _webdav.getEtag('${_deltaDir(notebookId)}metadata.json');
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// One-time migration: explodes a .ncnote ZIP into the per-page folder.
+  /// All files are uploaded in parallel for speed.
+  Future<void> migrateToExploded(String notebookId, Uint8List ncnoteData) async {
+    await _ensureDeltaDir(notebookId);
+    final dir = _deltaDir(notebookId);
+    final archive = ZipDecoder().decodeBytes(ncnoteData);
+
+    // Create asset subdirectories that might be needed
+    final subDirs = <String>{};
+    for (final file in archive.files) {
+      if (file.isFile && file.name.contains('/')) {
+        final parent = file.name.substring(0, file.name.lastIndexOf('/'));
+        if (parent.startsWith(AppConfig.assetsDir) && parent != AppConfig.assetsDir) {
+          subDirs.add(parent);
+        }
+      }
+    }
+    for (final sub in subDirs) {
+      await _webdav.createDirectory('$dir$sub/');
+    }
+
+    // Upload all files in parallel
+    final futures = archive.files
+        .where((f) => f.isFile)
+        .map((f) => _webdav.uploadFile(
+              '$dir${f.name}',
+              Uint8List.fromList(f.content as List<int>),
+            ))
+        .toList();
+
+    await Future.wait(futures);
+    debugPrint('[Sync] Migrated $notebookId to exploded format '
+        '(${futures.length} files)');
+  }
+
+  /// Downloads a full notebook from the exploded folder structure.
+  Future<({NotebookMetadata metadata, DocumentStructure document, Map<String, PageData> pages, Map<String, Uint8List> assets, List<Map<String, dynamic>> symbolLibraries})>
+      downloadExplodedFull(String notebookId) async {
+    final dir = _deltaDir(notebookId);
+
+    final meta = await downloadDeltaMeta(notebookId);
+
+    // Download all pages
+    final pageItems = await _webdav.listDirectory('${dir}pages/');
+    final pages = <String, PageData>{};
+    final pageFutures = <Future<void>>[];
+    for (final item in pageItems) {
+      if (!item.isDirectory && item.name.endsWith('.json')) {
+        pageFutures.add(
+          _webdav.downloadFile('${dir}pages/${item.name}').then((data) {
+            final json = jsonDecode(utf8.decode(data));
+            pages[item.name] = PageData.fromJson(json as Map<String, dynamic>);
+          }),
+        );
+      }
+    }
+    await Future.wait(pageFutures);
+
+    // Download assets
+    final assets = <String, Uint8List>{};
+    try {
+      final assetItems = await _webdav.listDirectory('${dir}assets/');
+      final assetFutures = <Future<void>>[];
+      for (final item in assetItems) {
+        if (!item.isDirectory) {
+          assetFutures.add(
+            _webdav.downloadFile('${dir}assets/${item.name}').then((data) {
+              assets[item.name] = data;
+            }),
+          );
+        }
+      }
+      await Future.wait(assetFutures);
+    } catch (_) {}
+
+    // Download symbols
+    var symbols = <Map<String, dynamic>>[];
+    try {
+      final symData = await _webdav.downloadFile('${dir}symbols.json');
+      symbols = (jsonDecode(utf8.decode(symData)) as List)
+          .cast<Map<String, dynamic>>();
+    } catch (_) {}
+
+    return (
+      metadata: meta.metadata,
+      document: meta.document,
+      pages: pages,
+      assets: assets,
+      symbolLibraries: symbols,
+    );
   }
 
   /// Estrae tutte le pagine da un archivio .ncnote raw bytes.

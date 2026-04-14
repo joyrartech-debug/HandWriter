@@ -29,10 +29,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     final connectivity = ref.read(connectivityServiceProvider);
     if (connectivity == null) return;
 
-    connectivity.onReconnected = () {
-      // Auto-sync dirty notebooks when back online
-      _syncDirtyNotebooks();
-      // Refresh library to pick up remote changes
+    connectivity.onReconnected = () async {
+      // Sync dirty notebooks FIRST, then refresh library.
+      // Sequential to avoid 423 Locked from Nextcloud.
+      await _syncDirtyNotebooks();
       ref.read(notebookListProvider.notifier).refresh();
     };
     connectivity.startMonitoring();
@@ -55,21 +55,35 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         if (localData == null) continue;
 
         SyncService.validateNcnoteArchive(localData, context: 'reconnect-sync $id');
-        final parsed = syncService.parseNcnoteMetadata(localData);
-        final pages = syncService.extractAllPages(localData);
-        final assets = syncService.extractAllAssets(localData);
-        final symbols = syncService.extractSymbolLibraries(localData);
 
-        final etag = await syncService.uploadNotebook(
-          remotePath: remotePath,
-          metadata: parsed.metadata,
-          document: parsed.document,
-          pages: pages,
-          assets: assets.isNotEmpty ? assets : null,
-          symbolLibraries: symbols.isNotEmpty ? symbols : null,
-        );
+        // Upload full ZIP to the classic path (backward compat)
+        final etag = await syncService.uploadRawPackage(remotePath, localData);
         await fileService.markNotebookSynced(id, etag);
-        debugPrint('[Library] Synced $id (${parsed.metadata.title})');
+        debugPrint('[Library] Synced $id (full ZIP)');
+
+        // Migrate/update exploded delta folder — non-fatal if it fails
+        try {
+          if (!await syncService.deltaFolderExists(id)) {
+            debugPrint('[Library] Migrating $id to exploded format...');
+            await syncService.migrateToExploded(id, localData);
+            debugPrint('[Library] Migration complete for $id');
+          } else {
+            final parsed = syncService.parseNcnoteMetadata(localData);
+            final pages = syncService.extractAllPages(localData);
+            final assets = syncService.extractAllAssets(localData);
+            final symbols = syncService.extractSymbolLibraries(localData);
+            await syncService.syncDelta(
+              notebookId: id,
+              metadata: parsed.metadata,
+              document: parsed.document,
+              dirtyPages: pages,
+              dirtyAssets: assets.isNotEmpty ? assets : null,
+              symbolLibraries: symbols.isNotEmpty ? symbols : null,
+            );
+          }
+        } catch (e) {
+          debugPrint('[Library] Delta migration deferred for $id: $e');
+        }
       } catch (e) {
         debugPrint('[Library] Failed to sync $id: $e');
       }
