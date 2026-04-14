@@ -133,7 +133,9 @@ class WebDavService {
 
   /// Carica un file sul server. Crea o sovrascrive.
   /// Ritorna l'ETag della nuova versione.
-  Future<String?> uploadFile(String remotePath, Uint8List data) async {
+  /// [timeoutSeconds] overrides the default timeout for this call.
+  Future<String?> uploadFile(String remotePath, Uint8List data,
+      {int? timeoutSeconds}) async {
     final response = await _client.put(
       Uri.parse(_fullUrl(remotePath)),
       headers: {
@@ -141,7 +143,7 @@ class WebDavService {
         'Content-Type': 'application/octet-stream',
       },
       body: data,
-    ).timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
+    ).timeout(Duration(seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
 
     if (response.statusCode != 201 && response.statusCode != 204) {
       throw WebDavException(

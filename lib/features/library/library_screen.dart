@@ -50,13 +50,35 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     for (final row in dirtyRows) {
       final id = row['id'] as String;
       final remotePath = row['remote_path'] as String;
+      final cachedEtag = row['etag'] as String?;
       try {
         final localData = await fileService.readNotebookFile(id);
         if (localData == null) continue;
 
         SyncService.validateNcnoteArchive(localData, context: 'reconnect-sync $id');
 
-        // Upload full ZIP to the classic path (backward compat)
+        // ── Conflict check: did another device change the remote file? ──
+        final remoteEtag = await syncService.getNcnoteEtag(remotePath);
+        if (cachedEtag != null &&
+            remoteEtag != null &&
+            cachedEtag != remoteEtag) {
+          // Conflict: back up the remote version, then upload ours.
+          debugPrint('[Library] Conflict detected for $id — backing up remote version');
+          try {
+            final remoteData = await syncService.downloadFile(remotePath);
+            final timestamp = DateTime.now().millisecondsSinceEpoch;
+            final conflictPath = remotePath.replaceAll(
+              '.ncnote',
+              '_conflict_$timestamp.ncnote',
+            );
+            await syncService.uploadRawPackage(conflictPath, remoteData);
+            debugPrint('[Library] Remote backup saved: $conflictPath');
+          } catch (e) {
+            debugPrint('[Library] Could not back up remote version: $e');
+          }
+        }
+
+        // Upload full ZIP to the classic path
         final etag = await syncService.uploadRawPackage(remotePath, localData);
         await fileService.markNotebookSynced(id, etag);
         debugPrint('[Library] Synced $id (full ZIP)');

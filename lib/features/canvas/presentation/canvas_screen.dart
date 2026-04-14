@@ -19,6 +19,7 @@ import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
+import 'package:handwriter/features/canvas/presentation/remote_changes_banner.dart';
 import 'package:handwriter/features/canvas/presentation/symbol_library_panel.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:super_clipboard/super_clipboard.dart';
@@ -30,7 +31,8 @@ class CanvasScreen extends ConsumerStatefulWidget {
   ConsumerState<CanvasScreen> createState() => _CanvasScreenState();
 }
 
-class _CanvasScreenState extends ConsumerState<CanvasScreen> {
+class _CanvasScreenState extends ConsumerState<CanvasScreen>
+    with WidgetsBindingObserver {
   bool _isSaving = false;
   late bool _stylusOnlyDrawing;
   bool _isTouchPanning = false;
@@ -99,11 +101,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         (defaultTargetPlatform == TargetPlatform.iOS ||
          defaultTargetPlatform == TargetPlatform.android);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    WidgetsBinding.instance.addObserver(this);
     _startAutoSave();
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _activeStrokeNotifier.dispose();
     _lassoPathNotifier.dispose();
     _autoSaveTimer?.cancel();
@@ -121,6 +125,18 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         _save(silent: true);
       }
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      // App is being backgrounded or screen locked — flush unsaved work.
+      final canvas = ref.read(canvasProvider);
+      if (canvas != null && canvas.isDirty && !_isSaving) {
+        _save(silent: true);
+      }
+    }
   }
 
   Future<void> _save({bool silent = false}) async {
@@ -1340,10 +1356,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
         onKeyEvent: _handleKeyEvent,
         child: Scaffold(
           backgroundColor: const Color(0xFFE8E8E8),
-          body: Column(
+          body: Stack(
             children: [
-              _buildTopBar(canvasState),
-              CanvasToolbar(
+              Column(
+                children: [
+                  _buildTopBar(canvasState),
+                  CanvasToolbar(
                 currentTool: canvasState.currentTool,
                 toolSettings: canvasState.toolSettings,
                 canUndo: ref.read(canvasProvider.notifier).canUndo,
@@ -1386,6 +1404,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen> {
               ),
               Expanded(child: _buildCanvas(canvasState, currentPage)),
               _buildPageNav(canvasState),
+            ],
+          ),
+              const RemoteChangesBanner(),
             ],
           ),
         ),

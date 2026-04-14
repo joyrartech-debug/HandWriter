@@ -244,6 +244,38 @@ class SymbolLibrary {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  PENDING REMOTE CHANGES — shown to user for accept/dismiss
+// ═══════════════════════════════════════════════════════════════
+
+class PendingRemoteChanges {
+  final NotebookMetadata metadata;
+  final DocumentStructure document;
+  final Map<String, PageData> pages;
+  final Map<String, Uint8List> assets;
+
+  /// Human-readable summary of what changed.
+  final List<String> changedPageNames;
+  final int newPageCount;
+  final int modifiedPageCount;
+  final int deletedPageCount;
+  final int newAssetCount;
+
+  const PendingRemoteChanges({
+    required this.metadata,
+    required this.document,
+    required this.pages,
+    required this.assets,
+    this.changedPageNames = const [],
+    this.newPageCount = 0,
+    this.modifiedPageCount = 0,
+    this.deletedPageCount = 0,
+    this.newAssetCount = 0,
+  });
+
+  int get totalChanges => newPageCount + modifiedPageCount + deletedPageCount + newAssetCount;
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  CANVAS STATE
 // ═══════════════════════════════════════════════════════════════
 
@@ -280,6 +312,7 @@ class CanvasState {
   final ReusableSymbol? pendingSymbol;
   final bool pendingPaste;
   final String? activeChapterId;
+  final PendingRemoteChanges? pendingRemoteChanges;
 
   /// Indices of pages visible under the active chapter filter (or all if null).
   List<int> get filteredPageIndices {
@@ -327,6 +360,7 @@ class CanvasState {
     this.pendingSymbol,
     this.pendingPaste = false,
     this.activeChapterId,
+    this.pendingRemoteChanges,
   });
 
   PageData? get currentPage {
@@ -383,6 +417,8 @@ class CanvasState {
     bool? pendingPaste,
     String? activeChapterId,
     bool clearActiveChapter = false,
+    PendingRemoteChanges? pendingRemoteChanges,
+    bool clearPendingRemoteChanges = false,
   }) =>
       CanvasState(
         metadata: metadata ?? this.metadata,
@@ -414,6 +450,7 @@ class CanvasState {
         pendingSymbol: clearPendingSymbol ? null : (pendingSymbol ?? this.pendingSymbol),
         pendingPaste: pendingPaste ?? this.pendingPaste,
         activeChapterId: clearActiveChapter ? null : (activeChapterId ?? this.activeChapterId),
+        pendingRemoteChanges: clearPendingRemoteChanges ? null : (pendingRemoteChanges ?? this.pendingRemoteChanges),
       );
 }
 
@@ -4540,20 +4577,36 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     if (anyPageChanged && state != null && !state!.isDirty && !_isSyncing) {
-      _lastSyncedPages = Map.of(updatedPages);
-      state = state!.copyWith(
+      // ── Build diff summary for the user ──
+      final changedNames = <String>[];
+      var newCount = 0;
+      var modCount = 0;
+      for (final fileName in pagesToPull) {
+        final remotePage = updatedPages[fileName];
+        final localPage = s.pages[fileName];
+        if (remotePage == null) continue;
+        final label = 'Pagina ${remotePage.pageNumber}';
+        changedNames.add(label);
+        if (localPage == null) {
+          newCount++;
+        } else {
+          modCount++;
+        }
+      }
+
+      final pending = PendingRemoteChanges(
         metadata: remoteMeta.metadata,
         document: remoteMeta.document,
         pages: updatedPages,
-        assetBytes: updatedAssets,
+        assets: updatedAssets,
+        changedPageNames: changedNames,
+        newPageCount: newCount,
+        modifiedPageCount: modCount,
+        newAssetCount: missingAssets.length,
       );
-      print('[Canvas] Merged delta changes: ${pagesToPull.length} pages');
 
-      // Persist to local ZIP so the changes survive close/reopen
-      _savePulledChangesLocally(
-        remoteMeta.metadata, remoteMeta.document,
-        updatedPages, updatedAssets,
-      );
+      state = state!.copyWith(pendingRemoteChanges: pending);
+      print('[Canvas] Remote changes ready for review: $modCount modified, $newCount new pages');
     }
     _lastPageEtags = Map.of(remotePageEtags);
     return anyPageChanged;
@@ -4597,29 +4650,80 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     if (anyChanged && state != null && !state!.isDirty && !_isSyncing) {
-      _lastSyncedPages = Map.of(updatedPages);
-      state = state!.copyWith(
+      // ── Build diff summary ──
+      final changedNames = <String>[];
+      var newCount = 0;
+      var modCount = 0;
+      for (final entry in remoteData.pages.entries) {
+        final localPage = s.pages[entry.key];
+        if (localPage == null ||
+            localPage.modifiedAt == null ||
+            (entry.value.modifiedAt != null &&
+             entry.value.modifiedAt!.isAfter(localPage.modifiedAt!))) {
+          final label = 'Pagina ${entry.value.pageNumber}';
+          changedNames.add(label);
+          if (localPage == null) {
+            newCount++;
+          } else {
+            modCount++;
+          }
+        }
+      }
+
+      final newAssets = remoteData.assets.keys
+          .where((k) => !s.assetBytes.containsKey(k))
+          .length;
+
+      final pending = PendingRemoteChanges(
         metadata: remoteData.metadata,
         document: remoteData.document,
         pages: updatedPages,
-        assetBytes: updatedAssets,
+        assets: updatedAssets,
+        changedPageNames: changedNames,
+        newPageCount: newCount,
+        modifiedPageCount: modCount,
+        newAssetCount: newAssets,
       );
-      print('[Canvas] Merged ZIP changes into canvas');
 
-      // Save the pulled data locally so it persists across restarts
-      try {
-        final fileService = _ref.read(fileServiceProvider);
-        final rawZip = await syncService.downloadFile(s.remotePath);
-        await fileService.saveNotebookFile(s.metadata.id, rawZip);
-        print('[Canvas] Saved pulled ZIP locally');
-
-        // Re-migrate _delta/ folder so future saves use delta sync
-        await syncService.migrateToExploded(s.metadata.id, rawZip);
-        print('[Canvas] Re-migrated _delta/ after ZIP pull');
-      } catch (e) {
-        print('[Canvas] Local save after pull failed: $e');
-      }
+      state = state!.copyWith(pendingRemoteChanges: pending);
+      print('[Canvas] Remote ZIP changes ready for review: $modCount modified, $newCount new pages');
     }
+  }
+
+  // ══════════════════════════════════════════════════════════════
+  //  ACCEPT / DISMISS REMOTE CHANGES
+  // ══════════════════════════════════════════════════════════════
+
+  /// User accepted the incoming remote changes — apply them to the canvas.
+  void acceptRemoteChanges() {
+    final s = state;
+    final pending = s?.pendingRemoteChanges;
+    if (s == null || pending == null) return;
+
+    _lastSyncedPages = Map.of(pending.pages);
+    state = s.copyWith(
+      metadata: pending.metadata,
+      document: pending.document,
+      pages: pending.pages,
+      assetBytes: pending.assets,
+      clearPendingRemoteChanges: true,
+    );
+    print('[Canvas] User accepted remote changes');
+
+    // Persist the merged state locally
+    _savePulledChangesLocally(
+      pending.metadata, pending.document,
+      pending.pages, pending.assets,
+    );
+  }
+
+  /// User dismissed the incoming remote changes — keep local state.
+  /// The changes are discarded; they won't re-appear until the remote
+  /// side is modified again (ETags already updated).
+  void dismissRemoteChanges() {
+    if (state == null) return;
+    state = state!.copyWith(clearPendingRemoteChanges: true);
+    print('[Canvas] User dismissed remote changes');
   }
 
   /// Track an asset as dirty when added/modified (e.g. image paste/add).

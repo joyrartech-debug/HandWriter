@@ -7,6 +7,8 @@ class AppConfig {
   // ── WebDAV / Nextcloud ──
   static const String defaultRemotePath = '/HandWriter/';
   static const int webdavTimeoutSeconds = 120;
+  /// Shorter timeout for lightweight delta operations (page JSON, metadata).
+  static const int webdavDeltaTimeoutSeconds = 30;
   static const int maxRetries = 3;
 
   // ── Sync ──

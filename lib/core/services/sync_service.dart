@@ -580,16 +580,18 @@ class SyncService {
 
     // ── Phase 1: Upload data files (pages + assets + symbols) in parallel ──
     final dataFutures = <Future<String?>>[];
+    const dt = AppConfig.webdavDeltaTimeoutSeconds;
 
     // Dirty pages
     for (final e in dirtyPages.entries) {
       final bytes = Uint8List.fromList(
         utf8.encode(jsonEncode(e.value.toJson())),
       );
-      dataFutures.add(_webdav.uploadFile('${dir}pages/${e.key}', bytes));
+      dataFutures.add(_webdav.uploadFile('${dir}pages/${e.key}', bytes,
+          timeoutSeconds: dt));
     }
 
-    // Dirty assets
+    // Dirty assets (may be larger — use default timeout)
     if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
       for (final e in dirtyAssets.entries) {
         dataFutures.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
@@ -601,7 +603,8 @@ class SyncService {
       final symBytes = Uint8List.fromList(
         utf8.encode(jsonEncode(symbolLibraries)),
       );
-      dataFutures.add(_webdav.uploadFile('${dir}symbols.json', symBytes));
+      dataFutures.add(_webdav.uploadFile('${dir}symbols.json', symBytes,
+          timeoutSeconds: dt));
     }
 
     // All data uploads must succeed before we update the "pointers".
@@ -611,13 +614,15 @@ class SyncService {
     final docBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(document.toJson())),
     );
-    await _webdav.uploadFile('${dir}document.json', docBytes);
+    await _webdav.uploadFile('${dir}document.json', docBytes,
+        timeoutSeconds: dt);
 
     // ── Phase 3: Upload metadata.json LAST (commit marker) ──
     final metaBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(metadata.toJson())),
     );
-    final metaEtag = await _webdav.uploadFile('${dir}metadata.json', metaBytes);
+    final metaEtag = await _webdav.uploadFile('${dir}metadata.json', metaBytes,
+        timeoutSeconds: dt);
 
     debugPrint('[Sync] Delta sync: ${dirtyPages.length} pages, '
         '${dirtyAssets?.length ?? 0} assets → $dir');
