@@ -631,9 +631,20 @@ class SyncService {
     required Map<String, PageData> dirtyPages,
     Map<String, Uint8List>? dirtyAssets,
     List<Map<String, dynamic>>? symbolLibraries,
+    List<String>? deletedPageFileNames,
   }) async {
     await _ensureDeltaDir(notebookId);
     final dir = _deltaDir(notebookId);
+
+    // ── Phase 0: Delete removed pages from server (fire in parallel) ──
+    final deleteFutures = <Future<void>>[];
+    if (deletedPageFileNames != null && deletedPageFileNames.isNotEmpty) {
+      for (final fileName in deletedPageFileNames) {
+        deleteFutures.add(
+          _webdav.delete('${dir}pages/$fileName').catchError((_) {}),
+        );
+      }
+    }
 
     // ── Phase 1: Upload data files (pages + assets + symbols) in parallel ──
     final dataFutures = <Future<String?>>[];
@@ -664,8 +675,8 @@ class SyncService {
           timeoutSeconds: dt));
     }
 
-    // All data uploads must succeed before we update the "pointers".
-    await Future.wait(dataFutures);
+    // All data uploads + deletes must succeed before we update the "pointers".
+    await Future.wait([...dataFutures, ...deleteFutures]);
 
     // ── Phase 2: Upload document.json ──
     final docBytes = Uint8List.fromList(

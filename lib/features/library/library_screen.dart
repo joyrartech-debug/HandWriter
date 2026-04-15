@@ -301,16 +301,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       // No local cache — must download from server
       if (syncService == null) throw Exception('Non connesso e nessuna copia locale');
 
-      final result = await syncService.downloadNotebookFull(entry.remotePath);
-
-      // Cache it locally for next time
-      try {
-        final webdav = ref.read(webdavServiceProvider);
-        if (webdav != null) {
-          final rawData = await webdav.downloadFile(entry.remotePath);
-          await fileService.saveNotebookFile(entry.metadata.id, rawData);
-        }
-      } catch (_) {}
+      final result = await syncService.downloadExplodedFull(entry.metadata.id);
 
       ref.read(canvasProvider.notifier).openNotebook(
         metadata: result.metadata,
