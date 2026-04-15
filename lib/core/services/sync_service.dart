@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/core/services/file_service.dart';
 import 'package:handwriter/core/services/webdav_service.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 
@@ -39,6 +40,7 @@ class SyncQueueEntry {
 /// 5. Conflict detection via ETag comparison
 class SyncService {
   final WebDavService _webdav;
+  final FileService? _fileService;
   final Map<String, SyncQueueEntry> _syncQueue = {};
   final Map<String, String> _etagCache = {}; // notebookId → etag
   final Set<String> _explodedDirsReady = {}; // notebook IDs with confirmed folders
@@ -48,7 +50,7 @@ class SyncService {
   /// Callback per notificare la UI dello stato sync.
   void Function(String notebookId, SyncStatus status)? onStatusChanged;
 
-  SyncService(this._webdav);
+  SyncService(this._webdav, [this._fileService]);
 
   // ── Integrity Protection ──
 
@@ -130,8 +132,24 @@ class SyncService {
     onStatusChanged?.call(notebookId, SyncStatus.modified);
   }
 
+  /// Preload ETags from the local database so conflict detection works
+  /// after app restart (the in-memory cache is empty on cold start).
+  Future<void> preloadEtags() async {
+    if (_fileService == null) return;
+    final rows = await _fileService.getAllNotebookMeta();
+    for (final row in rows) {
+      final id = row['id'] as String?;
+      final etag = row['etag'] as String?;
+      if (id != null && etag != null) {
+        _etagCache[id] = etag;
+      }
+    }
+    debugPrint('[Sync] Preloaded ${_etagCache.length} ETags from local DB');
+  }
+
   /// Sincronizza tutti i notebook nella coda.
   /// Checks network connectivity before starting.
+  /// Also retries entries in error state.
   Future<void> syncAll() async {
     if (_isSyncing) return;
     _isSyncing = true;
@@ -144,7 +162,8 @@ class SyncService {
       }
 
       final entries = _syncQueue.values
-          .where((e) => e.status == SyncStatus.modified)
+          .where((e) =>
+              e.status == SyncStatus.modified || e.status == SyncStatus.error)
           .toList();
 
       for (final entry in entries) {
@@ -180,20 +199,36 @@ class SyncService {
         return;
       }
 
-      // 2. Upload: per ora upload dell'intero .ncnote
-      //    In futuro: upload solo pagine dirty (richiede supporto PATCH o
-      //    decompressione/ricompressione lato server)
-      //
-      //    Per Fase 1: upload completo del file .ncnote
+      // 2. Read local file and upload it
+      if (_fileService == null) {
+        debugPrint('[Sync] No FileService — cannot upload ${entry.notebookId}');
+        entry.status = SyncStatus.error;
+        entry.error = 'FileService not available';
+        onStatusChanged?.call(entry.notebookId, SyncStatus.error);
+        return;
+      }
 
-      // In fase 1, il sync effettivo richiede il file locale.
-      // Qui definiamo l'interfaccia che verrà implementata con FileService.
+      final localData = await _fileService.readNotebookFile(entry.notebookId);
+      if (localData == null) {
+        debugPrint('[Sync] No local file for ${entry.notebookId}');
+        entry.status = SyncStatus.error;
+        entry.error = 'Local file not found';
+        onStatusChanged?.call(entry.notebookId, SyncStatus.error);
+        return;
+      }
+
+      // Validate before upload
+      validateNcnoteArchive(localData, context: 'sync-upload ${entry.notebookId}');
+
+      final newEtag = await _webdav.uploadFile(entry.remotePath, localData);
 
       entry.status = SyncStatus.synced;
       entry.dirtyPages.clear();
-      if (remoteEtag != null) {
-        _etagCache[entry.notebookId] = remoteEtag;
+      if (newEtag != null) {
+        _etagCache[entry.notebookId] = newEtag;
       }
+      // Persist ETag to DB for survival across restarts
+      await _fileService.markNotebookSynced(entry.notebookId, newEtag);
       onStatusChanged?.call(entry.notebookId, SyncStatus.synced);
 
       // Rimuovi dalla coda
@@ -209,8 +244,8 @@ class SyncService {
   Future<void> _handleConflict(SyncQueueEntry entry, String remoteEtag) async {
     // Strategia: Last-Write-Wins con backup del conflitto
     // 1. Scarica versione remota
-    // 2. Salvala come backup con suffisso _conflict_<timestamp>
-    // 3. Carica versione locale (wins)
+    // 2. Salvala come backup con suffisso _conflict_<timestamp> sul server
+    // 3. Invalida ETag cache so next cycle uploads local version
     // 4. Notifica utente
 
     try {
@@ -224,7 +259,28 @@ class SyncService {
       );
       await _webdav.uploadFile(conflictPath, remoteData);
 
-      // La versione locale verrà caricata al prossimo sync cycle
+      // Now upload the local version to overwrite the remote
+      if (_fileService != null) {
+        final localData =
+            await _fileService.readNotebookFile(entry.notebookId);
+        if (localData != null) {
+          final newEtag =
+              await _webdav.uploadFile(entry.remotePath, localData);
+          if (newEtag != null) {
+            _etagCache[entry.notebookId] = newEtag;
+          }
+          await _fileService.markNotebookSynced(entry.notebookId, newEtag);
+          entry.status = SyncStatus.synced;
+          entry.dirtyPages.clear();
+          _syncQueue.remove(entry.notebookId);
+          onStatusChanged?.call(entry.notebookId, SyncStatus.synced);
+          debugPrint('[Sync] Conflict resolved for ${entry.notebookId}: '
+              'local wins, remote backed up at $conflictPath');
+          return;
+        }
+      }
+
+      // Fallback: no local file, mark modified to retry
       entry.status = SyncStatus.modified;
       _etagCache.remove(entry.notebookId);
       onStatusChanged?.call(entry.notebookId, SyncStatus.modified);
@@ -290,28 +346,28 @@ class SyncService {
     final archive = Archive();
 
     // metadata.json
-    final metadataJson = jsonEncode(metadata.toJson());
+    final metadataBytes = utf8.encode(jsonEncode(metadata.toJson()));
     archive.addFile(ArchiveFile(
       AppConfig.metadataFile,
-      metadataJson.length,
-      utf8.encode(metadataJson),
+      metadataBytes.length,
+      metadataBytes,
     ));
 
     // document.json
-    final documentJson = jsonEncode(document.toJson());
+    final documentBytes = utf8.encode(jsonEncode(document.toJson()));
     archive.addFile(ArchiveFile(
       AppConfig.documentFile,
-      documentJson.length,
-      utf8.encode(documentJson),
+      documentBytes.length,
+      documentBytes,
     ));
 
     // pages/
     for (final entry in pages.entries) {
-      final pageJson = jsonEncode(entry.value.toJson());
+      final pageBytes = utf8.encode(jsonEncode(entry.value.toJson()));
       archive.addFile(ArchiveFile(
         '${AppConfig.pagesDir}/${entry.key}',
-        pageJson.length,
-        utf8.encode(pageJson),
+        pageBytes.length,
+        pageBytes,
       ));
     }
 
@@ -328,15 +384,16 @@ class SyncService {
 
     // symbols.json
     if (symbolLibraries != null && symbolLibraries.isNotEmpty) {
-      final symbolsJson = jsonEncode(symbolLibraries);
+      final symbolsBytes = utf8.encode(jsonEncode(symbolLibraries));
       archive.addFile(ArchiveFile(
         'symbols.json',
-        symbolsJson.length,
-        utf8.encode(symbolsJson),
+        symbolsBytes.length,
+        symbolsBytes,
       ));
     }
 
     return Uint8List.fromList(ZipEncoder().encode(archive)!);
+
   }
 
   /// Parsa un archivio .ncnote scaricato.
@@ -532,13 +589,13 @@ class SyncService {
     final dir = _deltaDir(notebookId);
     debugPrint('[Sync] Ensuring delta dir: $dir');
 
-    // Each MKCOL tolerates 405 (already exists) inside createDirectory().
-    // If it fails for a real reason we must NOT mark the dir as ready.
+    // MKCOL tolerates 405 (already exists) inside createDirectory().
+    // Only catch WebDavException with 405 — propagate real errors.
     try {
       await _webdav.createDirectory(
           '${_webdav.basePath}${AppConfig.deltaSyncDir}');
-    } catch (e) {
-      debugPrint('[Sync] MKCOL .sync/ failed (may already exist): $e');
+    } on WebDavException catch (e) {
+      if (e.statusCode != 405) rethrow;
     }
     // These are critical — propagate real errors.
     await _webdav.createDirectory(dir);
@@ -648,19 +705,37 @@ class SyncService {
     }
   }
 
+  /// Fetch metadata ETag + page ETags in one parallel call.
+  /// Saves one full round-trip vs sequential getDeltaMetaEtag + getRemotePageEtags.
+  Future<({String? metaEtag, Map<String, String> pageEtags})>
+      getRemoteChangeState(String notebookId) async {
+    final results = await Future.wait([
+      getDeltaMetaEtag(notebookId),
+      getRemotePageEtags(notebookId),
+    ]);
+    return (
+      metaEtag: results[0] as String?,
+      pageEtags: results[1] as Map<String, String>,
+    );
+  }
+
   /// Gets the ETag of the remote metadata.json (cheap change-detection).
+  /// Uses HEAD request — faster than PROPFIND.
   Future<String?> getDeltaMetaEtag(String notebookId) async {
     try {
-      return await _webdav.getEtag('${_deltaDir(notebookId)}metadata.json');
+      return await _webdav.getEtagFast('${_deltaDir(notebookId)}metadata.json')
+          ?? await _webdav.getEtag('${_deltaDir(notebookId)}metadata.json');
     } catch (_) {
       return null;
     }
   }
 
   /// Gets the ETag of the remote .ncnote ZIP file (fallback change-detection).
+  /// Uses HEAD request — faster than PROPFIND.
   Future<String?> getNcnoteEtag(String remotePath) async {
     try {
-      return await _webdav.getEtag(remotePath);
+      return await _webdav.getEtagFast(remotePath)
+          ?? await _webdav.getEtag(remotePath);
     } catch (_) {
       return null;
     }
@@ -684,18 +759,21 @@ class SyncService {
   }
 
   /// Downloads metadata + document from the exploded folder.
+  /// Parallel download — both requests fire simultaneously.
   Future<({NotebookMetadata metadata, DocumentStructure document})>
       downloadDeltaMeta(String notebookId) async {
     final dir = _deltaDir(notebookId);
-    final metaBytes = await _webdav.downloadFile('${dir}metadata.json');
-    final docBytes = await _webdav.downloadFile('${dir}document.json');
+    final results = await Future.wait([
+      _webdav.downloadFile('${dir}metadata.json'),
+      _webdav.downloadFile('${dir}document.json'),
+    ]);
 
     return (
       metadata: NotebookMetadata.fromJson(
-        jsonDecode(utf8.decode(metaBytes)) as Map<String, dynamic>,
+        jsonDecode(utf8.decode(results[0])) as Map<String, dynamic>,
       ),
       document: DocumentStructure.fromJson(
-        jsonDecode(utf8.decode(docBytes)) as Map<String, dynamic>,
+        jsonDecode(utf8.decode(results[1])) as Map<String, dynamic>,
       ),
     );
   }
@@ -712,8 +790,11 @@ class SyncService {
 
   /// Checks whether the exploded folder exists on the server.
   Future<bool> deltaFolderExists(String notebookId) async {
+    // Fast path: already confirmed in this session
+    if (_explodedDirsReady.contains(notebookId)) return true;
     try {
       await _webdav.getEtag('${_deltaDir(notebookId)}metadata.json');
+      _explodedDirsReady.add(notebookId);
       return true;
     } catch (_) {
       return false;

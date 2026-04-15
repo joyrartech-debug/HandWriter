@@ -20,9 +20,13 @@ import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
 import 'package:handwriter/features/canvas/presentation/remote_changes_banner.dart';
+import 'package:handwriter/features/canvas/presentation/conflict_resolution_screen.dart';
 import 'package:handwriter/features/canvas/presentation/symbol_library_panel.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:super_clipboard/super_clipboard.dart';
+import 'package:share_plus/share_plus.dart';
+
+enum _ExportScope { currentPage, currentChapter, entireNotebook }
 
 class CanvasScreen extends ConsumerStatefulWidget {
   const CanvasScreen({super.key});
@@ -1335,6 +1339,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   @override
   Widget build(BuildContext context) {
     final canvasState = ref.watch(canvasProvider);
+
+    // Auto-open conflict resolution when conflicts detected
+    ref.listen<int>(
+      canvasProvider.select((s) => s?.pendingConflicts.length ?? 0),
+      (prev, next) {
+        if (next > 0 && (prev == null || prev == 0)) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) {
+              Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const ConflictResolutionScreen(),
+                ),
+              );
+            }
+          });
+        }
+      },
+    );
+
     if (canvasState == null) {
       return const Scaffold(body: Center(child: Text('Nessun notebook aperto')));
     }
@@ -2065,6 +2088,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               _FloatingActionBtn(Icons.copy_rounded, 'Copia', () {
                 ref.read(canvasProvider.notifier).copySelection();
               }),
+              _FloatingActionBtn(Icons.screenshot_rounded, 'Screenshot', () {
+                _copySelectionAsScreenshot();
+              }),
               _FloatingActionBtn(Icons.content_cut_rounded, 'Taglia', () {
                 ref.read(canvasProvider.notifier).cutSelection();
               }),
@@ -2232,6 +2258,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         // Selection operations
         if (hasLassoSelection) ...[
           const PopupMenuItem(value: 'copy', child: _MenuRow(Icons.copy_rounded, 'Copia', 'Ctrl+C')),
+          const PopupMenuItem(value: 'copy_screenshot', child: _MenuRow(Icons.screenshot_rounded, 'Copia come immagine', null)),
           const PopupMenuItem(value: 'cut', child: _MenuRow(Icons.content_cut_rounded, 'Taglia', 'Ctrl+X')),
           const PopupMenuItem(value: 'duplicate_sel', child: _MenuRow(Icons.copy_all_rounded, 'Duplica', 'Ctrl+D')),
           const PopupMenuItem(value: 'delete_sel', child: _MenuRow(Icons.delete_outline_rounded, 'Elimina', 'Canc')),
@@ -2276,6 +2303,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final notifier = ref.read(canvasProvider.notifier);
       switch (value) {
         case 'copy': notifier.copySelection(); break;
+        case 'copy_screenshot': _copySelectionAsScreenshot(); break;
         case 'cut': notifier.cutSelection(); break;
         case 'duplicate_sel': notifier.duplicateSelection(); break;
         case 'delete_sel': notifier.deleteSelection(); break;
@@ -2451,53 +2479,157 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   // ── Export ──
 
+  /// Render a single page to a PNG [Uint8List] at the given [scale].
+  Future<Uint8List?> _renderPageToPng(PageData page, Map<String, ui.Image> imageCache, {double scale = 2.0}) async {
+    final w = page.width;
+    final h = page.height;
+    final renderW = (w * scale).round();
+    final renderH = (h * scale).round();
+    if (renderW <= 0 || renderH <= 0) return null;
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, w * scale, h * scale));
+    canvas.scale(scale);
+    canvas.drawRect(Rect.fromLTWH(0, 0, w, h), Paint()..color = Colors.white);
+
+    final engine = CanvasRenderEngine(
+      pageData: page,
+      zoom: 1.0,
+      panOffset: Offset.zero,
+      imageCache: imageCache,
+    );
+    engine.paintPage(canvas, Size(w, h), 1.0, Offset.zero);
+
+    final picture = recorder.endRecording();
+    final img = await picture.toImage(renderW, renderH);
+    final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+    img.dispose();
+    picture.dispose();
+    return byteData?.buffer.asUint8List();
+  }
+
+  /// Collect the pages to export based on user-chosen [scope].
+  List<PageData> _collectExportPages(CanvasState state, _ExportScope scope) {
+    switch (scope) {
+      case _ExportScope.currentPage:
+        final p = state.currentPage;
+        return p != null ? [p] : [];
+      case _ExportScope.currentChapter:
+        final chId = state.activeChapterId;
+        if (chId == null) {
+          final p = state.currentPage;
+          return p != null ? [p] : [];
+        }
+        final chapterPageIds = state.metadata.chapters
+            .firstWhere((c) => c.id == chId, orElse: () => state.metadata.chapters.first)
+            .pageIds
+            .toSet();
+        return state.document.pages
+            .where((e) => chapterPageIds.contains(e.pageId))
+            .map((e) => state.pages[e.fileName])
+            .whereType<PageData>()
+            .toList();
+      case _ExportScope.entireNotebook:
+        return state.document.pages
+            .map((e) => state.pages[e.fileName])
+            .whereType<PageData>()
+            .toList();
+    }
+  }
+
+  /// Save or share a file cross-platform.
+  /// On iOS/macOS, uses the system share sheet (FilePicker.saveFile is broken).
+  /// On other platforms, uses FilePicker.saveFile.
+  Future<void> _saveOrShare(String fileName, Uint8List data, String mimeType) async {
+    if (io.Platform.isIOS || io.Platform.isMacOS) {
+      final dir = await io.Directory.systemTemp.createTemp('handwriter_export');
+      final file = io.File('${dir.path}/$fileName');
+      await file.writeAsBytes(data, flush: true);
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [XFile(file.path, mimeType: mimeType)],
+          subject: fileName,
+        ),
+      );
+    } else {
+      final ext = fileName.split('.').last;
+      final savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Salva $fileName',
+        fileName: fileName,
+        type: FileType.custom,
+        allowedExtensions: [ext],
+      );
+      if (savePath != null) {
+        await io.File(savePath).writeAsBytes(data, flush: true);
+      }
+    }
+  }
+
+  /// Show the export scope picker, then export as PNG (single page) or
+  /// a series of PNGs (multi-page → share sheet with multiple files).
   Future<void> _exportAsPng() async {
     final state = ref.read(canvasProvider);
     if (state == null) return;
-    final page = state.currentPage;
-    if (page == null) return;
+
+    final scope = await _showExportScopeDialog(
+      singlePageLabel: 'Pagina corrente (PNG)',
+      chapterLabel: 'Capitolo corrente',
+      notebookLabel: 'Quaderno intero',
+    );
+    if (scope == null) return;
+
+    final pages = _collectExportPages(state, scope);
+    if (pages.isEmpty) return;
 
     try {
-      final recorder = ui.PictureRecorder();
-      final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, page.width, page.height));
-
-      // Draw white background
-      canvas.drawRect(
-        Rect.fromLTWH(0, 0, page.width, page.height),
-        Paint()..color = Colors.white,
-      );
-
-      // Use the render engine to paint the page content
-      final engine = CanvasRenderEngine(
-        pageData: page,
-        zoom: 1.0,
-        panOffset: Offset.zero,
-        imageCache: state.imageCache,
-      );
-      engine.paintPage(canvas, Size(page.width, page.height), 1.0, Offset.zero);
-
-      final picture = recorder.endRecording();
-      final img = await picture.toImage(page.width.toInt(), page.height.toInt());
-      final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-      if (byteData == null) return;
-
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Salva come PNG',
-        fileName: '${state.metadata.title}_p${state.currentPageIndex + 1}.png',
-        type: FileType.custom,
-        allowedExtensions: ['png'],
-      );
-
-      if (savePath != null) {
-        final file = await _writeFile(savePath, byteData.buffer.asUint8List());
-        if (mounted && file) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('PNG esportato!')),
-          );
+      if (pages.length == 1) {
+        final pngBytes = await _renderPageToPng(pages.first, state.imageCache);
+        if (pngBytes == null) return;
+        final fileName = '${state.metadata.title}_p${state.currentPageIndex + 1}.png';
+        await _saveOrShare(fileName, pngBytes, 'image/png');
+      } else {
+        // Multiple pages → write to temp dir, share all
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Esportazione ${pages.length} pagine...')),
+        );
+        final dir = await io.Directory.systemTemp.createTemp('handwriter_export');
+        final files = <XFile>[];
+        for (var i = 0; i < pages.length; i++) {
+          final pngBytes = await _renderPageToPng(pages[i], state.imageCache);
+          if (pngBytes == null) continue;
+          final f = io.File('${dir.path}/${state.metadata.title}_p${i + 1}.png');
+          await f.writeAsBytes(pngBytes, flush: true);
+          files.add(XFile(f.path, mimeType: 'image/png'));
         }
+        if (files.isNotEmpty) {
+          if (io.Platform.isIOS || io.Platform.isMacOS) {
+            await SharePlus.instance.share(
+              ShareParams(files: files, subject: state.metadata.title),
+            );
+          } else {
+            // Desktop: let user pick folder, save all
+            final savePath = await FilePicker.platform.getDirectoryPath(
+              dialogTitle: 'Scegli cartella per le ${files.length} immagini',
+            );
+            if (savePath != null) {
+              for (final xf in files) {
+                final name = xf.path.split('/').last.split('\\').last;
+                await io.File('$savePath/$name').writeAsBytes(await xf.readAsBytes());
+              }
+            }
+          }
+        }
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('PNG esportato (${pages.length} ${pages.length == 1 ? "pagina" : "pagine"})')),
+        );
       }
     } catch (e) {
       if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Errore export: $e')));
       }
     }
@@ -2507,74 +2639,51 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     final state = ref.read(canvasProvider);
     if (state == null) return;
 
+    final scope = await _showExportScopeDialog(
+      singlePageLabel: 'Pagina corrente',
+      chapterLabel: 'Capitolo corrente',
+      notebookLabel: 'Quaderno intero',
+    );
+    if (scope == null) return;
+
+    final pages = _collectExportPages(state, scope);
+    if (pages.isEmpty) return;
+
     try {
-      final savePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Salva come PDF',
-        fileName: '${state.metadata.title}.pdf',
-        type: FileType.custom,
-        allowedExtensions: ['pdf'],
-      );
-
-      if (savePath == null) return;
-
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Generazione PDF in corso...')),
+          SnackBar(content: Text('Generazione PDF (${pages.length} ${pages.length == 1 ? "pagina" : "pagine"})...')),
         );
       }
 
-      // Render each page at 2x resolution for sharpness
       const scale = 2.0;
       final doc = pw.Document();
 
-      for (final entry in state.document.pages) {
-        final page = state.pages[entry.fileName];
-        if (page == null) continue;
+      for (final page in pages) {
+        final pngBytes = await _renderPageToPng(page, state.imageCache, scale: scale);
+        if (pngBytes == null) continue;
 
-        final width = page.width;
-        final height = page.height;
-        final renderW = (width * scale).toInt();
-        final renderH = (height * scale).toInt();
-
-        // Render the page to a bitmap at 2x scale
-        final recorder = ui.PictureRecorder();
-        final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, width * scale, height * scale));
-        canvas.scale(scale);
-        canvas.drawRect(Rect.fromLTWH(0, 0, width, height), Paint()..color = Colors.white);
-
-        final engine = CanvasRenderEngine(
-          pageData: page,
-          zoom: 1.0,
-          panOffset: Offset.zero,
-          imageCache: state.imageCache,
-        );
-        engine.paintPage(canvas, Size(width, height), 1.0, Offset.zero);
-
-        final picture = recorder.endRecording();
-        final img = await picture.toImage(renderW, renderH);
-        final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
-        img.dispose();
-        if (byteData == null) continue;
-
-        final pngBytes = byteData.buffer.asUint8List();
         final pdfImage = pw.MemoryImage(pngBytes);
-
         doc.addPage(
           pw.Page(
-            pageFormat: pw_pdf.PdfPageFormat(width * pw_pdf.PdfPageFormat.point, height * pw_pdf.PdfPageFormat.point),
+            pageFormat: pw_pdf.PdfPageFormat(
+              page.width * pw_pdf.PdfPageFormat.point,
+              page.height * pw_pdf.PdfPageFormat.point,
+            ),
             margin: pw.EdgeInsets.zero,
             build: (ctx) => pw.Image(pdfImage, fit: pw.BoxFit.fill),
           ),
         );
       }
 
-      final pdfBytes = await doc.save();
-      await _writeFile(savePath, Uint8List.fromList(pdfBytes));
+      final pdfBytes = Uint8List.fromList(await doc.save());
+      final fileName = '${state.metadata.title}.pdf';
+      await _saveOrShare(fileName, pdfBytes, 'application/pdf');
 
       if (mounted) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('PDF esportato: ${state.document.pages.length} ${state.document.pages.length == 1 ? 'pagina' : 'pagine'}')),
+          SnackBar(content: Text('PDF esportato: ${pages.length} ${pages.length == 1 ? "pagina" : "pagine"}')),
         );
       }
     } catch (e) {
@@ -2585,13 +2694,150 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
   }
 
-  Future<bool> _writeFile(String path, Uint8List data) async {
+  /// Copy the current lasso selection as a screenshot to the system clipboard.
+  Future<void> _copySelectionAsScreenshot() async {
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    final sel = state.lassoSelection;
+    final page = state.currentPage;
+    if (sel == null || page == null) return;
+
     try {
-      await io.File(path).writeAsBytes(data);
-      return true;
-    } catch (_) {
-      return false;
+      final bounds = sel.bounds;
+      if (bounds.isEmpty) return;
+
+      // Render at 2x for retina quality
+      const scale = 2.0;
+      final renderW = (bounds.width * scale).round();
+      final renderH = (bounds.height * scale).round();
+      if (renderW <= 0 || renderH <= 0) return;
+
+      // Build a temporary page containing only the selected elements,
+      // translated so the selection bounds start at (0,0).
+      final selectedElements = page.layers.content
+          .where((e) => sel.selectedIds.contains(
+                e.map(stroke: (s) => s.id, text: (t) => t.id,
+                    image: (i) => i.id, shape: (s) => s.id)))
+          .toList();
+
+      final croppedPage = page.copyWith(
+        layers: page.layers.copyWith(
+          background: const BackgroundLayer(type: 'blank', color: 0xFFFFFFFF),
+          content: selectedElements,
+        ),
+      );
+
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, bounds.width * scale, bounds.height * scale));
+      // White background
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, bounds.width * scale, bounds.height * scale),
+        Paint()..color = Colors.white,
+      );
+      // Scale then translate so the selection bounds map to (0,0)
+      canvas.scale(scale);
+      canvas.translate(-bounds.left, -bounds.top);
+
+      // Render only the selected elements via a temporary page
+      final engine = CanvasRenderEngine(
+        pageData: croppedPage,
+        zoom: 1.0,
+        panOffset: Offset.zero,
+        imageCache: state.imageCache,
+      );
+      // paintPage applies its own translate(offset)+scale(scale), so pass
+      // the negative bounds as offset and 1.0 as scale to avoid double-transform.
+      engine.paintPage(
+        canvas,
+        Size(croppedPage.width, croppedPage.height),
+        1.0,
+        Offset.zero,
+      );
+
+      final picture = recorder.endRecording();
+      final img = await picture.toImage(renderW, renderH);
+      final byteData = await img.toByteData(format: ui.ImageByteFormat.png);
+      img.dispose();
+      picture.dispose();
+      if (byteData == null) return;
+
+      final item = DataWriterItem();
+      item.add(Formats.png(byteData.buffer.asUint8List()));
+      await SystemClipboard.instance?.write([item]);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Selezione copiata come immagine'), duration: Duration(seconds: 2)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Errore copia immagine: $e')),
+        );
+      }
     }
+  }
+
+  /// Show a dialog for choosing export scope.
+  Future<_ExportScope?> _showExportScopeDialog({
+    required String singlePageLabel,
+    required String chapterLabel,
+    required String notebookLabel,
+  }) async {
+    final state = ref.read(canvasProvider);
+    final hasChapters = state != null && state.metadata.chapters.length > 1;
+    final hasMultiplePages = state != null && state.document.pages.length > 1;
+
+    // If only 1 page, skip dialog
+    if (!hasMultiplePages) return _ExportScope.currentPage;
+
+    return showDialog<_ExportScope>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Esporta'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, _ExportScope.currentPage),
+            child: ListTile(
+              leading: const Icon(Icons.description_outlined),
+              title: Text(singlePageLabel),
+              subtitle: Text('Pagina ${(state?.currentPageIndex ?? 0) + 1}'),
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+          if (hasChapters)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, _ExportScope.currentChapter),
+              child: ListTile(
+                leading: const Icon(Icons.bookmark_outline),
+                title: Text(chapterLabel),
+                subtitle: Text(_currentChapterLabel(state!)),
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(ctx, _ExportScope.entireNotebook),
+            child: ListTile(
+              leading: const Icon(Icons.menu_book_rounded),
+              title: Text(notebookLabel),
+              subtitle: Text('${state?.document.pages.length ?? 0} pagine'),
+              contentPadding: EdgeInsets.zero,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _currentChapterLabel(CanvasState state) {
+    final chId = state.activeChapterId;
+    if (chId == null) return '';
+    final ch = state.metadata.chapters.cast<Chapter?>().firstWhere(
+          (c) => c?.id == chId, orElse: () => null);
+    if (ch == null) return '';
+    final pageCount = ch.pageIds.length;
+    return '${ch.title} ($pageCount ${pageCount == 1 ? "pagina" : "pagine"})';
   }
 
   Widget _buildPageNav(CanvasState canvasState) {

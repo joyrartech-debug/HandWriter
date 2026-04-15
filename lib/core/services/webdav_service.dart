@@ -45,6 +45,14 @@ class WebDavService {
     required this.password,
     this.basePath = AppConfig.defaultRemotePath,
   }) {
+    // Warn if not using HTTPS (credentials travel in plaintext over HTTP)
+    final uri = Uri.parse(serverUrl);
+    if (uri.scheme != 'https') {
+      // ignore: avoid_print
+      print('[WebDAV] WARNING: Connection uses HTTP — credentials are not encrypted. '
+          'Consider switching to HTTPS.');
+    }
+
     // Nextcloud WebDAV endpoint standard
     final cleanUrl = serverUrl.replaceAll(RegExp(r'/+$'), '');
     _davUrl = '$cleanUrl/remote.php/dav/files/$username';
@@ -269,6 +277,23 @@ class WebDavService {
     final clElements = document.findAllElements('d:getcontentlength');
     if (clElements.isEmpty || clElements.first.innerText.isEmpty) return null;
     return int.tryParse(clElements.first.innerText);
+  }
+
+  /// Fast ETag check via HEAD — single request, no XML parse.
+  /// Falls back to null on any error (caller retries via PROPFIND).
+  Future<String?> getEtagFast(String remotePath) async {
+    try {
+      final response = await _client.head(
+        Uri.parse(_fullUrl(remotePath)),
+        headers: _authHeaders,
+      ).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode != 200) return null;
+      final etag = response.headers['etag'];
+      return etag?.replaceAll('"', '');
+    } catch (_) {
+      return null;
+    }
   }
 
   /// Parsa la risposta XML Multi-Status di PROPFIND.

@@ -44,7 +44,12 @@ class NotebookEntry {
 final syncServiceProvider = Provider<SyncService?>((ref) {
   final webdav = ref.watch(webdavServiceProvider);
   if (webdav == null) return null;
-  return SyncService(webdav);
+  final fileService = ref.watch(fileServiceProvider);
+  final service = SyncService(webdav, fileService);
+  // Preload ETags from local DB so conflict detection works on cold start.
+  service.preloadEtags();
+  ref.onDispose(() => service.dispose());
+  return service;
 });
 
 /// Provider della lista notebook nella libreria.
@@ -358,12 +363,22 @@ class NotebookListNotifier
     return entry;
   }
 
-  /// Elimina un notebook dal server.
+  /// Elimina un notebook dal server e dal locale.
   Future<void> deleteNotebook(NotebookEntry entry) async {
     final webdav = _ref.read(webdavServiceProvider);
-    if (webdav == null) return;
+    final fileService = _ref.read(fileServiceProvider);
 
-    await webdav.delete(entry.remotePath);
+    // Delete remote (if connected)
+    if (webdav != null) {
+      try {
+        await webdav.delete(entry.remotePath);
+      } catch (e) {
+        debugPrint('[Library] Remote delete failed: $e');
+      }
+    }
+
+    // Always clean up local file + DB entry
+    await fileService.deleteNotebook(entry.metadata.id);
 
     final current = state.valueOrNull ?? [];
     state = AsyncValue.data(
@@ -375,23 +390,66 @@ class NotebookListNotifier
   Future<void> renameNotebook(NotebookEntry entry, String newTitle) async {
     final syncService = _ref.read(syncServiceProvider);
     final webdav = _ref.read(webdavServiceProvider);
-    if (syncService == null || webdav == null) return;
+    final fileService = _ref.read(fileServiceProvider);
 
-    // Scarica notebook completo (una sola volta)
-    final result = await syncService.downloadNotebookFull(entry.remotePath);
+    // Use the local copy instead of downloading from remote.
+    // This works offline and avoids overwriting unsaved local changes.
+    final localData = await fileService.readNotebookFile(entry.metadata.id);
+    if (localData == null) {
+      // No local copy — can't rename
+      debugPrint('[Library] Cannot rename: no local file for ${entry.metadata.id}');
+      return;
+    }
+
+    if (syncService == null) return;
+
+    final result = syncService.parseNcnoteMetadata(localData);
+    final allPages = syncService.extractAllPages(localData);
+    final allAssets = syncService.extractAllAssets(localData);
+    final symbolLibraries = syncService.extractSymbolLibraries(localData);
+
     final updatedMeta = result.metadata.copyWith(
       title: newTitle,
       modifiedAt: DateTime.now(),
     );
 
-    await syncService.uploadNotebook(
-      remotePath: entry.remotePath,
+    // Rebuild and save locally
+    final package = syncService.createNcnotePackage(
       metadata: updatedMeta,
       document: result.document,
-      pages: result.pages,
-      assets: result.assets.isNotEmpty ? result.assets : null,
-      symbolLibraries: result.symbolLibraries.isNotEmpty ? result.symbolLibraries : null,
+      pages: allPages,
+      assets: allAssets.isNotEmpty ? allAssets : null,
+      symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
     );
+    await fileService.saveNotebookFile(updatedMeta.id, package);
+    await fileService.upsertNotebookMeta(
+      id: updatedMeta.id,
+      title: newTitle,
+      remotePath: entry.remotePath,
+      localModifiedAt: updatedMeta.modifiedAt,
+      syncStatus: 'modified',
+      coverColor: updatedMeta.coverColor,
+      paperType: updatedMeta.paperType,
+      pageCount: updatedMeta.pageCount,
+      createdAt: updatedMeta.createdAt,
+    );
+
+    // Try to upload to server (best-effort — succeeds when online)
+    try {
+      if (webdav != null) {
+        final etag = await syncService.uploadNotebook(
+          remotePath: entry.remotePath,
+          metadata: updatedMeta,
+          document: result.document,
+          pages: allPages,
+          assets: allAssets.isNotEmpty ? allAssets : null,
+          symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
+        );
+        await fileService.markNotebookSynced(updatedMeta.id, etag);
+      }
+    } catch (e) {
+      debugPrint('[Library] Rename uploaded locally, remote sync deferred: $e');
+    }
 
     final current = state.valueOrNull ?? [];
     state = AsyncValue.data(current.map((e) {

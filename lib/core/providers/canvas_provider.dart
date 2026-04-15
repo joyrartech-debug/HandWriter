@@ -317,6 +317,32 @@ class PendingRemoteChanges {
 }
 
 // ═══════════════════════════════════════════════════════════════
+//  PAGE CONFLICT — local vs remote for visual diff
+// ═══════════════════════════════════════════════════════════════
+
+class PageConflict {
+  final String fileName;
+  final int pageNumber;
+  final String? chapterName;
+  final PageData localPage;
+  final PageData remotePage;
+  /// Pre-decoded images for rendering local version in preview.
+  final Map<String, ui.Image> localImageCache;
+  /// Pre-decoded images for rendering remote version in preview.
+  final Map<String, ui.Image> remoteImageCache;
+
+  const PageConflict({
+    required this.fileName,
+    required this.pageNumber,
+    this.chapterName,
+    required this.localPage,
+    required this.remotePage,
+    this.localImageCache = const {},
+    this.remoteImageCache = const {},
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════
 //  CANVAS STATE
 // ═══════════════════════════════════════════════════════════════
 
@@ -354,6 +380,7 @@ class CanvasState {
   final bool pendingPaste;
   final String? activeChapterId;
   final PendingRemoteChanges? pendingRemoteChanges;
+  final List<PageConflict> pendingConflicts;
 
   /// Indices of pages visible under the active chapter filter (or all if null).
   List<int> get filteredPageIndices {
@@ -402,6 +429,7 @@ class CanvasState {
     this.pendingPaste = false,
     this.activeChapterId,
     this.pendingRemoteChanges,
+    this.pendingConflicts = const [],
   });
 
   PageData? get currentPage {
@@ -460,6 +488,8 @@ class CanvasState {
     bool clearActiveChapter = false,
     PendingRemoteChanges? pendingRemoteChanges,
     bool clearPendingRemoteChanges = false,
+    List<PageConflict>? pendingConflicts,
+    bool clearPendingConflicts = false,
   }) =>
       CanvasState(
         metadata: metadata ?? this.metadata,
@@ -492,6 +522,7 @@ class CanvasState {
         pendingPaste: pendingPaste ?? this.pendingPaste,
         activeChapterId: clearActiveChapter ? null : (activeChapterId ?? this.activeChapterId),
         pendingRemoteChanges: clearPendingRemoteChanges ? null : (pendingRemoteChanges ?? this.pendingRemoteChanges),
+        pendingConflicts: clearPendingConflicts ? const [] : (pendingConflicts ?? this.pendingConflicts),
       );
 }
 
@@ -515,6 +546,40 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   // Track whether we've pushed undo for the current eraser/drag gesture
   bool _eraserUndoPushed = false;
   Size? _viewportSize;
+
+  /// Mutex: serializes save() and _pullRemoteChanges() so they never
+  /// race each other. Only one can modify state at a time.
+  Completer<void>? _syncLock;
+  bool _disposed = false;
+
+  /// Acquire exclusive sync lock. Returns when lock available.
+  /// Returns false if notifier was disposed while waiting.
+  Future<bool> _acquireSyncLock() async {
+    while (_syncLock != null && !_disposed) {
+      try {
+        await _syncLock!.future;
+      } catch (_) {
+        break;
+      }
+    }
+    if (_disposed) return false;
+    _syncLock = Completer<void>();
+    return true;
+  }
+
+  /// Release sync lock.
+  void _releaseSyncLock() {
+    final lock = _syncLock;
+    _syncLock = null;
+    if (lock != null && !lock.isCompleted) lock.complete();
+  }
+
+  /// Force-release lock and cancel pending waiters (used on close/dispose).
+  void _forceReleaseSyncLock() {
+    final lock = _syncLock;
+    _syncLock = null;
+    if (lock != null && !lock.isCompleted) lock.complete();
+  }
 
   /// Page file names modified since the last successful delta sync.
   /// Cleared after each sync cycle. Used to upload only changed pages.
@@ -630,9 +695,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
 
     // Initialize delta sync tracking
+    _disposed = false;
     _lastSyncedPages = Map.of(pages);
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
+    // Pre-populate page ETags so the first pull doesn't see every page as
+    // "changed" (empty cache vs all remote ETags → false positives).
+    _initPageEtags(metadata.id);
     _startPullTimer();
 
     // Decode all asset images into the render cache
@@ -643,10 +712,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
   }
 
+  /// Fetch current page ETags from the server and cache them so the first
+  /// pull cycle has a baseline to diff against.
+  Future<void> _initPageEtags(String notebookId) async {
+    try {
+      final syncService = _ref.read(syncServiceProvider);
+      if (syncService == null) return;
+      final changeState = await syncService.getRemoteChangeState(notebookId);
+      _lastPageEtags = Map.of(changeState.pageEtags);
+      _remoteMetaEtag = changeState.metaEtag;
+      try {
+        final remotePath = state?.remotePath;
+        if (remotePath != null) {
+          _remoteNcnoteEtag = await syncService.getNcnoteEtag(remotePath);
+        }
+      } catch (_) {}
+      debugPrint('[Canvas] Initialized ${_lastPageEtags.length} page ETags');
+    } catch (e) {
+      debugPrint('[Canvas] Could not init page ETags: $e');
+    }
+  }
+
   void closeNotebook() {
+    _disposed = true;
     _saveLastPosition();
     _pullTimer?.cancel();
     _pullTimer = null;
+    _isPulling = false;
+    _forceReleaseSyncLock();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
     _lastSyncedPages = {};
@@ -4284,6 +4377,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   Future<void> save() async {
     if (state == null || !state!.isDirty) return;
+    final locked = await _acquireSyncLock();
+    if (!locked || state == null) return;
+    try {
+      await _saveInner();
+    } finally {
+      _releaseSyncLock();
+    }
+  }
+
+  Future<void> _saveInner() async {
+    if (state == null || !state!.isDirty) return;
     final s = state!;
     final syncService = _ref.read(syncServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
@@ -4293,6 +4397,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // ── Detect which pages actually changed (identity comparison) ──
     final changedPages = <String, PageData>{};
+
     for (final entry in s.pages.entries) {
       if (!identical(entry.value, _lastSyncedPages[entry.key])) {
         changedPages[entry.key] = entry.value;
@@ -4343,8 +4448,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _lastSyncedPages = Map.of(s.pages);
     _dirtyAssetKeys.clear();
 
-    // 4. Fire-and-forget: local write + delta upload in background.
-    _persistAndSyncAsync(
+    // 4. Write locally + upload to server (awaited to keep sync lock
+    //    held until ETags are refreshed — prevents pull from re-downloading
+    //    our own upload due to stale ETag cache).
+    await _persistAndSyncAsync(
       fileService: fileService,
       syncService: syncService,
       package: package,
@@ -4372,7 +4479,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, Uint8List>? dirtyAssets,
     List<Map<String, dynamic>>? symbolLibraries,
   }) async {
-    _isSyncing = true;
     try {
       await _persistAndSyncInner(
         fileService: fileService,
@@ -4385,8 +4491,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         dirtyAssets: dirtyAssets,
         symbolLibraries: symbolLibraries,
       );
-    } finally {
-      _isSyncing = false;
+    } catch (e) {
+      debugPrint('[Canvas] _persistAndSyncAsync error: $e');
     }
   }
 
@@ -4401,32 +4507,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, Uint8List>? dirtyAssets,
     List<Map<String, dynamic>>? symbolLibraries,
   }) async {
-    // Local file write (full ZIP for offline cache)
-    try {
-      await fileService.saveNotebookFile(updatedMeta.id, package);
-      await fileService.upsertNotebookMeta(
-        id: updatedMeta.id,
-        title: updatedMeta.title,
-        remotePath: remotePath,
-        localModifiedAt: updatedMeta.modifiedAt,
-        syncStatus: 'modified',
-        fileSize: package.length,
-        coverColor: updatedMeta.coverColor,
-        paperType: updatedMeta.paperType,
-        pageCount: updatedMeta.pageCount,
-        createdAt: updatedMeta.createdAt,
-      );
-      debugPrint('[Canvas] Saved locally: ${updatedMeta.title}');
-    } catch (e) {
-      debugPrint('[Canvas] Local save failed: $e');
-      return;
-    }
+    // ── Local save + remote sync in parallel ──
+    // Local file write runs concurrently with remote delta upload.
+    final localSaveFuture = () async {
+      try {
+        await fileService.saveNotebookFile(updatedMeta.id, package);
+        await fileService.upsertNotebookMeta(
+          id: updatedMeta.id,
+          title: updatedMeta.title,
+          remotePath: remotePath,
+          localModifiedAt: updatedMeta.modifiedAt,
+          syncStatus: 'modified',
+          fileSize: package.length,
+          coverColor: updatedMeta.coverColor,
+          paperType: updatedMeta.paperType,
+          pageCount: updatedMeta.pageCount,
+          createdAt: updatedMeta.createdAt,
+        );
+        debugPrint('[Canvas] Saved locally: ${updatedMeta.title}');
+        return true;
+      } catch (e) {
+        debugPrint('[Canvas] Local save failed: $e');
+        return false;
+      }
+    }();
 
-    // Remote sync — delta when possible, full upload as fallback
-    try {
+    final remoteSyncFuture = () async {
       // First ensure the exploded folder exists (one-time migration)
       final hasDelta = await syncService.deltaFolderExists(updatedMeta.id);
-      debugPrint('[Canvas] Delta folder exists: $hasDelta');
       if (!hasDelta) {
         debugPrint('[Canvas] Migrating to exploded format...');
         await syncService.migrateToExploded(updatedMeta.id, package);
@@ -4445,23 +4553,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       );
 
       _remoteMetaEtag = etag;
-      // Snapshot ETags to avoid re-pulling our own save
-      try {
-        _remoteNcnoteEtag = await syncService.getNcnoteEtag(remotePath);
-        _lastPageEtags = await syncService.getRemotePageEtags(updatedMeta.id);
-      } catch (_) {}
+      // Snapshot ETags in parallel to avoid re-pulling our own save
+      final results = await Future.wait([
+        syncService.getNcnoteEtag(remotePath),
+        syncService.getRemotePageEtags(updatedMeta.id),
+      ]);
+      _remoteNcnoteEtag = results[0] as String?;
+      _lastPageEtags = results[1] as Map<String, String>;
       await fileService.markNotebookSynced(updatedMeta.id, etag);
       print('[Canvas] Delta synced: ${dirtyPages.length} pages → server');
+    }();
 
-      // Also update the .ncnote ZIP on server so other devices
-      // (that may not use delta sync / library refresh) get the latest
-      try {
-        final ncEtag = await syncService.uploadNcnoteZip(remotePath, package);
-        if (ncEtag != null) _remoteNcnoteEtag = ncEtag;
-        debugPrint('[Canvas] Updated .ncnote ZIP on server');
-      } catch (e) {
-        debugPrint('[Canvas] .ncnote ZIP upload failed (non-critical): $e');
-      }
+    // Wait for both — local save must succeed for consistency
+    final localOk = await localSaveFuture;
+    if (!localOk) return;
+
+    try {
+      await remoteSyncFuture;
     } catch (e) {
       debugPrint('[Canvas] Remote sync deferred (offline?): $e');
       await fileService.markNotebookDirty(updatedMeta.id);
@@ -4474,36 +4582,59 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void _startPullTimer() {
     _pullTimer?.cancel();
+    // Immediate pull on notebook open — don't wait first interval
+    _pullRemoteChanges();
     _pullTimer = Timer.periodic(AppConfig.deltaPullInterval, (_) {
       _pullRemoteChanges();
     });
   }
 
   bool _isPulling = false;
-  bool _isSyncing = false; // true while _persistAndSyncAsync is running
+  // _isSyncing tracked by _syncLock mutex
 
   /// Checks if the remote metadata.json ETag has changed, then pulls
   /// only the pages that differ. Falls back to checking the .ncnote ZIP
   /// for devices that don't use delta sync. Merges into the live canvas.
+  ///
+  /// Now mutex-protected: waits for any in-flight save() to finish first,
+  /// and if local pages are dirty, creates per-page conflicts instead of
+  /// silently overwriting.
   Future<void> _pullRemoteChanges() async {
-    if (_isPulling || _isSyncing || state == null || state!.isDirty) return;
+    if (_isPulling || state == null) return;
+    // Don't pull while user is resolving conflicts or reviewing pending
+    // remote changes — avoids overwriting with a fresh pull.
+    if (state!.pendingConflicts.isNotEmpty) return;
+    if (state!.pendingRemoteChanges != null) return;
     _isPulling = true;
 
+    final locked = await _acquireSyncLock();
+    if (!locked) {
+      _isPulling = false;
+      return;
+    }
     try {
+      if (state == null) return;
       final s = state!;
       final syncService = _ref.read(syncServiceProvider);
       if (syncService == null) return;
 
-      // ── Strategy 1: Check the exploded _delta/ folder ──
-      final remoteEtag = await syncService.getDeltaMetaEtag(s.metadata.id);
-      if (remoteEtag != null && remoteEtag != _remoteMetaEtag) {
+      // ── Strategy 1: Parallel fetch metadata ETag + page ETags ──
+      final changeState = await syncService.getRemoteChangeState(s.metadata.id);
+      if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
         print('[Canvas] Delta metadata changed, pulling delta...');
-        final pulled = await _pullFromDelta(s, syncService);
-        _remoteMetaEtag = remoteEtag;
-        if (pulled) return; // delta pull handled the merge
+        final pulled = await _pullFromDeltaFast(
+          s, syncService, changeState.pageEtags,
+        );
+        _remoteMetaEtag = changeState.metaEtag;
+        // Also snapshot the .ncnote ZIP ETag so the fallback strategy below
+        // doesn't re-pull the same edit that we just handled via delta.
+        try {
+          _remoteNcnoteEtag = await syncService.getNcnoteEtag(s.remotePath);
+        } catch (_) {}
+        if (pulled) return;
       }
 
-      // ── Strategy 2: Check the .ncnote ZIP (fallback for non-delta devices) ──
+      // ── Strategy 2: Check .ncnote ZIP (fallback for non-delta devices) ──
       final ncnoteEtag = await syncService.getNcnoteEtag(s.remotePath);
       if (ncnoteEtag != null && ncnoteEtag != _remoteNcnoteEtag) {
         print('[Canvas] Remote .ncnote ZIP changed, pulling full...');
@@ -4514,15 +4645,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       print('[Canvas] Pull failed: $e');
     } finally {
       _isPulling = false;
+      _releaseSyncLock();
     }
   }
 
   /// Pull changed pages from the exploded _delta/ folder.
   /// Uses per-page WebDAV ETags to detect which pages actually changed.
   /// Returns true if any pages were merged.
-  Future<bool> _pullFromDelta(CanvasState s, SyncService syncService) async {
-    final remotePageEtags =
-        await syncService.getRemotePageEtags(s.metadata.id);
+  /// [preloadedPageEtags]: already-fetched page ETags (parallel optimization).
+  Future<bool> _pullFromDeltaFast(
+    CanvasState s,
+    SyncService syncService,
+    Map<String, String> preloadedPageEtags,
+  ) async {
+    return _pullFromDeltaInner(s, syncService, preloadedPageEtags);
+  }
+
+  Future<bool> _pullFromDeltaInner(
+    CanvasState s,
+    SyncService syncService,
+    Map<String, String> remotePageEtags,
+  ) async {
     print('[Canvas] Remote has ${remotePageEtags.length} pages, local cache has ${_lastPageEtags.length} ETags');
 
     // Find pages whose WebDAV ETag changed since last pull
@@ -4540,14 +4683,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     print('[Canvas] Delta pull: ${pagesToPull.length} pages changed');
-    final remoteMeta = await syncService.downloadDeltaMeta(s.metadata.id);
 
+    // Download metadata + changed pages in parallel (one round-trip)
+    late final ({NotebookMetadata metadata, DocumentStructure document}) remoteMeta;
     final updatedPages = Map<String, PageData>.from(s.pages);
     final updatedAssets = Map<String, Uint8List>.from(s.assetBytes);
     var anyPageChanged = false;
 
-    // Download all changed pages in parallel
-    final results = await Future.wait(
+    final metaFuture = syncService.downloadDeltaMeta(s.metadata.id);
+    final pagesFuture = Future.wait(
       pagesToPull.map((pageFileName) async {
         try {
           final remotePage = await syncService.downloadDeltaPage(
@@ -4560,6 +4704,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         }
       }),
     );
+    // Await both in parallel — pages and metadata finish together
+    final results = await pagesFuture;
+    remoteMeta = await metaFuture;
+
     for (final (fileName, page, error) in results) {
       if (page != null) {
         updatedPages[fileName] = page;
@@ -4617,16 +4765,66 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       print('[Canvas] Pulled ${assetResults.where((r) => r.$2 != null).length} assets in parallel');
     }
 
-    if (anyPageChanged && state != null && !state!.isDirty && !_isSyncing) {
-      // ── Build per-page change details ──
-      final details = <PageChangeDetail>[];
-      var newCount = 0;
-      var modCount = 0;
+    if (anyPageChanged && state != null) {
+      // ── Detect conflicts: pages changed both locally AND remotely ──
+      final conflicts = <PageConflict>[];
+      final safePages = <String>{}; // non-conflicting remote pages
       for (final fileName in pagesToPull) {
         final remotePage = updatedPages[fileName];
         final localPage = s.pages[fileName];
         if (remotePage == null) continue;
+
+        // Skip pages where local and remote have identical content —
+        // no conflict and no change to report.
+        if (localPage != null && localPage == remotePage) {
+          continue;
+        }
+
+        // Conflict: local page was edited since last sync AND remote changed.
+        // Use deep equality (==) instead of identical() — object identity
+        // breaks after state rebuilds even when content hasn't changed.
+        final locallyEdited = localPage != null &&
+            _lastSyncedPages[fileName] != null &&
+            localPage != _lastSyncedPages[fileName];
+        if (locallyEdited) {
+          final pageIndex = remoteMeta.document.pages.indexWhere(
+              (e) => e.fileName == fileName);
+          final pageEntry = pageIndex >= 0
+              ? remoteMeta.document.pages[pageIndex]
+              : null;
+          final chapterName = _chapterNameForPage(pageEntry, remoteMeta.metadata);
+          conflicts.add(PageConflict(
+            fileName: fileName,
+            pageNumber: remotePage.pageNumber,
+            chapterName: chapterName,
+            localPage: localPage,
+            remotePage: remotePage,
+            localImageCache: Map.of(state!.imageCache),
+            remoteImageCache: Map.of(state!.imageCache),
+          ));
+          print('[Canvas] CONFLICT on $fileName — local + remote edits');
+        } else {
+          safePages.add(fileName);
+        }
+      }
+
+      // ── Build per-page change details for non-conflicting pages ──
+      // Skip pages whose content is identical to local (same ETag ≠ same
+      // content, but downloading gave us the actual data to compare).
+      final details = <PageChangeDetail>[];
+      var newCount = 0;
+      var modCount = 0;
+      for (final fileName in safePages) {
+        final remotePage = updatedPages[fileName];
+        final localPage = s.pages[fileName];
+        if (remotePage == null) continue;
         final isNew = localPage == null;
+        // Content-equality check: if the downloaded page has the same
+        // data as local, don't report it as modified.
+        if (!isNew && localPage == remotePage) {
+          // Silently accept the identical page (keeps updatedPages in sync)
+          continue;
+        }
         if (isNew) newCount++; else modCount++;
         final pageIndex = remoteMeta.document.pages.indexWhere((e) => e.fileName == fileName);
         final pageEntry = pageIndex >= 0 ? remoteMeta.document.pages[pageIndex] : null;
@@ -4646,19 +4844,38 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         ));
       }
 
-      final pending = PendingRemoteChanges(
-        metadata: remoteMeta.metadata,
-        document: remoteMeta.document,
-        pages: updatedPages,
-        assets: updatedAssets,
-        changedPages: details,
-        newPageCount: newCount,
-        modifiedPageCount: modCount,
-        newAssetCount: missingAssets.length,
-      );
+      // Show conflicts if any, plus non-conflicting changes banner
+      if (conflicts.isNotEmpty || details.isNotEmpty) {
+        final pending = details.isNotEmpty
+            ? PendingRemoteChanges(
+                metadata: remoteMeta.metadata,
+                document: remoteMeta.document,
+                pages: updatedPages,
+                assets: updatedAssets,
+                changedPages: details,
+                newPageCount: newCount,
+                modifiedPageCount: modCount,
+                newAssetCount: missingAssets.length,
+              )
+            : null;
 
-      state = state!.copyWith(pendingRemoteChanges: pending);
-      print('[Canvas] Remote changes ready for review: $modCount modified, $newCount new pages');
+        state = state!.copyWith(
+          pendingRemoteChanges: pending,
+          pendingConflicts: conflicts.isNotEmpty ? conflicts : null,
+          clearPendingRemoteChanges: pending == null,
+          clearPendingConflicts: conflicts.isEmpty,
+        );
+        print('[Canvas] Pull result: ${conflicts.length} conflicts, '
+            '$modCount safe merges, $newCount new pages');
+
+        // Auto-accept addition-only changes (no conflicts, no modifications)
+        // so the user doesn't have to manually tap "accept" for new pages.
+        if (conflicts.isEmpty && pending != null &&
+            pending.modifiedPageCount == 0 && pending.deletedPageCount == 0) {
+          print('[Canvas] Auto-accepting ${pending.newPageCount} new pages');
+          acceptRemoteChanges();
+        }
+      }
     }
     _lastPageEtags = Map.of(remotePageEtags);
     return anyPageChanged;
@@ -4701,56 +4918,108 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
-    if (anyChanged && state != null && !state!.isDirty && !_isSyncing) {
-      // ── Build per-page change details ──
-      final details = <PageChangeDetail>[];
-      var newCount = 0;
-      var modCount = 0;
+    if (anyChanged && state != null) {
+      // ── Detect conflicts: pages changed both locally AND remotely ──
+      final conflicts = <PageConflict>[];
+      final safeChangedKeys = <String>{}; // remote pages with no local conflict
       for (final entry in remoteData.pages.entries) {
         final localPage = s.pages[entry.key];
-        final isChanged = localPage == null ||
+        final isRemoteNewer = localPage == null ||
             localPage.modifiedAt == null ||
             (entry.value.modifiedAt != null &&
              entry.value.modifiedAt!.isAfter(localPage.modifiedAt!));
-        if (isChanged) {
-          final isNew = localPage == null;
-          if (isNew) newCount++; else modCount++;
-          final pageIndex = remoteData.document.pages.indexWhere((e) => e.fileName == entry.key);
-          final pageEntry = pageIndex >= 0 ? remoteData.document.pages[pageIndex] : null;
+        if (!isRemoteNewer) continue;
+
+        // Skip pages where local and remote are identical content-wise
+        if (localPage != null && localPage == entry.value) continue;
+
+        final locallyEdited = localPage != null &&
+            _lastSyncedPages[entry.key] != null &&
+            localPage != _lastSyncedPages[entry.key];
+        if (locallyEdited) {
+          final pageIndex = remoteData.document.pages.indexWhere(
+              (e) => e.fileName == entry.key);
+          final pageEntry = pageIndex >= 0
+              ? remoteData.document.pages[pageIndex]
+              : null;
           final chapterName = _chapterNameForPage(pageEntry, remoteData.metadata);
-          final localCounts = _elementCounts(localPage);
-          final remoteCounts = _elementCounts(entry.value);
-          details.add(PageChangeDetail(
+          conflicts.add(PageConflict(
             fileName: entry.key,
             pageNumber: entry.value.pageNumber,
-            pageIndex: pageIndex >= 0 ? pageIndex : 0,
             chapterName: chapterName,
-            changeType: isNew ? PageChangeType.added : PageChangeType.modified,
-            localStrokeCount: localCounts.$1, remoteStrokeCount: remoteCounts.$1,
-            localImageCount: localCounts.$2, remoteImageCount: remoteCounts.$2,
-            localShapeCount: localCounts.$3, remoteShapeCount: remoteCounts.$3,
-            localTextCount: localCounts.$4, remoteTextCount: remoteCounts.$4,
+            localPage: localPage,
+            remotePage: entry.value,
+            localImageCache: Map.of(state!.imageCache),
+            remoteImageCache: Map.of(state!.imageCache),
           ));
+        } else {
+          safeChangedKeys.add(entry.key);
         }
+      }
+
+      // ── Build per-page change details for safe (non-conflicting) ──
+      final details = <PageChangeDetail>[];
+      var newCount = 0;
+      var modCount = 0;
+      for (final key in safeChangedKeys) {
+        final localPage = s.pages[key];
+        final remotePage = remoteData.pages[key]!;
+        final isNew = localPage == null;
+        // Skip pages whose content is identical to local
+        if (!isNew && localPage == remotePage) continue;
+        if (isNew) newCount++; else modCount++;
+        final pageIndex = remoteData.document.pages.indexWhere((e) => e.fileName == key);
+        final pageEntry = pageIndex >= 0 ? remoteData.document.pages[pageIndex] : null;
+        final chapterName = _chapterNameForPage(pageEntry, remoteData.metadata);
+        final localCounts = _elementCounts(localPage);
+        final remoteCounts = _elementCounts(remotePage);
+        details.add(PageChangeDetail(
+          fileName: key,
+          pageNumber: remotePage.pageNumber,
+          pageIndex: pageIndex >= 0 ? pageIndex : 0,
+          chapterName: chapterName,
+          changeType: isNew ? PageChangeType.added : PageChangeType.modified,
+          localStrokeCount: localCounts.$1, remoteStrokeCount: remoteCounts.$1,
+          localImageCount: localCounts.$2, remoteImageCount: remoteCounts.$2,
+          localShapeCount: localCounts.$3, remoteShapeCount: remoteCounts.$3,
+          localTextCount: localCounts.$4, remoteTextCount: remoteCounts.$4,
+        ));
       }
 
       final newAssets = remoteData.assets.keys
           .where((k) => !s.assetBytes.containsKey(k))
           .length;
 
-      final pending = PendingRemoteChanges(
-        metadata: remoteData.metadata,
-        document: remoteData.document,
-        pages: updatedPages,
-        assets: updatedAssets,
-        changedPages: details,
-        newPageCount: newCount,
-        modifiedPageCount: modCount,
-        newAssetCount: newAssets,
-      );
+      if (conflicts.isNotEmpty || details.isNotEmpty) {
+        final pending = details.isNotEmpty
+            ? PendingRemoteChanges(
+                metadata: remoteData.metadata,
+                document: remoteData.document,
+                pages: updatedPages,
+                assets: updatedAssets,
+                changedPages: details,
+                newPageCount: newCount,
+                modifiedPageCount: modCount,
+                newAssetCount: newAssets,
+              )
+            : null;
 
-      state = state!.copyWith(pendingRemoteChanges: pending);
-      print('[Canvas] Remote ZIP changes ready for review: $modCount modified, $newCount new pages');
+        state = state!.copyWith(
+          pendingRemoteChanges: pending,
+          pendingConflicts: conflicts.isNotEmpty ? conflicts : null,
+          clearPendingRemoteChanges: pending == null,
+          clearPendingConflicts: conflicts.isEmpty,
+        );
+        print('[Canvas] ZIP pull: ${conflicts.length} conflicts, '
+            '$modCount safe merges, $newCount new pages');
+
+        // Auto-accept addition-only changes (no conflicts, no modifications)
+        if (conflicts.isEmpty && pending != null &&
+            pending.modifiedPageCount == 0 && pending.deletedPageCount == 0) {
+          print('[Canvas] Auto-accepting ${pending.newPageCount} new pages (ZIP)');
+          acceptRemoteChanges();
+        }
+      }
     }
   }
 
@@ -4779,6 +5048,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       pending.metadata, pending.document,
       pending.pages, pending.assets,
     );
+
+    // Refresh the .ncnote ZIP ETag so the next pull cycle doesn't
+    // see the same server-side ZIP as "changed" and re-download it.
+    _refreshNcnoteEtag();
+  }
+
+  /// Refresh the cached .ncnote ZIP ETag from the server (fire-and-forget).
+  Future<void> _refreshNcnoteEtag() async {
+    try {
+      final syncService = _ref.read(syncServiceProvider);
+      final remotePath = state?.remotePath;
+      if (syncService == null || remotePath == null) return;
+      _remoteNcnoteEtag = await syncService.getNcnoteEtag(remotePath);
+    } catch (_) {}
   }
 
   /// User dismissed the incoming remote changes — keep local state.
@@ -4788,6 +5071,55 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null) return;
     state = state!.copyWith(clearPendingRemoteChanges: true);
     print('[Canvas] User dismissed remote changes');
+  }
+
+  /// User resolved per-page conflicts via visual diff screen.
+  /// [resolutions]: fileName → true=keep local, false=accept remote.
+  void resolveConflicts(Map<String, bool> resolutions) {
+    if (state == null || state!.pendingConflicts.isEmpty) return;
+    final s = state!;
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    var anyRemoteAccepted = false;
+
+    for (final conflict in s.pendingConflicts) {
+      final keepLocal = resolutions[conflict.fileName] ?? true;
+      if (!keepLocal) {
+        updatedPages[conflict.fileName] = conflict.remotePage;
+        anyRemoteAccepted = true;
+        print('[Canvas] Conflict resolved → REMOTE: ${conflict.fileName}');
+      } else {
+        print('[Canvas] Conflict resolved → LOCAL: ${conflict.fileName}');
+      }
+    }
+
+    _lastSyncedPages = Map.of(updatedPages);
+    state = s.copyWith(
+      pages: updatedPages,
+      isDirty: anyRemoteAccepted || s.isDirty,
+      clearPendingConflicts: true,
+    );
+
+    // Save merged result locally + trigger sync
+    if (anyRemoteAccepted) {
+      _triggerSaveAfterConflictResolution();
+    }
+  }
+
+  /// Keep all local versions, discard conflicts.
+  void dismissConflicts() {
+    if (state == null) return;
+    // Update baseline so the next pull doesn't re-detect the same edits.
+    _lastSyncedPages = Map.of(state!.pages);
+    state = state!.copyWith(clearPendingConflicts: true);
+    print('[Canvas] User dismissed all conflicts (kept local)');
+  }
+
+  /// After conflict resolution, save merged state.
+  Future<void> _triggerSaveAfterConflictResolution() async {
+    if (state == null) return;
+    // Mark dirty so save() picks it up
+    state = state!.copyWith(isDirty: true);
+    await save();
   }
 
   /// Accept remote changes and navigate to a specific page.
@@ -4846,6 +5178,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         symbolLibraries: symbolLibs,
       ));
       await fileService.saveNotebookFile(metadata.id, package);
+      // Also update DB metadata so the library screen reflects the pulled
+      // title, page count, cover color, etc. without a full re-download.
+      await fileService.upsertNotebookMeta(
+        id: metadata.id,
+        title: metadata.title,
+        remotePath: state?.remotePath ?? '',
+        localModifiedAt: metadata.modifiedAt,
+        syncStatus: 'synced',
+        fileSize: package.length,
+        coverColor: metadata.coverColor,
+        paperType: metadata.paperType,
+        pageCount: metadata.pageCount,
+        createdAt: metadata.createdAt,
+      );
       print('[Canvas] Saved pulled changes locally (${package.length} bytes)');
     } catch (e) {
       print('[Canvas] Failed to save pulled changes locally: $e');
@@ -4876,18 +5222,21 @@ Uint8List _buildPackageInIsolate(_PackageParams p) {
   // Create a throwaway SyncService-less package builder (static-ish logic).
   final archive = Archive();
 
-  final metaJson = jsonEncode(p.metadata.toJson());
-  archive.addFile(ArchiveFile(AppConfig.metadataFile, metaJson.length, utf8.encode(metaJson)));
+  // IMPORTANT: Use utf8.encode() first, then .length for the byte count.
+  // String.length returns UTF-16 code units, which differs from UTF-8 byte
+  // length for non-ASCII characters (e.g. accented Italian letters).
+  final metaBytes = utf8.encode(jsonEncode(p.metadata.toJson()));
+  archive.addFile(ArchiveFile(AppConfig.metadataFile, metaBytes.length, metaBytes));
 
-  final docJson = jsonEncode(p.document.toJson());
-  archive.addFile(ArchiveFile(AppConfig.documentFile, docJson.length, utf8.encode(docJson)));
+  final docBytes = utf8.encode(jsonEncode(p.document.toJson()));
+  archive.addFile(ArchiveFile(AppConfig.documentFile, docBytes.length, docBytes));
 
   for (final entry in p.pages.entries) {
-    final pageJson = jsonEncode(entry.value.toJson());
+    final pageBytes = utf8.encode(jsonEncode(entry.value.toJson()));
     archive.addFile(ArchiveFile(
       '${AppConfig.pagesDir}/${entry.key}',
-      pageJson.length,
-      utf8.encode(pageJson),
+      pageBytes.length,
+      pageBytes,
     ));
   }
 
@@ -4902,8 +5251,8 @@ Uint8List _buildPackageInIsolate(_PackageParams p) {
   }
 
   if (p.symbolLibraries != null && p.symbolLibraries!.isNotEmpty) {
-    final symbolsJson = jsonEncode(p.symbolLibraries);
-    archive.addFile(ArchiveFile('symbols.json', symbolsJson.length, utf8.encode(symbolsJson)));
+    final symbolsBytes = utf8.encode(jsonEncode(p.symbolLibraries));
+    archive.addFile(ArchiveFile('symbols.json', symbolsBytes.length, symbolsBytes));
   }
 
   final bytes = Uint8List.fromList(ZipEncoder().encode(archive)!);

@@ -18,7 +18,7 @@ class AppConfig {
 
   // ── Delta Sync ──
   /// How often the canvas checks for remote page changes from other devices.
-  static const Duration deltaPullInterval = Duration(seconds: 10);
+  static const Duration deltaPullInterval = Duration(seconds: 4);
   /// Remote sub-folder that holds exploded per-page files for each notebook.
   static const String deltaSyncDir = '_delta/';
 
