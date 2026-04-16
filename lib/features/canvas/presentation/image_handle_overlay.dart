@@ -47,10 +47,7 @@ class ImageHandleOverlay extends StatefulWidget {
 }
 
 class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
-  String? _activeHandle;
   Offset _dragStart = Offset.zero;
-  Rect _initialBounds = Rect.zero;
-  double _initialRotation = 0;
   Offset _rotationCenter = Offset.zero;
   double _lastRotationAngle = 0;
 
@@ -86,7 +83,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           child: GestureDetector(
             behavior: HitTestBehavior.translucent,
             onPanStart: widget.isLocked ? null : (d) {
-              _activeHandle = 'move';
               _dragStart = d.globalPosition;
               widget.onDragStart?.call();
             },
@@ -95,7 +91,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               _dragStart = d.globalPosition;
               widget.onMove(delta);
             },
-            onPanEnd: (_) => _activeHandle = null,
           ),
         ),
 
@@ -147,9 +142,7 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
       top: position.dy - _handleSize / 2,
       child: GestureDetector(
         onPanStart: (d) {
-          _activeHandle = handleId;
           _dragStart = d.globalPosition;
-          _initialBounds = widget.bounds;
           widget.onDragStart?.call();
         },
         onPanUpdate: (d) {
@@ -157,7 +150,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           _dragStart = d.globalPosition;
           _handleCornerResize(handleId, delta);
         },
-        onPanEnd: (_) => _activeHandle = null,
         child: Container(
           width: _handleSize,
           height: _handleSize,
@@ -179,9 +171,7 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
       top: position.dy - (isHorizontal ? 4 : 10),
       child: GestureDetector(
         onPanStart: (d) {
-          _activeHandle = handleId;
           _dragStart = d.globalPosition;
-          _initialBounds = widget.bounds;
           widget.onDragStart?.call();
         },
         onPanUpdate: (d) {
@@ -189,7 +179,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           _dragStart = d.globalPosition;
           _handleEdgeResize(handleId, delta);
         },
-        onPanEnd: (_) => _activeHandle = null,
         child: Container(
           width: isHorizontal ? 20 : 8,
           height: isHorizontal ? 8 : 20,
@@ -213,8 +202,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
         children: [
           GestureDetector(
             onPanStart: (d) {
-              _activeHandle = 'rotate';
-              _initialRotation = widget.rotation;
               // Compute element center in global coords from the handle position.
               // The handle is above the element center by a known distance
               // (half the element height + the handle gap). After rotation,
@@ -242,7 +229,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               _lastRotationAngle = currentAngle;
               widget.onRotate(delta);
             },
-            onPanEnd: (_) => _activeHandle = null,
             child: Container(
               width: 24,
               height: 24,

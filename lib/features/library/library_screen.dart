@@ -6,7 +6,6 @@ import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_screen.dart';
-import 'package:handwriter/shared/models/ncnote_format.dart';
 
 class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});

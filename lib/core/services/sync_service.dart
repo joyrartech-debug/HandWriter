@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:handwriter/config/app_config.dart';
@@ -617,10 +616,12 @@ class SyncService {
   ///
   /// Upload order ensures consistency:
   ///  1. Assets + pages in parallel (data files)
-  ///  2. document.json (structure)
-  ///  3. metadata.json LAST (acts as "commit" — other devices detect
+  ///  2. metadata.json LAST (acts as "commit" — other devices detect
   ///     changes via the metadata ETag, so updating it last guarantees
   ///     that all referenced data is already on the server).
+  ///
+  /// document.json is uploaded in parallel with Phase 1 because the
+  /// "published state" is gated on metadata.json only.
   ///
   /// If any data upload fails, metadata is NOT updated → other devices
   /// see the old consistent state rather than a partial one.
@@ -675,17 +676,18 @@ class SyncService {
           timeoutSeconds: dt));
     }
 
-    // All data uploads + deletes must succeed before we update the "pointers".
-    await Future.wait([...dataFutures, ...deleteFutures]);
-
-    // ── Phase 2: Upload document.json ──
+    // Phase 1 (data) + document.json run in parallel. Only metadata.json
+    // needs to go strictly last — it is the "commit marker" other devices
+    // watch via ETag.
     final docBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(document.toJson())),
     );
-    await _webdav.uploadFile('${dir}document.json', docBytes,
-        timeoutSeconds: dt);
+    dataFutures.add(_webdav.uploadFile('${dir}document.json', docBytes,
+        timeoutSeconds: dt));
 
-    // ── Phase 3: Upload metadata.json LAST (commit marker) ──
+    await Future.wait([...dataFutures, ...deleteFutures]);
+
+    // ── Phase 2: Upload metadata.json LAST (commit marker) ──
     final metaBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(metadata.toJson())),
     );

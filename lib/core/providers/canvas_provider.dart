@@ -1578,34 +1578,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     return (pt - lineStart).distance;
   }
 
-  List<int> _detectCorners(List<StrokePoint> points, double threshold) {
-    // Stride proportional to point count — look at meaningful segments,
-    // not micro-segments from dense stylus input.
-    // Larger stride avoids false corners on circles (direction changes
-    // gradually but can exceed low thresholds with small strides).
-    final stride = max(4, (points.length / 10).round());
-    final corners = <int>[];
-    for (int i = stride; i < points.length - stride; i++) {
-      final v1x = points[i].x - points[i - stride].x;
-      final v1y = points[i].y - points[i - stride].y;
-      final v2x = points[i + stride].x - points[i].x;
-      final v2y = points[i + stride].y - points[i].y;
-      final dot = v1x * v2x + v1y * v2y;
-      final mag1 = sqrt(v1x * v1x + v1y * v1y);
-      final mag2 = sqrt(v2x * v2x + v2y * v2y);
-      if (mag1 > 1 && mag2 > 1) {
-        final cosAngle = dot / (mag1 * mag2);
-        final angle = acos(cosAngle.clamp(-1.0, 1.0)) * 180 / pi;
-        if (angle > threshold && angle < 160) corners.add(i);
-      }
-    }
-    final minSep = max((points.length / 6).round(), stride * 3);
-    final merged = <int>[];
-    for (final c in corners) {
-      if (merged.isEmpty || c - merged.last > minSep) merged.add(c);
-    }
-    return merged;
-  }
 
   void _addShapeElement(ShapeData shapeData) {
     final s = state!;
@@ -1691,49 +1663,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       _distToSegment(p, br, bl),
       _distToSegment(p, bl, tl),
     ].reduce(min);
-  }
-
-  /// Whether the standard eraser (precise) hits the outline of a shape.
-  static bool _standardEraserHitsShape(ShapeData sh, Offset position, double eraseRadius) {
-    // Transform position to unrotated space if shape is rotated
-    Offset p = position;
-    if (sh.rotation != 0) {
-      final cx = (sh.x1 + sh.x2) / 2;
-      final cy = (sh.y1 + sh.y2) / 2;
-      final cosA = cos(-sh.rotation);
-      final sinA = sin(-sh.rotation);
-      final dx = position.dx - cx;
-      final dy = position.dy - cy;
-      p = Offset(cx + dx * cosA - dy * sinA, cy + dx * sinA + dy * cosA);
-    }
-
-    switch (sh.shapeType) {
-      case 'line':
-      case 'arrow':
-        return _distToSegment(p, Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2)) < eraseRadius;
-      case 'circle':
-        final center = Offset((sh.x1 + sh.x2) / 2, (sh.y1 + sh.y2) / 2);
-        final radius = Offset(sh.x2 - sh.x1, sh.y2 - sh.y1).distance / 2;
-        final distToCenter = (p - center).distance;
-        // Hit if near circumference
-        return (distToCenter - radius).abs() < eraseRadius;
-      case 'triangle':
-        final tLeft = min(sh.x1, sh.x2);
-        final tRight = max(sh.x1, sh.x2);
-        final top = min(sh.y1, sh.y2);
-        final bottom = max(sh.y1, sh.y2);
-        final apex = Offset((tLeft + tRight) / 2, top);
-        final bl = Offset(tLeft, bottom);
-        final br = Offset(tRight, bottom);
-        return [
-          _distToSegment(p, apex, bl),
-          _distToSegment(p, bl, br),
-          _distToSegment(p, br, apex),
-        ].reduce(min) < eraseRadius;
-      default: // rectangle and others
-        final rect = Rect.fromPoints(Offset(sh.x1, sh.y1), Offset(sh.x2, sh.y2));
-        return _distToRectEdges(p, rect) < eraseRadius;
-    }
   }
 
   /// Convert a shape outline into sampled edge segments (list of point lists).

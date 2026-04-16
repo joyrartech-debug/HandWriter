@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
@@ -460,9 +458,4 @@ class NotebookListNotifier
     }).toList());
   }
 
-  /// Estrae tutte le pagine da un archivio .ncnote raw.
-  Future<Map<String, PageData>> _extractPages(
-      SyncService sync, Uint8List data) async {
-    return sync.extractAllPages(data);
-  }
 }

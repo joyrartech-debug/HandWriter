@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io' as io;
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
@@ -67,7 +66,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // Long-press context menu for touch
   Timer? _longPressTimer;
   Offset _longPressGlobalPos = Offset.zero;
-  Offset _longPressLocalPos = Offset.zero;
   bool _longPressFired = false;
 
   // Track last stroke activity to suppress long-press menu while drawing
@@ -386,7 +384,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // Suppress context menu if user was drawing recently (palm rest while writing)
     if (DateTime.now().difference(_lastStrokeActivity).inMilliseconds < 3000) return;
     _longPressGlobalPos = globalPos;
-    _longPressLocalPos = localPos;
     _longPressFired = false;
     _longPressTimer = Timer(const Duration(milliseconds: 500), () {
       _longPressTimer = null;
@@ -2080,7 +2077,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Position below the selection
     final screenBottom = _toScreenCoords(scaledBounds.bottomCenter, state, canvasSize);
-    final screenCenter = _toScreenCoords(scaledBounds.center, state, canvasSize);
 
     // Clamp to stay within view
     final top = (screenBottom.dy + 12).clamp(0.0, canvasSize.height - 50);
@@ -2819,7 +2815,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             child: ListTile(
               leading: const Icon(Icons.description_outlined),
               title: Text(singlePageLabel),
-              subtitle: Text('Pagina ${(state?.currentPageIndex ?? 0) + 1}'),
+              subtitle: Text('Pagina ${state.currentPageIndex + 1}'),
               contentPadding: EdgeInsets.zero,
             ),
           ),
@@ -2829,7 +2825,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               child: ListTile(
                 leading: const Icon(Icons.bookmark_outline),
                 title: Text(chapterLabel),
-                subtitle: Text(_currentChapterLabel(state!)),
+                subtitle: Text(_currentChapterLabel(state)),
                 contentPadding: EdgeInsets.zero,
               ),
             ),
@@ -2838,7 +2834,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             child: ListTile(
               leading: const Icon(Icons.menu_book_rounded),
               title: Text(notebookLabel),
-              subtitle: Text('${state?.document.pages.length ?? 0} pagine'),
+              subtitle: Text('${state.document.pages.length} pagine'),
               contentPadding: EdgeInsets.zero,
             ),
           ),
@@ -3310,71 +3306,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     } else if (action == 'delete') {
       ref.read(canvasProvider.notifier).deleteChapter(chapter.id);
     }
-  }
-
-  void _showPageContextMenu(BuildContext ctx, WidgetRef ref, CanvasState state, int pageIndex, int visIdx, String? chapterName) {
-    showModalBottomSheet(
-      context: ctx,
-      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(12))),
-      builder: (sheetCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.open_in_new_rounded),
-              title: Text('Vai a pagina ${visIdx + 1}'),
-              onTap: () {
-                Navigator.pop(sheetCtx);
-                ref.read(canvasProvider.notifier).goToPage(pageIndex);
-                Navigator.pop(ctx);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.copy_all_rounded),
-              title: const Text('Duplica'),
-              onTap: () {
-                Navigator.pop(sheetCtx);
-                ref.read(canvasProvider.notifier).duplicatePage(pageIndex);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.folder_rounded),
-              title: const Text('Sposta in capitolo'),
-              onTap: () {
-                Navigator.pop(sheetCtx);
-                _showChapterPicker(ctx, state, pageIndex);
-              },
-            ),
-            if (chapterName != null)
-              ListTile(
-                leading: const Icon(Icons.folder_off_rounded),
-                title: const Text('Rimuovi da capitolo'),
-                onTap: () {
-                  Navigator.pop(sheetCtx);
-                  ref.read(canvasProvider.notifier).assignPageToChapter(pageIndex, null);
-                },
-              ),
-            ListTile(
-              leading: const Icon(Icons.add_rounded),
-              title: const Text('Inserisci pagina dopo'),
-              onTap: () {
-                Navigator.pop(sheetCtx);
-                ref.read(canvasProvider.notifier).insertPageAt(pageIndex + 1);
-              },
-            ),
-            if (state.pageCount > 1)
-              ListTile(
-                leading: const Icon(Icons.delete_rounded, color: Colors.red),
-                title: const Text('Elimina', style: TextStyle(color: Colors.red)),
-                onTap: () {
-                  Navigator.pop(sheetCtx);
-                  ref.read(canvasProvider.notifier).deletePage(pageIndex);
-                },
-              ),
-          ],
-        ),
-      ),
-    );
   }
 
   String _toolTypeString(CanvasTool tool) {
