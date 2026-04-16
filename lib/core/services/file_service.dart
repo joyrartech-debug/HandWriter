@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -12,11 +13,22 @@ import 'package:handwriter/config/app_config.dart';
 /// Directory layout (inside getApplicationDocumentsDirectory()):
 ///   HandWriter/
 ///     notebooks/
-///       <notebookId>.ncnote   ← full ZIP archive
-///     handwriter.db           ← sync metadata
+///       <notebookId>.ncnote        ← full ZIP archive
+///     snapshots/
+///       <notebookId>/
+///         <timestamp>.ncnote       ← rolling local backups (last 3)
+///     trash/
+///       <trashId>.ncnote           ← soft-deleted notebooks
+///       <trashId>.meta.json        ← metadata sidecar for restore
+///     handwriter.db                ← sync metadata
 class FileService {
+  /// Max rolling backups to keep per notebook.
+  static const int _maxSnapshots = 3;
+
   late final String _basePath;
   late final String _notebooksDir;
+  late final String _snapshotsDir;
+  late final String _trashDir;
   late final Database _db;
 
   bool _initialized = false;
@@ -30,8 +42,12 @@ class FileService {
     final appDir = await getApplicationDocumentsDirectory();
     _basePath = p.join(appDir.path, 'HandWriter');
     _notebooksDir = p.join(_basePath, 'notebooks');
+    _snapshotsDir = p.join(_basePath, 'snapshots');
+    _trashDir = p.join(_basePath, 'trash');
 
     await Directory(_notebooksDir).create(recursive: true);
+    await Directory(_snapshotsDir).create(recursive: true);
+    await Directory(_trashDir).create(recursive: true);
 
     _db = await openDatabase(
       p.join(_basePath, AppConfig.dbName),
@@ -84,14 +100,73 @@ class FileService {
       p.join(_notebooksDir, '$notebookId${AppConfig.fileExtension}');
 
   /// Saves a raw .ncnote archive to local storage.
+  ///
+  /// Before overwriting the existing file, snapshots the previous version
+  /// to `snapshots/<id>/<timestamp>.ncnote` keeping only the latest [_maxSnapshots].
   Future<void> saveNotebookFile(String notebookId, Uint8List data) async {
     final path = localPath(notebookId);
+
+    // Roll a snapshot of the previous version (best-effort, never blocks save).
+    try {
+      final existing = File(path);
+      if (await existing.exists()) {
+        await _rotateSnapshot(notebookId, existing);
+      }
+    } catch (e) {
+      debugPrint('[FileService] Snapshot rotation failed for $notebookId: $e');
+    }
+
     final tmpPath = '$path.tmp';
     // Atomic write: write to temp file, then rename
     final tmpFile = File(tmpPath);
     await tmpFile.writeAsBytes(data, flush: true);
     await tmpFile.rename(path);
     debugPrint('[FileService] Saved $notebookId (${data.length} bytes)');
+  }
+
+  /// Copies the current .ncnote into the snapshot folder and prunes older ones.
+  Future<void> _rotateSnapshot(String notebookId, File source) async {
+    final dir = Directory(p.join(_snapshotsDir, notebookId));
+    await dir.create(recursive: true);
+
+    final stamp = DateTime.now().millisecondsSinceEpoch.toString();
+    final dest = File(p.join(dir.path, '$stamp${AppConfig.fileExtension}'));
+    await source.copy(dest.path);
+
+    // Prune old snapshots (keep newest _maxSnapshots).
+    final snapshots = await dir
+        .list()
+        .where((e) => e is File && e.path.endsWith(AppConfig.fileExtension))
+        .toList();
+    snapshots.sort((a, b) => b.path.compareTo(a.path)); // timestamps sort lexically
+    for (var i = _maxSnapshots; i < snapshots.length; i++) {
+      try { await snapshots[i].delete(); } catch (_) {}
+    }
+  }
+
+  /// Lists available snapshots for a notebook, newest first.
+  /// Each entry is (timestamp, absolute path).
+  Future<List<(DateTime, String)>> listSnapshots(String notebookId) async {
+    final dir = Directory(p.join(_snapshotsDir, notebookId));
+    if (!await dir.exists()) return const [];
+    final out = <(DateTime, String)>[];
+    await for (final entry in dir.list()) {
+      if (entry is! File || !entry.path.endsWith(AppConfig.fileExtension)) continue;
+      final name = p.basenameWithoutExtension(entry.path);
+      final ms = int.tryParse(name);
+      if (ms == null) continue;
+      out.add((DateTime.fromMillisecondsSinceEpoch(ms), entry.path));
+    }
+    out.sort((a, b) => b.$1.compareTo(a.$1));
+    return out;
+  }
+
+  /// Restores a snapshot as the current notebook file.
+  Future<void> restoreSnapshot(String notebookId, String snapshotPath) async {
+    final src = File(snapshotPath);
+    if (!await src.exists()) throw StateError('Snapshot not found: $snapshotPath');
+    final data = await src.readAsBytes();
+    await saveNotebookFile(notebookId, data); // will also snapshot the current version
   }
 
   /// Reads a raw .ncnote archive from local storage.
@@ -223,10 +298,150 @@ class FileService {
     await _db.delete('notebooks', where: 'id = ?', whereArgs: [notebookId]);
     await _db.delete('dirty_pages', where: 'notebook_id = ?', whereArgs: [notebookId]);
     await deleteNotebookFile(notebookId);
+    // Also clean up any rolling snapshots for this notebook.
+    try {
+      final dir = Directory(p.join(_snapshotsDir, notebookId));
+      if (await dir.exists()) await dir.delete(recursive: true);
+    } catch (_) {}
+  }
+
+  // ── Trash (soft-delete with restore) ──
+
+  /// Moves a notebook into the trash, preserving its metadata row for restore.
+  ///
+  /// Returns the opaque trash id that can be passed to [restoreFromTrash].
+  /// Does NOT delete remote files — caller is responsible for deciding what
+  /// to sync.
+  Future<String?> moveNotebookToTrash(String notebookId) async {
+    final src = File(localPath(notebookId));
+    if (!await src.exists()) {
+      // Nothing to preserve; still purge DB below.
+      await _db.delete('notebooks', where: 'id = ?', whereArgs: [notebookId]);
+      await _db.delete('dirty_pages', where: 'notebook_id = ?', whereArgs: [notebookId]);
+      return null;
+    }
+
+    final meta = await getNotebookMeta(notebookId);
+    final stamp = DateTime.now().millisecondsSinceEpoch.toString();
+    final trashId = '${notebookId}_$stamp';
+    final destFile = File(p.join(_trashDir, '$trashId${AppConfig.fileExtension}'));
+    final metaFile = File(p.join(_trashDir, '$trashId.meta.json'));
+
+    await src.copy(destFile.path);
+    await metaFile.writeAsString(jsonEncode({
+      'originalId': notebookId,
+      'deletedAt': DateTime.now().toIso8601String(),
+      'meta': meta,
+    }));
+    await src.delete();
+
+    // Purge DB so library stops showing it.
+    await _db.delete('notebooks', where: 'id = ?', whereArgs: [notebookId]);
+    await _db.delete('dirty_pages', where: 'notebook_id = ?', whereArgs: [notebookId]);
+    return trashId;
+  }
+
+  /// Lists items currently in the trash, newest first.
+  Future<List<TrashEntry>> listTrash() async {
+    final dir = Directory(_trashDir);
+    if (!await dir.exists()) return const [];
+    final out = <TrashEntry>[];
+    await for (final entry in dir.list()) {
+      if (entry is! File || !entry.path.endsWith('.meta.json')) continue;
+      try {
+        final json = jsonDecode(await entry.readAsString()) as Map<String, dynamic>;
+        final trashId = p.basenameWithoutExtension(entry.path).replaceAll('.meta', '');
+        final data = File(p.join(_trashDir, '$trashId${AppConfig.fileExtension}'));
+        if (!await data.exists()) continue;
+        out.add(TrashEntry(
+          trashId: trashId,
+          originalId: json['originalId'] as String? ?? trashId,
+          deletedAt: DateTime.tryParse(json['deletedAt'] as String? ?? '') ?? DateTime.now(),
+          meta: (json['meta'] as Map?)?.cast<String, dynamic>(),
+        ));
+      } catch (_) {}
+    }
+    out.sort((a, b) => b.deletedAt.compareTo(a.deletedAt));
+    return out;
+  }
+
+  /// Restores a trashed notebook. Returns the restored metadata row, or null
+  /// if the trash entry is missing.
+  Future<Map<String, dynamic>?> restoreFromTrash(String trashId) async {
+    final dataFile = File(p.join(_trashDir, '$trashId${AppConfig.fileExtension}'));
+    final metaFile = File(p.join(_trashDir, '$trashId.meta.json'));
+    if (!await dataFile.exists() || !await metaFile.exists()) return null;
+
+    final json = jsonDecode(await metaFile.readAsString()) as Map<String, dynamic>;
+    final originalId = json['originalId'] as String;
+    final meta = (json['meta'] as Map?)?.cast<String, dynamic>();
+
+    // Restore the .ncnote file.
+    final bytes = await dataFile.readAsBytes();
+    await File(localPath(originalId)).writeAsBytes(bytes, flush: true);
+
+    // Restore DB row with a `modified` sync status so it re-syncs to remote.
+    if (meta != null) {
+      await upsertNotebookMeta(
+        id: meta['id'] as String,
+        title: meta['title'] as String? ?? 'Restored',
+        remotePath: meta['remote_path'] as String? ?? '',
+        etag: meta['etag'] as String?,
+        localModifiedAt: DateTime.tryParse(meta['local_modified_at'] as String? ?? '') ?? DateTime.now(),
+        remoteModifiedAt: meta['remote_modified_at'] != null
+            ? DateTime.tryParse(meta['remote_modified_at'] as String)
+            : null,
+        syncStatus: 'modified', // needs re-upload; remote copy was deleted
+        fileSize: meta['file_size'] as int?,
+        coverColor: meta['cover_color'] as int?,
+        paperType: meta['paper_type'] as String?,
+        pageCount: meta['page_count'] as int? ?? 0,
+        createdAt: DateTime.tryParse(meta['created_at'] as String? ?? '') ?? DateTime.now(),
+      );
+    }
+
+    await dataFile.delete();
+    await metaFile.delete();
+    return meta;
+  }
+
+  /// Permanently deletes a single trash entry.
+  Future<void> purgeTrashEntry(String trashId) async {
+    final dataFile = File(p.join(_trashDir, '$trashId${AppConfig.fileExtension}'));
+    final metaFile = File(p.join(_trashDir, '$trashId.meta.json'));
+    if (await dataFile.exists()) await dataFile.delete();
+    if (await metaFile.exists()) await metaFile.delete();
+  }
+
+  /// Permanently deletes all trash entries.
+  Future<void> emptyTrash() async {
+    final dir = Directory(_trashDir);
+    if (!await dir.exists()) return;
+    await for (final entry in dir.list()) {
+      try { await entry.delete(recursive: true); } catch (_) {}
+    }
   }
 
   /// Closes the database. Call on app shutdown.
   Future<void> dispose() async {
     await _db.close();
   }
+}
+
+/// Represents one item currently in the trash.
+class TrashEntry {
+  final String trashId;
+  final String originalId;
+  final DateTime deletedAt;
+  final Map<String, dynamic>? meta;
+
+  const TrashEntry({
+    required this.trashId,
+    required this.originalId,
+    required this.deletedAt,
+    required this.meta,
+  });
+
+  String get title => meta?['title'] as String? ?? 'Senza titolo';
+  int get coverColor => meta?['cover_color'] as int? ?? 0xFF1565C0;
 }

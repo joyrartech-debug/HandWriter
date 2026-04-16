@@ -4,6 +4,7 @@ import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
+import 'package:handwriter/core/services/file_service.dart';
 import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_screen.dart';
 
@@ -15,6 +16,9 @@ class LibraryScreen extends ConsumerStatefulWidget {
 }
 
 class _LibraryScreenState extends ConsumerState<LibraryScreen> {
+  String _searchQuery = '';
+  final TextEditingController _searchController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -22,6 +26,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       ref.read(notebookListProvider.notifier).refresh();
       _startConnectivityMonitor();
     });
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
   }
 
   void _startConnectivityMonitor() {
@@ -401,7 +411,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('Elimina notebook'),
-        content: Text('Eliminare "${entry.metadata.title}"? L\'azione è irreversibile.'),
+        content: Text('Spostare "${entry.metadata.title}" nel cestino?'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Annulla')),
           FilledButton(
@@ -415,10 +425,29 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
     if (confirm == true) {
       try {
-        await ref.read(notebookListProvider.notifier).deleteNotebook(entry);
+        final trashId = await ref.read(notebookListProvider.notifier).deleteNotebook(entry);
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('"${entry.metadata.title}" eliminato')),
+            SnackBar(
+              content: Text('"${entry.metadata.title}" spostato nel cestino'),
+              action: trashId == null
+                  ? null
+                  : SnackBarAction(
+                      label: 'Annulla',
+                      onPressed: () async {
+                        try {
+                          await ref.read(notebookListProvider.notifier).restoreFromTrash(trashId);
+                        } catch (e) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Ripristino fallito: $e')),
+                            );
+                          }
+                        }
+                      },
+                    ),
+              duration: const Duration(seconds: 6),
+            ),
           );
         }
       } catch (e) {
@@ -431,10 +460,158 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     }
   }
 
+  Future<void> _showTrash() async {
+    final notifier = ref.read(notebookListProvider.notifier);
+    final List<TrashEntry> entries = await notifier.listTrash();
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          Future<void> refresh() async {
+            final fresh = await notifier.listTrash();
+            if (ctx.mounted) {
+              setSheetState(() => entries
+                ..clear()
+                ..addAll(fresh));
+            }
+          }
+
+          return SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(ctx).size.height * 0.7,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.delete_outline_rounded, size: 22),
+                        const SizedBox(width: 10),
+                        const Expanded(
+                          child: Text(
+                            'Cestino',
+                            style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700),
+                          ),
+                        ),
+                        if (entries.isNotEmpty)
+                          TextButton.icon(
+                            icon: const Icon(Icons.delete_sweep_rounded, size: 18, color: Colors.red),
+                            label: const Text('Svuota', style: TextStyle(color: Colors.red)),
+                            onPressed: () async {
+                              final confirm = await showDialog<bool>(
+                                context: ctx,
+                                builder: (dialogCtx) => AlertDialog(
+                                  title: const Text('Svuota cestino'),
+                                  content: const Text('Tutti gli elementi saranno eliminati definitivamente.'),
+                                  actions: [
+                                    TextButton(onPressed: () => Navigator.pop(dialogCtx, false), child: const Text('Annulla')),
+                                    FilledButton(
+                                      style: FilledButton.styleFrom(backgroundColor: Colors.red),
+                                      onPressed: () => Navigator.pop(dialogCtx, true),
+                                      child: const Text('Svuota'),
+                                    ),
+                                  ],
+                                ),
+                              );
+                              if (confirm == true) {
+                                await notifier.emptyTrash();
+                                await refresh();
+                              }
+                            },
+                          ),
+                        IconButton(
+                          icon: const Icon(Icons.close_rounded),
+                          onPressed: () => Navigator.pop(ctx),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1),
+                  Expanded(
+                    child: entries.isEmpty
+                        ? Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(Icons.inbox_rounded, size: 48, color: Colors.grey.shade400),
+                                const SizedBox(height: 12),
+                                Text('Il cestino è vuoto', style: TextStyle(color: Colors.grey.shade600)),
+                              ],
+                            ),
+                          )
+                        : ListView.separated(
+                            itemCount: entries.length,
+                            separatorBuilder: (_, __) => const Divider(height: 1),
+                            itemBuilder: (_, i) {
+                              final e = entries[i];
+                              return ListTile(
+                                leading: Container(
+                                  width: 36, height: 36,
+                                  decoration: BoxDecoration(
+                                    color: Color(e.coverColor),
+                                    borderRadius: BorderRadius.circular(6),
+                                  ),
+                                  child: const Icon(Icons.auto_stories_rounded, color: Colors.white, size: 18),
+                                ),
+                                title: Text(e.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+                                subtitle: Text('Eliminato ${_formatDeletedAt(e.deletedAt)}'),
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    IconButton(
+                                      icon: const Icon(Icons.restore_rounded, color: Colors.blue),
+                                      tooltip: 'Ripristina',
+                                      onPressed: () async {
+                                        await notifier.restoreFromTrash(e.trashId);
+                                        await refresh();
+                                      },
+                                    ),
+                                    IconButton(
+                                      icon: const Icon(Icons.delete_forever_rounded, color: Colors.red),
+                                      tooltip: 'Elimina definitivamente',
+                                      onPressed: () async {
+                                        await notifier.purgeTrashEntry(e.trashId);
+                                        await refresh();
+                                      },
+                                    ),
+                                  ],
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  String _formatDeletedAt(DateTime dt) {
+    final diff = DateTime.now().difference(dt);
+    if (diff.inMinutes < 1) return 'pochi secondi fa';
+    if (diff.inMinutes < 60) return '${diff.inMinutes} min fa';
+    if (diff.inHours < 24) return '${diff.inHours} h fa';
+    if (diff.inDays < 7) return '${diff.inDays} g fa';
+    return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
+  }
+
   @override
   Widget build(BuildContext context) {
     final notebooks = ref.watch(notebookListProvider);
     final creds = ref.watch(credentialsProvider);
+    final connectivity = ref.watch(connectivityServiceProvider);
     final screenWidth = MediaQuery.of(context).size.width;
 
     int crossAxisCount;
@@ -470,6 +647,42 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         ),
         centerTitle: false,
         actions: [
+          if (connectivity != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: ValueListenableBuilder<bool>(
+                valueListenable: connectivity.isOnline,
+                builder: (_, online, __) => Tooltip(
+                  message: online ? 'Online — sync attiva' : 'Offline — modifiche locali',
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: online ? const Color(0xFFE8F5E9) : const Color(0xFFFFEBEE),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          online ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
+                          size: 14,
+                          color: online ? Colors.green.shade700 : Colors.red.shade700,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          online ? 'Online' : 'Offline',
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: online ? Colors.green.shade700 : Colors.red.shade700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
           IconButton(
             icon: Icon(Icons.refresh_rounded, color: Colors.grey.shade700),
             onPressed: () => ref.read(notebookListProvider.notifier).refresh(),
@@ -478,7 +691,14 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             icon: Icon(Icons.account_circle_rounded, color: Colors.grey.shade700, size: 28),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             onSelected: (value) {
-              if (value == 'logout') ref.read(credentialsProvider.notifier).logout();
+              switch (value) {
+                case 'logout':
+                  ref.read(credentialsProvider.notifier).logout();
+                  break;
+                case 'trash':
+                  _showTrash();
+                  break;
+              }
             },
             itemBuilder: (_) => [
               PopupMenuItem(
@@ -490,6 +710,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                     Text(creds?.serverUrl ?? '', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
                   ],
                 ),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: 'trash',
+                child: Row(children: [
+                  Icon(Icons.delete_outline_rounded, size: 18),
+                  SizedBox(width: 8),
+                  Text('Cestino'),
+                ]),
               ),
               const PopupMenuDivider(),
               const PopupMenuItem(
@@ -554,24 +783,86 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             );
           }
 
+          // Filter by search query (case-insensitive, matches title + chapter titles).
+          final query = _searchQuery.trim().toLowerCase();
+          final filtered = query.isEmpty
+              ? list
+              : list.where((e) {
+                  if (e.metadata.title.toLowerCase().contains(query)) return true;
+                  return e.metadata.chapters.any((c) => c.title.toLowerCase().contains(query));
+                }).toList();
+
           return RefreshIndicator(
             onRefresh: () => ref.read(notebookListProvider.notifier).refresh(),
-            child: Padding(
-              padding: const EdgeInsets.all(20),
-              child: GridView.builder(
-                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: crossAxisCount,
-                  childAspectRatio: 0.72,
-                  crossAxisSpacing: 16,
-                  mainAxisSpacing: 16,
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+                  child: TextField(
+                    controller: _searchController,
+                    onChanged: (v) => setState(() => _searchQuery = v),
+                    decoration: InputDecoration(
+                      hintText: 'Cerca notebook...',
+                      prefixIcon: const Icon(Icons.search_rounded, size: 20),
+                      suffixIcon: _searchQuery.isEmpty
+                          ? null
+                          : IconButton(
+                              icon: const Icon(Icons.clear_rounded, size: 18),
+                              onPressed: () {
+                                _searchController.clear();
+                                setState(() => _searchQuery = '');
+                              },
+                            ),
+                      isDense: true,
+                      contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                      filled: true,
+                      fillColor: Colors.white,
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.grey.shade300),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        borderSide: BorderSide(color: Colors.grey.shade300),
+                      ),
+                    ),
+                  ),
                 ),
-                itemCount: list.length,
-                itemBuilder: (_, index) => _NotebookCard(
-                  entry: list[index],
-                  onTap: () => _openNotebook(list[index]),
-                  onLongPress: () => _showNotebookMenu(list[index]),
-                ),
-              ),
+                if (filtered.isEmpty)
+                  Expanded(
+                    child: Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.search_off_rounded, size: 48, color: Colors.grey.shade400),
+                          const SizedBox(height: 12),
+                          Text('Nessun risultato per "$_searchQuery"',
+                              style: TextStyle(color: Colors.grey.shade600)),
+                        ],
+                      ),
+                    ),
+                  )
+                else
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: GridView.builder(
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                          crossAxisCount: crossAxisCount,
+                          childAspectRatio: 0.72,
+                          crossAxisSpacing: 16,
+                          mainAxisSpacing: 16,
+                        ),
+                        itemCount: filtered.length,
+                        itemBuilder: (_, index) => _NotebookCard(
+                          entry: filtered[index],
+                          onTap: () => _openNotebook(filtered[index]),
+                          onLongPress: () => _showNotebookMenu(filtered[index]),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
           );
         },

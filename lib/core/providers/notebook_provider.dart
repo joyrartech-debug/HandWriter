@@ -361,8 +361,9 @@ class NotebookListNotifier
     return entry;
   }
 
-  /// Elimina un notebook dal server e dal locale.
-  Future<void> deleteNotebook(NotebookEntry entry) async {
+  /// Soft-deletes a notebook: moves it to the local trash and removes it from
+  /// the remote server (when reachable). Can be undone via [restoreFromTrash].
+  Future<String?> deleteNotebook(NotebookEntry entry) async {
     final webdav = _ref.read(webdavServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
 
@@ -375,13 +376,37 @@ class NotebookListNotifier
       }
     }
 
-    // Always clean up local file + DB entry
-    await fileService.deleteNotebook(entry.metadata.id);
+    // Soft-delete locally: preserve the .ncnote in the trash so it can be restored.
+    final trashId = await fileService.moveNotebookToTrash(entry.metadata.id);
 
     final current = state.valueOrNull ?? [];
     state = AsyncValue.data(
       current.where((e) => e.metadata.id != entry.metadata.id).toList(),
     );
+    return trashId;
+  }
+
+  /// Restores a notebook from the trash. Re-uploads it to the remote on the
+  /// next sync because it was deleted from the server.
+  Future<void> restoreFromTrash(String trashId) async {
+    final fileService = _ref.read(fileServiceProvider);
+    final meta = await fileService.restoreFromTrash(trashId);
+    if (meta != null) await refresh();
+  }
+
+  /// Lists notebooks in the trash.
+  Future<List<TrashEntry>> listTrash() {
+    return _ref.read(fileServiceProvider).listTrash();
+  }
+
+  /// Permanently deletes a single trash entry.
+  Future<void> purgeTrashEntry(String trashId) {
+    return _ref.read(fileServiceProvider).purgeTrashEntry(trashId);
+  }
+
+  /// Permanently empties the trash.
+  Future<void> emptyTrash() {
+    return _ref.read(fileServiceProvider).emptyTrash();
   }
 
   /// Rinomina un notebook.
