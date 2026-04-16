@@ -4,11 +4,19 @@ import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/file_service.dart';
+import 'package:handwriter/core/services/search_service.dart';
 import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/core/services/webdav_service.dart';
 
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:uuid/uuid.dart';
+
+/// Full-text search across locally-cached notebooks.
+final searchServiceProvider = Provider<SearchService?>((ref) {
+  final sync = ref.watch(syncServiceProvider);
+  if (sync == null) return null;
+  return SearchService(ref.watch(fileServiceProvider), sync);
+});
 
 /// Un notebook nella libreria (metadata + info remote).
 class NotebookEntry {
@@ -254,6 +262,7 @@ class NotebookListNotifier
     required String title,
     String paperType = 'lined',
     int coverColor = 0xFF1565C0,
+    List<String> tags = const [],
   }) async {
     final syncService = _ref.read(syncServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
@@ -272,6 +281,7 @@ class NotebookListNotifier
       paperType: paperType,
       coverColor: coverColor,
       pageCount: 1,
+      tags: tags,
       chapters: [
         Chapter(id: chapterId, title: 'Capitolo 1', pageIds: [pageId]),
       ],
@@ -366,6 +376,7 @@ class NotebookListNotifier
   Future<String?> deleteNotebook(NotebookEntry entry) async {
     final webdav = _ref.read(webdavServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
+    final thumbs = _ref.read(thumbnailServiceProvider);
 
     // Delete remote (if connected)
     if (webdav != null) {
@@ -378,6 +389,11 @@ class NotebookListNotifier
 
     // Soft-delete locally: preserve the .ncnote in the trash so it can be restored.
     final trashId = await fileService.moveNotebookToTrash(entry.metadata.id);
+
+    // Best-effort thumbnail cleanup.
+    try {
+      await thumbs.deleteThumbnail(entry.metadata.id);
+    } catch (_) {}
 
     final current = state.valueOrNull ?? [];
     state = AsyncValue.data(
@@ -407,6 +423,80 @@ class NotebookListNotifier
   /// Permanently empties the trash.
   Future<void> emptyTrash() {
     return _ref.read(fileServiceProvider).emptyTrash();
+  }
+
+  /// Replaces the tag list on a notebook. Persists locally and re-uploads
+  /// (best-effort). The `syncStatus` is flipped to `modified` so the next
+  /// background sync picks it up when offline.
+  Future<void> updateNotebookTags(NotebookEntry entry, List<String> tags) async {
+    final syncService = _ref.read(syncServiceProvider);
+    final webdav = _ref.read(webdavServiceProvider);
+    final fileService = _ref.read(fileServiceProvider);
+
+    final localData = await fileService.readNotebookFile(entry.metadata.id);
+    if (localData == null || syncService == null) return;
+
+    final result = syncService.parseNcnoteMetadata(localData);
+    final allPages = syncService.extractAllPages(localData);
+    final allAssets = syncService.extractAllAssets(localData);
+    final symbolLibraries = syncService.extractSymbolLibraries(localData);
+
+    // Normalize: trim, drop empties, dedup while preserving order.
+    final seen = <String>{};
+    final cleanTags = <String>[];
+    for (final t in tags.map((e) => e.trim())) {
+      if (t.isEmpty) continue;
+      if (seen.add(t.toLowerCase())) cleanTags.add(t);
+    }
+
+    final updatedMeta = result.metadata.copyWith(
+      tags: cleanTags,
+      modifiedAt: DateTime.now(),
+    );
+
+    final package = syncService.createNcnotePackage(
+      metadata: updatedMeta,
+      document: result.document,
+      pages: allPages,
+      assets: allAssets.isNotEmpty ? allAssets : null,
+      symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
+    );
+    await fileService.saveNotebookFile(updatedMeta.id, package);
+    await fileService.upsertNotebookMeta(
+      id: updatedMeta.id,
+      title: updatedMeta.title,
+      remotePath: entry.remotePath,
+      localModifiedAt: updatedMeta.modifiedAt,
+      syncStatus: 'modified',
+      coverColor: updatedMeta.coverColor,
+      paperType: updatedMeta.paperType,
+      pageCount: updatedMeta.pageCount,
+      createdAt: updatedMeta.createdAt,
+    );
+
+    try {
+      if (webdav != null) {
+        final etag = await syncService.uploadNotebook(
+          remotePath: entry.remotePath,
+          metadata: updatedMeta,
+          document: result.document,
+          pages: allPages,
+          assets: allAssets.isNotEmpty ? allAssets : null,
+          symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
+        );
+        await fileService.markNotebookSynced(updatedMeta.id, etag);
+      }
+    } catch (e) {
+      debugPrint('[Library] Tags uploaded locally, remote sync deferred: $e');
+    }
+
+    final current = state.valueOrNull ?? [];
+    state = AsyncValue.data(current.map((e) {
+      if (e.metadata.id == entry.metadata.id) {
+        return e.copyWith(metadata: updatedMeta);
+      }
+      return e;
+    }).toList());
   }
 
   /// Rinomina un notebook.

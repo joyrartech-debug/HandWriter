@@ -86,9 +86,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // ── High-performance lasso path notifier (avoids Riverpod rebuild per point) ──
   final _lassoPathNotifier = _LassoPathNotifier();
 
-  // ── Auto-save timer ──
-  Timer? _autoSaveTimer;
-  static const _autoSaveInterval = Duration(seconds: 30);
+  // ── Auto-save (debounced) ──
+  //
+  // We save after a short idle window (no new edits) so rapid strokes batch
+  // into a single disk write. A second "max delay" timer guarantees we never
+  // defer more than _autoSaveMaxDelay even if the user keeps drawing.
+  Timer? _autoSaveDebounce;
+  Timer? _autoSaveMaxWait;
+  bool _wasDirty = false;
+  static const _autoSaveIdle = Duration(seconds: 4);
+  static const _autoSaveMaxDelay = Duration(seconds: 45);
 
   // Key for the canvas Stack to convert coordinates properly
   final _canvasStackKey = GlobalKey();
@@ -112,7 +119,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     WidgetsBinding.instance.removeObserver(this);
     _activeStrokeNotifier.dispose();
     _lassoPathNotifier.dispose();
-    _autoSaveTimer?.cancel();
+    _autoSaveDebounce?.cancel();
+    _autoSaveMaxWait?.cancel();
     _holdRecognizeTimer?.cancel();
     _longPressTimer?.cancel();
     _focusNode.dispose();
@@ -121,12 +129,33 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _startAutoSave() {
-    _autoSaveTimer = Timer.periodic(_autoSaveInterval, (_) {
-      final state = ref.read(canvasProvider);
-      if (state != null && state.isDirty && !_isSaving) {
-        _save(silent: true);
+    // Listen to canvas state: every transition into `isDirty=true` bumps the
+    // debounce timer. This saves after [_autoSaveIdle] of inactivity, with a
+    // cap of [_autoSaveMaxDelay] per burst.
+    ref.listenManual<CanvasState?>(canvasProvider, (_, next) {
+      if (next == null) return;
+      if (!next.isDirty) {
+        // Clean state; cancel any pending save.
+        _wasDirty = false;
+        _autoSaveDebounce?.cancel();
+        _autoSaveMaxWait?.cancel();
+        return;
       }
+      // Dirty: restart idle timer, start max-wait on first dirty of the burst.
+      _autoSaveDebounce?.cancel();
+      _autoSaveDebounce = Timer(_autoSaveIdle, _triggerAutoSave);
+      if (!_wasDirty) {
+        _autoSaveMaxWait?.cancel();
+        _autoSaveMaxWait = Timer(_autoSaveMaxDelay, _triggerAutoSave);
+      }
+      _wasDirty = true;
     });
+  }
+
+  void _triggerAutoSave() {
+    final state = ref.read(canvasProvider);
+    if (state == null || !state.isDirty || _isSaving) return;
+    _save(silent: true);
   }
 
   @override
@@ -2672,26 +2701,22 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       }
 
       const scale = 2.0;
-      final doc = pw.Document();
-
+      // Render every page to PNG on the main isolate (Flutter UI APIs must
+      // run here), then build+save the PDF on a worker isolate so the UI
+      // stays responsive for large exports.
+      final pagePayload = <_PdfPagePayload>[];
       for (final page in pages) {
         final pngBytes = await _renderPageToPng(page, state.imageCache, scale: scale);
         if (pngBytes == null) continue;
-
-        final pdfImage = pw.MemoryImage(pngBytes);
-        doc.addPage(
-          pw.Page(
-            pageFormat: pw_pdf.PdfPageFormat(
-              page.width * pw_pdf.PdfPageFormat.point,
-              page.height * pw_pdf.PdfPageFormat.point,
-            ),
-            margin: pw.EdgeInsets.zero,
-            build: (ctx) => pw.Image(pdfImage, fit: pw.BoxFit.fill),
-          ),
-        );
+        pagePayload.add(_PdfPagePayload(
+          width: page.width,
+          height: page.height,
+          pngBytes: pngBytes,
+        ));
       }
+      if (pagePayload.isEmpty) return;
 
-      final pdfBytes = Uint8List.fromList(await doc.save());
+      final pdfBytes = await compute(_buildPdfOnIsolate, pagePayload);
       final fileName = '${state.metadata.title}.pdf';
       await _saveOrShare(fileName, pdfBytes, 'application/pdf');
 
@@ -3859,4 +3884,43 @@ class _PageGridReorderableState extends State<_PageGridReorderable> {
       ),
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  PDF export — isolate payload
+// ═══════════════════════════════════════════════════════════════
+
+/// Payload passed to the background isolate that assembles the PDF.
+///
+/// Kept intentionally simple (only primitives + Uint8List) so it serializes
+/// cleanly across the isolate boundary.
+class _PdfPagePayload {
+  final double width;
+  final double height;
+  final Uint8List pngBytes;
+  const _PdfPagePayload({
+    required this.width,
+    required this.height,
+    required this.pngBytes,
+  });
+}
+
+/// Top-level entry point for [compute]: builds a PDF document from the
+/// pre-rendered PNGs and returns the encoded bytes. Runs off the UI isolate.
+Future<Uint8List> _buildPdfOnIsolate(List<_PdfPagePayload> payloads) async {
+  final doc = pw.Document();
+  for (final p in payloads) {
+    final img = pw.MemoryImage(p.pngBytes);
+    doc.addPage(
+      pw.Page(
+        pageFormat: pw_pdf.PdfPageFormat(
+          p.width * pw_pdf.PdfPageFormat.point,
+          p.height * pw_pdf.PdfPageFormat.point,
+        ),
+        margin: pw.EdgeInsets.zero,
+        build: (ctx) => pw.Image(img, fit: pw.BoxFit.fill),
+      ),
+    );
+  }
+  return Uint8List.fromList(await doc.save());
 }
