@@ -659,26 +659,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       }
     }
 
-    // Eraser: only erase, don't start a stroke visual
-    if (tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke) {
-      ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
-      return;
-    }
-
-    // Shape tool: only set start pos, no visual stroke
-    if (tool == CanvasTool.shape) {
-      ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
-      return;
-    }
-
-    // Lasso tool: only track via provider (no visual pen stroke)
-    if (tool == CanvasTool.lasso) {
-      _lassoPathNotifier.start(pagePos);
-      ref.read(canvasProvider.notifier).clearLassoPath(); // reset provider path
-      return;
-    }
-
     // Check if double-tapping on an image/shape → select it.
+    // MUST run before tool-specific early returns below (eraser/shape/lasso),
+    // otherwise double-click is swallowed by the lasso path start for lasso,
+    // and by the stroke start for eraser/shape.
+    //
     // For non-draw tools (lasso/pan/text): check images and shapes.
     // For draw tools: only select images (not shapes) if input is a plain mouse
     // (no pressure), so stylus and tablet pens always draw through images.
@@ -701,6 +686,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           return;
         }
       }
+    }
+
+    // Eraser: only erase, don't start a stroke visual
+    if (tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke) {
+      ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
+      return;
+    }
+
+    // Shape tool: only set start pos, no visual stroke
+    if (tool == CanvasTool.shape) {
+      ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
+      return;
+    }
+
+    // Lasso tool: only track via provider (no visual pen stroke)
+    if (tool == CanvasTool.lasso) {
+      _lassoPathNotifier.start(pagePos);
+      ref.read(canvasProvider.notifier).clearLassoPath(); // reset provider path
+      return;
     }
 
     ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
@@ -1164,21 +1168,28 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // Capture ref before the async gap — the widget may be unmounted
     // when the camera activity returns on Android.
     final notifier = ref.read(canvasProvider.notifier);
-    final picker = ImagePicker();
-    final photo = await picker.pickImage(source: ImageSource.camera);
-    if (photo == null) return;
-    final file = io.File(photo.path);
-    if (!await file.exists()) return;
-    final bytes = await file.readAsBytes();
-    final dims = _decodeImageDimensions(bytes);
-    double w = dims?.width.toDouble() ?? 300;
-    double h = dims?.height.toDouble() ?? 200;
-    if (w > 300) {
-      final s = 300 / w;
-      w *= s;
-      h *= s;
+    final messenger = mounted ? ScaffoldMessenger.of(context) : null;
+    try {
+      final picker = ImagePicker();
+      final photo = await picker.pickImage(source: ImageSource.camera);
+      if (photo == null) return;
+      final file = io.File(photo.path);
+      if (!await file.exists()) return;
+      final bytes = await file.readAsBytes();
+      final dims = _decodeImageDimensions(bytes);
+      double w = dims?.width.toDouble() ?? 300;
+      double h = dims?.height.toDouble() ?? 200;
+      if (w > 300) {
+        final s = 300 / w;
+        w *= s;
+        h *= s;
+      }
+      notifier.addImageElement(pagePos, photo.name, bytes, w, h);
+    } catch (e) {
+      messenger?.showSnackBar(
+        SnackBar(content: Text('Errore fotocamera: $e')),
+      );
     }
-    notifier.addImageElement(pagePos, photo.name, bytes, w, h);
   }
 
   Future<void> _pickAndInsertImage(Offset pagePos) async {
@@ -1952,6 +1963,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         } : null,
         onEditComment: isImage ? () {
           _showCommentDialog(elementId);
+        } : null,
+        onCopy: isImage ? () {
+          ref.read(canvasProvider.notifier).copyElement(elementId);
+        } : null,
+        onCut: isImage ? () {
+          ref.read(canvasProvider.notifier).cutElement(elementId);
         } : null,
       ),
     ];

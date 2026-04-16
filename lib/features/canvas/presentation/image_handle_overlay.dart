@@ -16,6 +16,8 @@ class ImageHandleOverlay extends StatefulWidget {
   final VoidCallback? onSendToBack;
   final VoidCallback? onToggleLock;
   final VoidCallback? onEditComment;
+  final VoidCallback? onCopy;
+  final VoidCallback? onCut;
   final bool isLocked;
   final bool hasComment;
 
@@ -34,6 +36,8 @@ class ImageHandleOverlay extends StatefulWidget {
     this.onSendToBack,
     this.onToggleLock,
     this.onEditComment,
+    this.onCopy,
+    this.onCut,
     this.isLocked = false,
     this.hasComment = false,
   });
@@ -302,6 +306,14 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               widget.onEditComment!,
               'Commento',
             ),
+            _divider(),
+          ],
+          if (widget.onCopy != null) ...[
+            _actionBtn(Icons.copy_rounded, Colors.blueGrey, widget.onCopy!, 'Copia'),
+            _divider(),
+          ],
+          if (widget.onCut != null && !widget.isLocked) ...[
+            _actionBtn(Icons.content_cut_rounded, Colors.blueGrey, widget.onCut!, 'Taglia'),
             _divider(),
           ],
           if (!widget.isLocked) ...[

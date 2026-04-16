@@ -3523,6 +3523,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     deleteSelection();
   }
 
+  /// Copy a single element (e.g. an image / PDF preview) to the clipboard.
+  void copyElement(String elementId) {
+    if (state == null) return;
+    final page = state!.currentPage;
+    if (page == null) return;
+    final element = page.layers.content.where((e) {
+      final id = e.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      return id == elementId;
+    }).firstOrNull;
+    if (element == null) return;
+    final bounds = _getElementBounds(element);
+    if (bounds == null) return;
+    state = state!.copyWith(clipboard: CanvasClipboard(elements: [element], bounds: bounds));
+  }
+
+  /// Cut a single element: copy to clipboard, then delete.
+  void cutElement(String elementId) {
+    copyElement(elementId);
+    deleteElement(elementId);
+  }
+
   void paste({Offset? at}) {
     if (state == null || state!.clipboard == null) return;
     final s = state!;
@@ -4370,19 +4391,26 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null || !state!.isDirty) return;
     final locked = await _acquireSyncLock();
     if (!locked || state == null) return;
+    bool lockTransferred = false;
     try {
-      await _saveInner();
+      lockTransferred = await _saveInner();
     } finally {
-      _releaseSyncLock();
+      if (!lockTransferred) _releaseSyncLock();
     }
   }
 
-  Future<void> _saveInner() async {
-    if (state == null || !state!.isDirty) return;
+  /// Performs local save synchronously, then hands the sync lock to a
+  /// background task that uploads to the server.
+  ///
+  /// Returns `true` if the background task has taken ownership of the
+  /// sync lock (caller must NOT release it). Returns `false` if the
+  /// caller must release the lock itself (nothing scheduled).
+  Future<bool> _saveInner() async {
+    if (state == null || !state!.isDirty) return false;
     final s = state!;
     final syncService = _ref.read(syncServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
-    if (syncService == null) return;
+    if (syncService == null) return false;
 
     final updatedMeta = s.metadata.copyWith(modifiedAt: DateTime.now());
 
@@ -4447,16 +4475,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _lastSyncedPages = Map.of(s.pages);
     _dirtyAssetKeys.clear();
 
-    // 4. Write locally + upload to server (awaited to keep sync lock
-    //    held until ETags are refreshed — prevents pull from re-downloading
-    //    our own upload due to stale ETag cache).
-    await _persistAndSyncAsync(
+    // 4. Start local save + remote sync in parallel. Await only the local
+    //    save — the remote sync continues in the background while holding
+    //    the sync lock (so pulls wait). This lets `save()` return to the
+    //    UI as soon as data is safe on disk.
+    final localSaveFuture = _localSave(
       fileService: fileService,
-      syncService: syncService,
       package: package,
       updatedMeta: updatedMeta,
-      document: s.document,
       remotePath: s.remotePath,
+    );
+
+    final remoteSyncFuture = _remoteSync(
+      syncService: syncService,
+      fileService: fileService,
+      updatedMeta: updatedMeta,
+      document: s.document,
       dirtyPages: changedPages,
       dirtyAssets: changedAssets.isNotEmpty ? changedAssets : null,
       symbolLibraries: s.symbolLibraries.isNotEmpty
@@ -4464,107 +4498,88 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           : null,
       deletedPages: deletedPages.isNotEmpty ? deletedPages : null,
     );
-  }
 
-  /// Writes to local storage and uploads to server — fully background,
-  /// never blocks the UI thread.
-  Future<void> _persistAndSyncAsync({
-    required dynamic fileService,
-    required SyncService syncService,
-    required Uint8List package,
-    required NotebookMetadata updatedMeta,
-    required DocumentStructure document,
-    required String remotePath,
-    required Map<String, PageData> dirtyPages,
-    Map<String, Uint8List>? dirtyAssets,
-    List<Map<String, dynamic>>? symbolLibraries,
-    List<String>? deletedPages,
-  }) async {
-    try {
-      await _persistAndSyncInner(
-        fileService: fileService,
-        syncService: syncService,
-        package: package,
-        updatedMeta: updatedMeta,
-        document: document,
-        remotePath: remotePath,
-        dirtyPages: dirtyPages,
-        dirtyAssets: dirtyAssets,
-        symbolLibraries: symbolLibraries,
-        deletedPages: deletedPages,
-      );
-    } catch (e) {
-      debugPrint('[Canvas] _persistAndSyncAsync error: $e');
+    final localOk = await localSaveFuture;
+    if (!localOk) {
+      // Local failed. Still drain the remote future under the lock so we
+      // don't leave an orphan upload running without guards.
+      try { await remoteSyncFuture; } catch (_) {}
+      return false;
     }
-  }
 
-  Future<void> _persistAndSyncInner({
-    required dynamic fileService,
-    required SyncService syncService,
-    required Uint8List package,
-    required NotebookMetadata updatedMeta,
-    required DocumentStructure document,
-    required String remotePath,
-    required Map<String, PageData> dirtyPages,
-    Map<String, Uint8List>? dirtyAssets,
-    List<Map<String, dynamic>>? symbolLibraries,
-    List<String>? deletedPages,
-  }) async {
-    // ── Local save + remote sync in parallel ──
-    // Local file write runs concurrently with remote delta upload.
-    final localSaveFuture = () async {
+    // Hand the lock to a background task that waits for the remote sync
+    // to finish (or fail), then releases the lock.
+    () async {
       try {
-        await fileService.saveNotebookFile(updatedMeta.id, package);
-        await fileService.upsertNotebookMeta(
-          id: updatedMeta.id,
-          title: updatedMeta.title,
-          remotePath: remotePath,
-          localModifiedAt: updatedMeta.modifiedAt,
-          syncStatus: 'modified',
-          fileSize: package.length,
-          coverColor: updatedMeta.coverColor,
-          paperType: updatedMeta.paperType,
-          pageCount: updatedMeta.pageCount,
-          createdAt: updatedMeta.createdAt,
-        );
-        debugPrint('[Canvas] Saved locally: ${updatedMeta.title}');
-        return true;
+        await remoteSyncFuture;
       } catch (e) {
-        debugPrint('[Canvas] Local save failed: $e');
-        return false;
+        debugPrint('[Canvas] Remote sync deferred (offline?): $e');
+        try {
+          await fileService.markNotebookDirty(updatedMeta.id);
+        } catch (_) {}
+      } finally {
+        _releaseSyncLock();
       }
     }();
+    return true;
+  }
 
-    final remoteSyncFuture = () async {
-      // Delta upload: only the changed pages + metadata + document
-      debugPrint('[Canvas] Starting delta sync: ${dirtyPages.length} pages');
-      final etag = await syncService.syncDelta(
-        notebookId: updatedMeta.id,
-        metadata: updatedMeta,
-        document: document,
-        dirtyPages: dirtyPages,
-        dirtyAssets: dirtyAssets,
-        symbolLibraries: symbolLibraries,
-        deletedPageFileNames: deletedPages,
-      );
-
-      _remoteMetaEtag = etag;
-      // Snapshot page ETags to avoid re-pulling our own save
-      _lastPageEtags = await syncService.getRemotePageEtags(updatedMeta.id);
-      await fileService.markNotebookSynced(updatedMeta.id, etag);
-      print('[Canvas] Delta synced: ${dirtyPages.length} pages → server');
-    }();
-
-    // Wait for both — local save must succeed for consistency
-    final localOk = await localSaveFuture;
-    if (!localOk) return;
-
+  Future<bool> _localSave({
+    required dynamic fileService,
+    required Uint8List package,
+    required NotebookMetadata updatedMeta,
+    required String remotePath,
+  }) async {
     try {
-      await remoteSyncFuture;
+      await fileService.saveNotebookFile(updatedMeta.id, package);
+      await fileService.upsertNotebookMeta(
+        id: updatedMeta.id,
+        title: updatedMeta.title,
+        remotePath: remotePath,
+        localModifiedAt: updatedMeta.modifiedAt,
+        syncStatus: 'modified',
+        fileSize: package.length,
+        coverColor: updatedMeta.coverColor,
+        paperType: updatedMeta.paperType,
+        pageCount: updatedMeta.pageCount,
+        createdAt: updatedMeta.createdAt,
+      );
+      debugPrint('[Canvas] Saved locally: ${updatedMeta.title}');
+      return true;
     } catch (e) {
-      debugPrint('[Canvas] Remote sync deferred (offline?): $e');
-      await fileService.markNotebookDirty(updatedMeta.id);
+      debugPrint('[Canvas] Local save failed: $e');
+      return false;
     }
+  }
+
+  Future<void> _remoteSync({
+    required SyncService syncService,
+    required dynamic fileService,
+    required NotebookMetadata updatedMeta,
+    required DocumentStructure document,
+    required Map<String, PageData> dirtyPages,
+    Map<String, Uint8List>? dirtyAssets,
+    List<Map<String, dynamic>>? symbolLibraries,
+    List<String>? deletedPages,
+  }) async {
+    debugPrint('[Canvas] Starting delta sync: ${dirtyPages.length} pages');
+    final etag = await syncService.syncDelta(
+      notebookId: updatedMeta.id,
+      metadata: updatedMeta,
+      document: document,
+      dirtyPages: dirtyPages,
+      dirtyAssets: dirtyAssets,
+      symbolLibraries: symbolLibraries,
+      deletedPageFileNames: deletedPages,
+    );
+
+    _remoteMetaEtag = etag;
+    // Snapshot page ETags to avoid re-pulling our own save. Still awaited
+    // because it runs under the sync lock on the background path — pulls
+    // are gated on this lock, so we don't need to race the UI for it.
+    _lastPageEtags = await syncService.getRemotePageEtags(updatedMeta.id);
+    await fileService.markNotebookSynced(updatedMeta.id, etag);
+    print('[Canvas] Delta synced: ${dirtyPages.length} pages → server');
   }
 
   // ══════════════════════════════════════════════════════════════
