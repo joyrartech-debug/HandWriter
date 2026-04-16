@@ -258,7 +258,7 @@ class NotebookListNotifier
     final syncService = _ref.read(syncServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
 
-    final uuid = const Uuid();
+    const uuid = Uuid();
     final notebookId = uuid.v4();
     final now = DateTime.now();
     final pageId = uuid.v4();

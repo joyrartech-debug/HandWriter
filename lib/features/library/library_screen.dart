@@ -202,8 +202,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                             border: isSelected ? Border.all(color: Colors.white, width: 3) : null,
                             boxShadow: [
                               if (isSelected)
-                                BoxShadow(color: Color(c.$1).withOpacity(0.5), blurRadius: 10, spreadRadius: 1),
-                              BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 4, offset: const Offset(0, 2)),
+                                BoxShadow(color: Color(c.$1).withValues(alpha: 0.5), blurRadius: 10, spreadRadius: 1),
+                              BoxShadow(color: Colors.black.withValues(alpha: 0.1), blurRadius: 4, offset: const Offset(0, 2)),
                             ],
                           ),
                           child: isSelected ? const Icon(Icons.check, color: Colors.white, size: 20) : null,
@@ -251,7 +251,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           decoration: BoxDecoration(
             color: Colors.white,
             borderRadius: BorderRadius.circular(16),
-            boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.15), blurRadius: 20)],
+            boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 20)],
           ),
           child: const Column(
             mainAxisSize: MainAxisSize.min,
@@ -438,10 +438,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     final screenWidth = MediaQuery.of(context).size.width;
 
     int crossAxisCount;
-    if (screenWidth > 1200) crossAxisCount = 5;
-    else if (screenWidth > 900) crossAxisCount = 4;
-    else if (screenWidth > 600) crossAxisCount = 3;
-    else crossAxisCount = 2;
+    if (screenWidth > 1200) {
+      crossAxisCount = 5;
+    } else if (screenWidth > 900) {
+      crossAxisCount = 4;
+    } else if (screenWidth > 600) {
+      crossAxisCount = 3;
+    } else {
+      crossAxisCount = 2;
+    }
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8F8F8),
@@ -602,7 +607,7 @@ class _NotebookCard extends StatelessWidget {
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(12),
           boxShadow: [
-            BoxShadow(color: Colors.black.withOpacity(0.08), blurRadius: 12, offset: const Offset(0, 4)),
+            BoxShadow(color: Colors.black.withValues(alpha: 0.08), blurRadius: 12, offset: const Offset(0, 4)),
           ],
         ),
         child: ClipRRect(
@@ -618,7 +623,7 @@ class _NotebookCard extends StatelessWidget {
                     gradient: LinearGradient(
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
-                      colors: [coverColor, coverColor.withOpacity(0.8)],
+                      colors: [coverColor, coverColor.withValues(alpha: 0.8)],
                     ),
                   ),
                   child: Stack(
@@ -628,13 +633,13 @@ class _NotebookCard extends StatelessWidget {
                         left: 16,
                         top: 0,
                         bottom: 0,
-                        child: Container(width: 1.5, color: Colors.white.withOpacity(0.15)),
+                        child: Container(width: 1.5, color: Colors.white.withValues(alpha: 0.15)),
                       ),
                       Positioned(
                         left: 20,
                         top: 0,
                         bottom: 0,
-                        child: Container(width: 0.5, color: Colors.white.withOpacity(0.1)),
+                        child: Container(width: 0.5, color: Colors.white.withValues(alpha: 0.1)),
                       ),
                       // Title on cover
                       Padding(
@@ -660,7 +665,7 @@ class _NotebookCard extends StatelessWidget {
                                 Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                                   decoration: BoxDecoration(
-                                    color: Colors.white.withOpacity(0.2),
+                                    color: Colors.white.withValues(alpha: 0.2),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
                                   child: Text(
@@ -677,7 +682,7 @@ class _NotebookCard extends StatelessWidget {
                                   child: Container(
                                     padding: const EdgeInsets.all(4),
                                     decoration: BoxDecoration(
-                                      color: Colors.white.withOpacity(0.2),
+                                      color: Colors.white.withValues(alpha: 0.2),
                                       borderRadius: BorderRadius.circular(8),
                                     ),
                                     child: const Icon(Icons.more_vert, color: Colors.white, size: 18),

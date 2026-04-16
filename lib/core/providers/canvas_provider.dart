@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
 import 'dart:math';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
@@ -356,8 +355,8 @@ class CanvasState {
   final List<StrokePoint> activeStroke;
   final double zoom;
   final Offset panOffset;
-  final List<_UndoEntry> undoStack;
-  final List<_UndoEntry> redoStack;
+  final List<UndoEntry> undoStack;
+  final List<UndoEntry> redoStack;
   final bool isDirty;
   final String remotePath;
   final LassoSelection? lassoSelection;
@@ -457,8 +456,8 @@ class CanvasState {
     List<StrokePoint>? activeStroke,
     double? zoom,
     Offset? panOffset,
-    List<_UndoEntry>? undoStack,
-    List<_UndoEntry>? redoStack,
+    List<UndoEntry>? undoStack,
+    List<UndoEntry>? redoStack,
     bool? isDirty,
     String? remotePath,
     LassoSelection? lassoSelection,
@@ -526,10 +525,10 @@ class CanvasState {
       );
 }
 
-class _UndoEntry {
+class UndoEntry {
   final String pageFileName;
   final PageData pageData;
-  _UndoEntry(this.pageFileName, this.pageData);
+  UndoEntry(this.pageFileName, this.pageData);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1286,7 +1285,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (!isClosed) return null;
 
     // Auto-fill closed shapes with a transparent version of the stroke color.
-    final fillAlpha = 0x30; // ~19% opacity
+    const fillAlpha = 0x30; // ~19% opacity
     final autoFill = (color & 0x00FFFFFF) | (fillAlpha << 24);
 
     // ── POLYGON DETECTION (Douglas-Peucker) — run early to inform circle vs rect ──
@@ -1725,7 +1724,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final cosA = hasRotation ? cos(sh.rotation) : 1.0;
     final sinA = hasRotation ? sin(sh.rotation) : 0.0;
 
-    Offset _rot(Offset p) {
+    Offset rotatePoint(Offset p) {
       if (!hasRotation) return p;
       final dx = p.dx - cx;
       final dy = p.dy - cy;
@@ -1747,7 +1746,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         for (int j = startIdx; j < count; j++) {
           final t = j / (count - 1);
           final raw = Offset(p1.dx + (p2.dx - p1.dx) * t, p1.dy + (p2.dy - p1.dy) * t);
-          final rotated = _rot(raw);
+          final rotated = rotatePoint(raw);
           sampled.add(StrokePoint(x: rotated.dx, y: rotated.dy, pressure: 0.5));
         }
       }
@@ -1947,7 +1946,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (!changed) return;
 
     // Only push undo once per eraser gesture
-    List<_UndoEntry> undoStack;
+    List<UndoEntry> undoStack;
     if (!_eraserUndoPushed) {
       undoStack = _pushUndo(s, fileName, page);
       _eraserUndoPushed = true;
@@ -2444,8 +2443,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final entry = s.undoStack.last;
     final currentPage = s.pages[entry.pageFileName];
 
-    final newUndo = List<_UndoEntry>.from(s.undoStack)..removeLast();
-    final newRedo = [...s.redoStack, if (currentPage != null) _UndoEntry(entry.pageFileName, currentPage)];
+    final newUndo = List<UndoEntry>.from(s.undoStack)..removeLast();
+    final newRedo = [...s.redoStack, if (currentPage != null) UndoEntry(entry.pageFileName, currentPage)];
 
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[entry.pageFileName] = entry.pageData;
@@ -2459,8 +2458,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final entry = s.redoStack.last;
     final currentPage = s.pages[entry.pageFileName];
 
-    final newRedo = List<_UndoEntry>.from(s.redoStack)..removeLast();
-    final newUndo = [...s.undoStack, if (currentPage != null) _UndoEntry(entry.pageFileName, currentPage)];
+    final newRedo = List<UndoEntry>.from(s.redoStack)..removeLast();
+    final newUndo = [...s.undoStack, if (currentPage != null) UndoEntry(entry.pageFileName, currentPage)];
 
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[entry.pageFileName] = entry.pageData;
@@ -2526,7 +2525,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void addPage() {
     if (state == null) return;
     final s = state!;
-    final uuid = const Uuid();
+    const uuid = Uuid();
     final pageId = uuid.v4();
     final now = DateTime.now();
     final pageNum = s.pageCount + 1;
@@ -2580,7 +2579,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void insertPageAt(int index) {
     if (state == null) return;
     final s = state!;
-    final uuid = const Uuid();
+    const uuid = Uuid();
     final pageId = uuid.v4();
     final now = DateTime.now();
     final pageNum = s.pageCount + 1;
@@ -2641,7 +2640,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final s = state!;
     final now = DateTime.now();
     final chapterId = const Uuid().v4();
-    final uuid = const Uuid();
+    const uuid = Uuid();
 
     // Create a new blank page for the chapter instead of reassigning the current page
     final pageId = uuid.v4();
@@ -2793,8 +2792,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   // ── Helpers ──
 
-  List<_UndoEntry> _pushUndo(CanvasState s, String fileName, PageData page) {
-    final stack = [...s.undoStack, _UndoEntry(fileName, page)];
+  List<UndoEntry> _pushUndo(CanvasState s, String fileName, PageData page) {
+    final stack = [...s.undoStack, UndoEntry(fileName, page)];
     if (stack.length > 50) stack.removeAt(0);
     return stack;
   }
@@ -3243,7 +3242,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     return false;
   }
 
-  void _updatePageContent(CanvasState s, PageData page, String fileName, List<ContentElement> content, List<_UndoEntry> undoStack) {
+  void _updatePageContent(CanvasState s, PageData page, String fileName, List<ContentElement> content, List<UndoEntry> undoStack) {
     final updatedPage = PageData(
       pageId: page.pageId, pageNumber: page.pageNumber,
       width: page.width, height: page.height,
@@ -4180,7 +4179,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final sourcePage = s.pages[entry.fileName];
     if (sourcePage == null) return;
 
-    final uuid = const Uuid();
+    const uuid = Uuid();
     final pageId = uuid.v4();
     final now = DateTime.now();
     final pageNum = s.pageCount + 1;
@@ -4790,7 +4789,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           // Silently accept the identical page (keeps updatedPages in sync)
           continue;
         }
-        if (isNew) newCount++; else modCount++;
+        if (isNew) {
+          newCount++;
+        } else {
+          modCount++;
+        }
         final pageIndex = remoteMeta.document.pages.indexWhere((e) => e.fileName == fileName);
         final pageEntry = pageIndex >= 0 ? remoteMeta.document.pages[pageIndex] : null;
         final chapterName = _chapterNameForPage(pageEntry, remoteMeta.metadata);

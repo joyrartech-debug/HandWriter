@@ -448,7 +448,7 @@ class _DiffChip extends StatelessWidget {
           '$localCount',
           style: const TextStyle(color: Color(0xFF3B82F6), fontSize: 11, fontWeight: FontWeight.w600),
         ),
-        Text(' / ', style: TextStyle(color: Colors.white24, fontSize: 11)),
+        const Text(' / ', style: TextStyle(color: Colors.white24, fontSize: 11)),
         Text(
           '$remoteCount',
           style: const TextStyle(color: Color(0xFF22C55E), fontSize: 11, fontWeight: FontWeight.w600),
@@ -521,7 +521,7 @@ class _VersionCard extends StatelessWidget {
                   if (selected)
                     Icon(Icons.check_circle, color: accentColor, size: 18)
                   else
-                    Icon(Icons.radio_button_off, color: Colors.white30, size: 18),
+                    const Icon(Icons.radio_button_off, color: Colors.white30, size: 18),
                   const SizedBox(width: 8),
                   Expanded(
                     child: Column(

@@ -230,7 +230,7 @@ class CanvasRenderEngine extends CustomPainter {
         ..color = const Color(0xFFE8B4B8)
         ..strokeWidth = 0.8
         ..style = PaintingStyle.stroke;
-      canvas.drawLine(Offset(60, 0), Offset(60, pageData.height), marginPaint);
+      canvas.drawLine(const Offset(60, 0), Offset(60, pageData.height), marginPaint);
     }
     for (double y = spacing; y < pageData.height; y += spacing) {
       canvas.drawLine(Offset(0, y), Offset(pageData.width, y), paint);
@@ -274,7 +274,7 @@ class CanvasRenderEngine extends CustomPainter {
       ..color = const Color(0xFFE8B4B8)
       ..strokeWidth = 1.2
       ..style = PaintingStyle.stroke;
-    canvas.drawLine(Offset(cueWidth, 0), Offset(cueWidth, h - summaryHeight), cuePaint);
+    canvas.drawLine(const Offset(cueWidth, 0), Offset(cueWidth, h - summaryHeight), cuePaint);
 
     // Horizontal summary separator
     canvas.drawLine(Offset(0, h - summaryHeight), Offset(w, h - summaryHeight), cuePaint);
@@ -284,7 +284,7 @@ class CanvasRenderEngine extends CustomPainter {
       ..color = const Color(0xFFB0B0B0)
       ..strokeWidth = 1.0
       ..style = PaintingStyle.stroke;
-    canvas.drawLine(Offset(0, 50), Offset(w, 50), titlePaint);
+    canvas.drawLine(const Offset(0, 50), Offset(w, 50), titlePaint);
   }
 
   void _paintIsometricBackground(Canvas canvas, double spacing, Paint paint) {

@@ -1143,6 +1143,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       if (imageBytes != null && imageBytes.isNotEmpty) {
         final s = ref.read(canvasProvider);
         if (s == null) return;
+        if (!mounted) return;
         final viewSize = (context.findRenderObject() as RenderBox?)?.size ?? const Size(400, 600);
         final center = Offset(
           (-s.panOffset.dx + viewSize.width / 2) / s.zoom,
@@ -1378,8 +1379,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
+        final navigator = Navigator.of(context);
         final shouldPop = await _onWillPop();
-        if (shouldPop && mounted) Navigator.of(context).pop();
+        if (shouldPop && mounted) navigator.pop();
       },
       child: Focus(
         focusNode: _focusNode,
@@ -1633,7 +1635,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                       decoration: BoxDecoration(
                         color: Colors.green.shade700,
                         borderRadius: BorderRadius.circular(20),
-                        boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 8)],
+                        boxShadow: const [BoxShadow(color: Colors.black26, blurRadius: 8)],
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
@@ -3053,7 +3055,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         return Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(title: const Text('Assegna capitolo')),
+            const ListTile(title: Text('Assegna capitolo')),
             ListTile(
               leading: const Icon(Icons.clear),
               title: const Text('Nessuno'),
@@ -3066,7 +3068,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 selected: canvasState.document.pages[pageIndex].chapterId == chapter.id,
                 onTap: () => Navigator.of(ctx).pop(chapter.id),
               );
-            }).toList(),
+            }),
           ],
         );
       },
@@ -3299,6 +3301,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       ),
     );
     if (action == 'rename') {
+      if (!ctx.mounted) return;
       final newTitle = await _promptForText(ctx, 'Rinomina capitolo', 'Nome', initial: chapter.title);
       if (newTitle != null && newTitle.trim().isNotEmpty) {
         ref.read(canvasProvider.notifier).renameChapter(chapter.id, newTitle.trim());

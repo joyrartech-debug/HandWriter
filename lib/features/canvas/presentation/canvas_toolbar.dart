@@ -456,11 +456,14 @@ class CanvasToolbar extends StatelessWidget {
       builder: (ctx) => SimpleDialog(
         title: const Text('Sfondo pagina'),
         children: PaperType.values.map((type) {
-          return RadioListTile<PaperType>(
-            value: type, groupValue: currentPaperType,
+          final isSelected = currentPaperType == type;
+          return ListTile(
+            leading: Icon(_paperIcon(type)),
             title: Text(paperTypeLabel(type)),
-            secondary: Icon(_paperIcon(type)),
-            onChanged: (v) { if (v != null) onPaperTypeChanged(v); Navigator.pop(ctx); },
+            trailing: isSelected
+                ? const Icon(Icons.radio_button_checked, color: Colors.blue)
+                : const Icon(Icons.radio_button_off, color: Colors.grey),
+            onTap: () { onPaperTypeChanged(type); Navigator.pop(ctx); },
           );
         }).toList(),
       ),
@@ -539,7 +542,7 @@ class _PenToolIcon extends StatelessWidget {
                 color: active ? Colors.blue : Colors.grey.shade700,
               )),
               if (active)
-                Positioned(
+                const Positioned(
                   right: 2, bottom: 2,
                   child: Icon(Icons.expand_more_rounded, size: 10, color: Colors.blue),
                 ),
