@@ -1,0 +1,106 @@
+import 'dart:io';
+import 'dart:ui' as ui;
+
+import 'package:flutter/rendering.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+
+import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/features/canvas/data/render_engine.dart';
+import 'package:handwriter/shared/models/ncnote_format.dart';
+
+/// Caches small PNG previews of notebook pages on disk.
+///
+/// Thumbnails are stored under:
+///   HandWriter/thumbnails/<notebookId>.png
+///
+/// Rendering runs on the main isolate via [ui.PictureRecorder] — it is cheap
+/// for vector content and is fire-and-forget (failures degrade to gradient
+/// placeholder in the library UI).
+class ThumbnailService {
+  /// Physical pixel size of stored thumbnails.
+  static const int thumbWidth = 360;
+  static const int thumbHeight = 504; // 5:7 aspect matches A4 portrait
+
+  late String _thumbsDir;
+  bool _initialized = false;
+
+  Future<void> init() async {
+    if (_initialized) return;
+    final appDir = await getApplicationDocumentsDirectory();
+    _thumbsDir = p.join(appDir.path, 'HandWriter', AppConfig.thumbnailsDir);
+    await Directory(_thumbsDir).create(recursive: true);
+    _initialized = true;
+  }
+
+  String thumbnailPath(String notebookId) =>
+      p.join(_thumbsDir, '$notebookId.png');
+
+  Future<bool> hasThumbnail(String notebookId) async {
+    if (!_initialized) await init();
+    return File(thumbnailPath(notebookId)).exists();
+  }
+
+  /// Returns the age of the cached thumbnail, or null if missing.
+  Future<Duration?> thumbnailAge(String notebookId) async {
+    final file = File(thumbnailPath(notebookId));
+    if (!await file.exists()) return null;
+    final stat = await file.stat();
+    return DateTime.now().difference(stat.modified);
+  }
+
+  /// Renders [page] offscreen and writes the PNG to disk.
+  /// Returns the written path, or null on failure.
+  Future<String?> renderAndCache(
+    String notebookId,
+    PageData page, {
+    Map<String, ui.Image> imageCache = const {},
+  }) async {
+    if (!_initialized) await init();
+    try {
+      final recorder = ui.PictureRecorder();
+      final size = Size(thumbWidth.toDouble(), thumbHeight.toDouble());
+      final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, size.height));
+
+      // Clear to white — thumbnails never show app chrome behind.
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, size.width, size.height),
+        Paint()..color = const Color(0xFFFFFFFF),
+      );
+
+      CanvasRenderEngine(
+        pageData: page,
+        imageCache: imageCache,
+      ).paint(canvas, size);
+
+      final picture = recorder.endRecording();
+      final img = await picture.toImage(thumbWidth, thumbHeight);
+      final data = await img.toByteData(format: ui.ImageByteFormat.png);
+      picture.dispose();
+      img.dispose();
+      if (data == null) return null;
+
+      final file = File(thumbnailPath(notebookId));
+      await file.writeAsBytes(data.buffer.asUint8List(), flush: true);
+      return file.path;
+    } catch (e) {
+      debugPrint('[ThumbnailService] Render failed for $notebookId: $e');
+      return null;
+    }
+  }
+
+  Future<void> deleteThumbnail(String notebookId) async {
+    final file = File(thumbnailPath(notebookId));
+    if (await file.exists()) {
+      try { await file.delete(); } catch (_) {}
+    }
+  }
+
+  Future<void> clearAll() async {
+    final dir = Directory(_thumbsDir);
+    if (!await dir.exists()) return;
+    await for (final entry in dir.list()) {
+      try { await entry.delete(recursive: true); } catch (_) {}
+    }
+  }
+}

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
@@ -5,8 +7,10 @@ import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/file_service.dart';
+import 'package:handwriter/core/services/search_service.dart';
 import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_screen.dart';
+import 'package:handwriter/shared/models/ncnote_format.dart';
 
 class LibraryScreen extends ConsumerStatefulWidget {
   const LibraryScreen({super.key});
@@ -18,6 +22,7 @@ class LibraryScreen extends ConsumerStatefulWidget {
 class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
+  final Set<String> _selectedTags = <String>{};
 
   @override
   void initState() {
@@ -123,8 +128,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
   Future<void> _createNotebook() async {
     final titleController = TextEditingController();
+    final tagController = TextEditingController();
     String paperType = 'lined_wide';
     int coverColor = 0xFF1565C0;
+    final initialTags = <String>{};
 
     final coverColors = [
       (0xFF1565C0, 'Blu'),
@@ -192,6 +199,40 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                   ],
                 ),
                 const SizedBox(height: 20),
+                Text('Tag (opzionali)', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: tagController,
+                  decoration: InputDecoration(
+                    hintText: 'Invio per aggiungere…',
+                    prefixIcon: const Icon(Icons.tag, size: 20),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    filled: true,
+                    fillColor: Colors.grey.shade50,
+                    isDense: true,
+                  ),
+                  onSubmitted: (v) {
+                    final t = v.trim();
+                    if (t.isEmpty) return;
+                    setDialogState(() {
+                      initialTags.add(t);
+                      tagController.clear();
+                    });
+                  },
+                ),
+                if (initialTags.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: initialTags.map((t) => InputChip(
+                      label: Text('#$t', style: const TextStyle(fontSize: 12)),
+                      onDeleted: () => setDialogState(() => initialTags.remove(t)),
+                      visualDensity: VisualDensity.compact,
+                    )).toList(),
+                  ),
+                ],
+                const SizedBox(height: 20),
                 Text('Colore copertina', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
                 const SizedBox(height: 8),
                 Wrap(
@@ -239,11 +280,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
     if (result != true || titleController.text.trim().isEmpty) return;
 
+    // Pick up any tag still pending in the input field.
+    final stillTyping = tagController.text.trim();
+    if (stillTyping.isNotEmpty) initialTags.add(stillTyping);
+
     try {
       final entry = await ref.read(notebookListProvider.notifier).createNotebook(
         title: titleController.text.trim(),
         paperType: paperType,
         coverColor: coverColor,
+        tags: initialTags.toList(),
       );
       if (mounted) _openNotebook(entry);
     } catch (e) {
@@ -285,7 +331,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       if (localData != null && syncService != null) {
         SyncService.validateNcnoteArchive(localData, context: 'open local ${entry.metadata.title}');
         final result = syncService.parseNcnoteMetadata(localData);
-        final pages = syncService.extractAllPages(localData);
+        // Page extraction on the main isolate can jank for large notebooks.
+        // Offload to a worker for anything beyond a conservative threshold.
+        const kLazyThresholdBytes = 512 * 1024; // 512 KB
+        const kLazyThresholdPages = 15;
+        final Map<String, PageData> pages =
+            (localData.lengthInBytes > kLazyThresholdBytes ||
+                    result.document.pages.length > kLazyThresholdPages)
+                ? await syncService.extractAllPagesIsolated(localData)
+                : syncService.extractAllPages(localData);
         final assets = syncService.extractAllAssets(localData);
         final symbols = syncService.extractSymbolLibraries(localData);
 
@@ -359,6 +413,11 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               onTap: () { Navigator.pop(ctx); _renameNotebook(entry); },
             ),
             ListTile(
+              leading: const Icon(Icons.tag),
+              title: const Text('Modifica tag'),
+              onTap: () { Navigator.pop(ctx); _editTags(entry); },
+            ),
+            ListTile(
               leading: Icon(Icons.delete_outline, color: Colors.red.shade400),
               title: Text('Elimina', style: TextStyle(color: Colors.red.shade400)),
               onTap: () { Navigator.pop(ctx); _deleteNotebook(entry); },
@@ -401,6 +460,84 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             SnackBar(content: Text('Errore rinomina: $e')),
           );
         }
+      }
+    }
+  }
+
+  Future<void> _editTags(NotebookEntry entry) async {
+    final tags = <String>{...entry.metadata.tags};
+    final controller = TextEditingController();
+    final saved = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: const Text('Modifica tag'),
+          content: SizedBox(
+            width: 320,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                TextField(
+                  controller: controller,
+                  autofocus: true,
+                  decoration: InputDecoration(
+                    hintText: 'Invio per aggiungere…',
+                    prefixIcon: const Icon(Icons.tag, size: 20),
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                    filled: true,
+                    fillColor: Colors.grey.shade50,
+                    isDense: true,
+                  ),
+                  onSubmitted: (v) {
+                    final t = v.trim();
+                    if (t.isEmpty) return;
+                    setDialogState(() {
+                      tags.add(t);
+                      controller.clear();
+                    });
+                  },
+                ),
+                const SizedBox(height: 12),
+                if (tags.isEmpty)
+                  Text('Nessun tag', style: TextStyle(color: Colors.grey.shade500, fontSize: 13))
+                else
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: 6,
+                    children: tags.map((t) => InputChip(
+                      label: Text('#$t', style: const TextStyle(fontSize: 12)),
+                      onDeleted: () => setDialogState(() => tags.remove(t)),
+                      visualDensity: VisualDensity.compact,
+                    )).toList(),
+                  ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Annulla')),
+            FilledButton(
+              onPressed: () {
+                final pending = controller.text.trim();
+                if (pending.isNotEmpty) tags.add(pending);
+                Navigator.pop(ctx, true);
+              },
+              child: const Text('Salva'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (saved != true) return;
+    try {
+      await ref.read(notebookListProvider.notifier).updateNotebookTags(entry, tags.toList());
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Errore tag: $e')),
+        );
       }
     }
   }
@@ -458,6 +595,167 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         }
       }
     }
+  }
+
+  Future<void> _showSearch() async {
+    final search = ref.read(searchServiceProvider);
+    if (search == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Servizio di ricerca non disponibile offline senza server')),
+      );
+      return;
+    }
+    final queryController = TextEditingController();
+    var results = <SearchHit>[];
+    var busy = false;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          Future<void> runSearch(String q) async {
+            if (q.trim().isEmpty) {
+              setSheetState(() => results = []);
+              return;
+            }
+            setSheetState(() => busy = true);
+            try {
+              final hits = await search.search(q);
+              if (ctx.mounted) setSheetState(() { results = hits; busy = false; });
+            } catch (_) {
+              if (ctx.mounted) setSheetState(() => busy = false);
+            }
+          }
+
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.75,
+            minChildSize: 0.5,
+            maxChildSize: 0.95,
+            builder: (_, scrollController) => Column(
+              children: [
+                Container(
+                  width: 40, height: 4,
+                  margin: const EdgeInsets.symmetric(vertical: 10),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.manage_search_rounded),
+                      const SizedBox(width: 10),
+                      const Expanded(
+                        child: Text('Cerca nei contenuti',
+                            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.pop(ctx),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: TextField(
+                    controller: queryController,
+                    autofocus: true,
+                    textInputAction: TextInputAction.search,
+                    decoration: InputDecoration(
+                      hintText: 'titolo, capitolo o testo…',
+                      prefixIcon: const Icon(Icons.search),
+                      suffixIcon: busy
+                          ? const Padding(
+                              padding: EdgeInsets.all(12),
+                              child: SizedBox(
+                                width: 16, height: 16,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            )
+                          : null,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                      filled: true,
+                      fillColor: Colors.grey.shade50,
+                      isDense: true,
+                    ),
+                    onSubmitted: runSearch,
+                    onChanged: (v) {
+                      // Live search only when query is short enough to be cheap.
+                      if (v.length >= 2) runSearch(v);
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20),
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      results.isEmpty
+                          ? (queryController.text.trim().isEmpty
+                              ? 'Digita per cercare…'
+                              : 'Nessun risultato')
+                          : '${results.length} risultati',
+                      style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Expanded(
+                  child: ListView.separated(
+                    controller: scrollController,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: results.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (_, i) {
+                      final hit = results[i];
+                      final kindIcon = switch (hit.kind) {
+                        SearchHitKind.notebookTitle => Icons.menu_book_rounded,
+                        SearchHitKind.chapter => Icons.bookmark_outline_rounded,
+                        SearchHitKind.text => Icons.text_fields_rounded,
+                      };
+                      return ListTile(
+                        leading: Icon(kindIcon, color: Colors.blue.shade600),
+                        title: Text(
+                          hit.notebookTitle,
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                          maxLines: 1, overflow: TextOverflow.ellipsis,
+                        ),
+                        subtitle: Text(
+                          'Pag. ${hit.pageNumber} \u2022 ${hit.snippet}',
+                          maxLines: 2, overflow: TextOverflow.ellipsis,
+                        ),
+                        onTap: () async {
+                          Navigator.pop(ctx);
+                          final list = ref.read(notebookListProvider).valueOrNull ?? const [];
+                          final match = list.firstWhere(
+                            (e) => e.metadata.id == hit.notebookId,
+                            orElse: () => list.isEmpty
+                                ? throw StateError('No notebooks')
+                                : list.first,
+                          );
+                          if (match.metadata.id == hit.notebookId) {
+                            _openNotebook(match);
+                          }
+                        },
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _showTrash() async {
@@ -684,6 +982,11 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               ),
             ),
           IconButton(
+            icon: Icon(Icons.manage_search_rounded, color: Colors.grey.shade700),
+            tooltip: 'Cerca nei contenuti',
+            onPressed: _showSearch,
+          ),
+          IconButton(
             icon: Icon(Icons.refresh_rounded, color: Colors.grey.shade700),
             onPressed: () => ref.read(notebookListProvider.notifier).refresh(),
           ),
@@ -783,14 +1086,28 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             );
           }
 
-          // Filter by search query (case-insensitive, matches title + chapter titles).
+          // Aggregate all known tags so the filter bar stays visible even when
+          // current search hides most notebooks.
+          final allTags = <String>{};
+          for (final e in list) {
+            allTags.addAll(e.metadata.tags);
+          }
+          // Drop stale selections (tag removed from all notebooks).
+          _selectedTags.removeWhere((t) => !allTags.contains(t));
+
+          // Filter by search query (case-insensitive, matches title + chapter titles)
+          // AND by selected tags (AND across selected tags).
           final query = _searchQuery.trim().toLowerCase();
-          final filtered = query.isEmpty
-              ? list
-              : list.where((e) {
-                  if (e.metadata.title.toLowerCase().contains(query)) return true;
-                  return e.metadata.chapters.any((c) => c.title.toLowerCase().contains(query));
-                }).toList();
+          final filtered = list.where((e) {
+            if (_selectedTags.isNotEmpty &&
+                !_selectedTags.every(e.metadata.tags.contains)) {
+              return false;
+            }
+            if (query.isEmpty) return true;
+            if (e.metadata.title.toLowerCase().contains(query)) return true;
+            if (e.metadata.tags.any((t) => t.toLowerCase().contains(query))) return true;
+            return e.metadata.chapters.any((c) => c.title.toLowerCase().contains(query));
+          }).toList();
 
           return RefreshIndicator(
             onRefresh: () => ref.read(notebookListProvider.notifier).refresh(),
@@ -828,6 +1145,37 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                     ),
                   ),
                 ),
+                if (allTags.isNotEmpty)
+                  SizedBox(
+                    height: 44,
+                    child: ListView(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+                      children: [
+                        for (final tag in (allTags.toList()..sort())) ...[
+                          FilterChip(
+                            label: Text('#$tag', style: const TextStyle(fontSize: 12)),
+                            selected: _selectedTags.contains(tag),
+                            onSelected: (on) => setState(() {
+                              if (on) {
+                                _selectedTags.add(tag);
+                              } else {
+                                _selectedTags.remove(tag);
+                              }
+                            }),
+                            visualDensity: VisualDensity.compact,
+                          ),
+                          const SizedBox(width: 6),
+                        ],
+                        if (_selectedTags.isNotEmpty)
+                          TextButton.icon(
+                            onPressed: () => setState(() => _selectedTags.clear()),
+                            icon: const Icon(Icons.close, size: 14),
+                            label: const Text('Pulisci', style: TextStyle(fontSize: 12)),
+                          ),
+                      ],
+                    ),
+                  ),
                 if (filtered.isEmpty)
                   Expanded(
                     child: Center(
@@ -875,7 +1223,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 //  WIDGETS
 // ═══════════════════════════════════════════════════════════════
 
-class _NotebookCard extends StatelessWidget {
+class _NotebookCard extends ConsumerWidget {
   final NotebookEntry entry;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
@@ -883,10 +1231,14 @@ class _NotebookCard extends StatelessWidget {
   const _NotebookCard({required this.entry, required this.onTap, required this.onLongPress});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final meta = entry.metadata;
     final coverColor = Color(meta.coverColor);
     final paperLabel = _paperLabel(meta.paperType);
+    final thumbs = ref.watch(thumbnailServiceProvider);
+    final thumbPath = thumbs.thumbnailPath(meta.id);
+    // Re-read mtime so saves trigger a repaint.
+    final thumbFile = File(thumbPath);
 
     return GestureDetector(
       onTap: onTap,
@@ -909,83 +1261,142 @@ class _NotebookCard extends StatelessWidget {
               // Cover
               Expanded(
                 flex: 3,
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [coverColor, coverColor.withValues(alpha: 0.8)],
-                    ),
-                  ),
-                  child: Stack(
-                    children: [
-                      // Notebook lines decoration
-                      Positioned(
-                        left: 16,
-                        top: 0,
-                        bottom: 0,
-                        child: Container(width: 1.5, color: Colors.white.withValues(alpha: 0.15)),
-                      ),
-                      Positioned(
-                        left: 20,
-                        top: 0,
-                        bottom: 0,
-                        child: Container(width: 0.5, color: Colors.white.withValues(alpha: 0.1)),
-                      ),
-                      // Title on cover
-                      Padding(
-                        padding: const EdgeInsets.fromLTRB(32, 16, 16, 16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              meta.title,
-                              maxLines: 3,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 15,
-                                fontWeight: FontWeight.w700,
-                                height: 1.3,
+                child: FutureBuilder<bool>(
+                  future: thumbFile.exists(),
+                  builder: (ctx, snap) {
+                    final hasThumb = snap.data == true;
+                    return Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        // Always paint gradient first — acts as placeholder
+                        // while the thumb loads and as a fallback when missing.
+                        Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [coverColor, coverColor.withValues(alpha: 0.8)],
+                            ),
+                          ),
+                        ),
+                        if (hasThumb)
+                          Positioned.fill(
+                            child: Image.file(
+                              thumbFile,
+                              fit: BoxFit.cover,
+                              gaplessPlayback: true,
+                              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+                            ),
+                          ),
+                        if (hasThumb)
+                          // Dark scrim for legibility of title text on top.
+                          Positioned.fill(
+                            child: DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  colors: [
+                                    Colors.black.withValues(alpha: 0.35),
+                                    Colors.black.withValues(alpha: 0.05),
+                                    Colors.black.withValues(alpha: 0.45),
+                                  ],
+                                  stops: const [0, 0.55, 1],
+                                ),
                               ),
                             ),
-                            const Spacer(),
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withValues(alpha: 0.2),
-                                    borderRadius: BorderRadius.circular(10),
-                                  ),
-                                  child: Text(
-                                    meta.chapters.isNotEmpty
-                                        ? '${meta.pageCount} pag. \u2022 ${meta.chapters.map((c) => c.title).join(', ')}'
-                                        : '${meta.pageCount} pag.',
-                                    style: const TextStyle(color: Colors.white, fontSize: 11),
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
+                          ),
+                        if (!hasThumb) ...[
+                          Positioned(
+                            left: 16,
+                            top: 0,
+                            bottom: 0,
+                            child: Container(width: 1.5, color: Colors.white.withValues(alpha: 0.15)),
+                          ),
+                          Positioned(
+                            left: 20,
+                            top: 0,
+                            bottom: 0,
+                            child: Container(width: 0.5, color: Colors.white.withValues(alpha: 0.1)),
+                          ),
+                        ],
+                        // Title on cover
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(32, 16, 16, 16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                meta.title,
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w700,
+                                  height: 1.3,
+                                  shadows: [
+                                    Shadow(color: Color(0x66000000), blurRadius: 4),
+                                  ],
                                 ),
-                                GestureDetector(
-                                  onTap: onLongPress,
-                                  child: Container(
-                                    padding: const EdgeInsets.all(4),
+                              ),
+                              const Spacer(),
+                              if (meta.tags.isNotEmpty) ...[
+                                Wrap(
+                                  spacing: 4,
+                                  runSpacing: 4,
+                                  children: meta.tags.take(3).map((t) => Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                     decoration: BoxDecoration(
-                                      color: Colors.white.withValues(alpha: 0.2),
-                                      borderRadius: BorderRadius.circular(8),
+                                      color: Colors.white.withValues(alpha: 0.25),
+                                      borderRadius: BorderRadius.circular(6),
                                     ),
-                                    child: const Icon(Icons.more_vert, color: Colors.white, size: 18),
-                                  ),
+                                    child: Text('#$t',
+                                        style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w500)),
+                                  )).toList(),
                                 ),
+                                const SizedBox(height: 6),
                               ],
-                            ),
-                          ],
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Flexible(
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withValues(alpha: 0.2),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Text(
+                                        meta.chapters.isNotEmpty
+                                            ? '${meta.pageCount} pag. \u2022 ${meta.chapters.map((c) => c.title).join(', ')}'
+                                            : '${meta.pageCount} pag.',
+                                        style: const TextStyle(color: Colors.white, fontSize: 11),
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  GestureDetector(
+                                    onTap: onLongPress,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withValues(alpha: 0.2),
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                      child: const Icon(Icons.more_vert, color: Colors.white, size: 18),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    );
+                  },
                 ),
               ),
               // Info bar

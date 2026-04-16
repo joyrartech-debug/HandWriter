@@ -335,12 +335,18 @@ class SyncService {
   }
 
   /// Crea un pacchetto .ncnote da metadata, document e pagine.
+  ///
+  /// [preEncodedPages] è una cache opzionale di `fileName -> jsonBytes`: se la
+  /// pagina è presente qui, i suoi byte verranno riusati senza rifare
+  /// `jsonEncode`, che per pagine con molti stroke è l'overhead dominante.
+  /// Le pagine non presenti nella cache vengono codificate normalmente.
   Uint8List createNcnotePackage({
     required NotebookMetadata metadata,
     required DocumentStructure document,
     required Map<String, PageData> pages,
     Map<String, Uint8List>? assets,
     List<Map<String, dynamic>>? symbolLibraries,
+    Map<String, Uint8List>? preEncodedPages,
   }) {
     final archive = Archive();
 
@@ -362,7 +368,8 @@ class SyncService {
 
     // pages/
     for (final entry in pages.entries) {
-      final pageBytes = utf8.encode(jsonEncode(entry.value.toJson()));
+      final cached = preEncodedPages?[entry.key];
+      final pageBytes = cached ?? utf8.encode(jsonEncode(entry.value.toJson()));
       archive.addFile(ArchiveFile(
         '${AppConfig.pagesDir}/${entry.key}',
         pageBytes.length,
@@ -923,6 +930,16 @@ class SyncService {
     return pages;
   }
 
+  /// Extract all pages on a background isolate for large archives.
+  ///
+  /// Decoding a ZIP + parsing every page JSON on the UI isolate jank-locks
+  /// notebooks with dozens of pages. This variant hops off onto a worker via
+  /// [compute] and awaits the decoded map. Use it when the notebook is known
+  /// to be heavy (see [AppConfig] and call sites in [library_screen]).
+  Future<Map<String, PageData>> extractAllPagesIsolated(Uint8List data) {
+    return compute(_extractAllPagesInIsolate, data);
+  }
+
   /// Scarica un notebook completo con tutte le pagine.
   /// Validates ZIP integrity before parsing.
   Future<({NotebookMetadata metadata, DocumentStructure document, Map<String, PageData> pages, Map<String, Uint8List> assets, List<Map<String, dynamic>> symbolLibraries})>
@@ -972,4 +989,22 @@ class CorruptedArchiveException implements Exception {
 
   @override
   String toString() => 'CorruptedArchiveException: $message';
+}
+
+/// Top-level entry point for [SyncService.extractAllPagesIsolated].
+///
+/// Must live at the top level (not inside the class) so it can be passed to
+/// [compute], which uses a pure function pointer.
+Map<String, PageData> _extractAllPagesInIsolate(Uint8List data) {
+  final archive = ZipDecoder().decodeBytes(data);
+  final pages = <String, PageData>{};
+  const prefix = '${AppConfig.pagesDir}/';
+  for (final file in archive.files) {
+    if (file.name.startsWith(prefix) && file.name.endsWith('.json')) {
+      final fileName = file.name.split('/').last;
+      final json = jsonDecode(utf8.decode(file.content as List<int>));
+      pages[fileName] = PageData.fromJson(json as Map<String, dynamic>);
+    }
+  }
+  return pages;
 }

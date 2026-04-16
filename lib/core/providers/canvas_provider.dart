@@ -592,6 +592,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// different object than `_lastSyncedPages[fileName]`, it was edited.
   Map<String, PageData> _lastSyncedPages = {};
 
+  /// Cache of encoded page JSON bytes per fileName. Reused when the current
+  /// [PageData] instance is identical to the one that produced the cached
+  /// bytes — i.e. the page wasn't mutated since the last save. For big
+  /// notebooks where only one page changes per save, this avoids re-encoding
+  /// every other page on every write.
+  final Map<String, _CachedPageJson> _pageJsonCache = {};
+
   /// ETag of the remote metadata.json — used to detect remote changes.
   String? _remoteMetaEtag;
 
@@ -693,6 +700,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Initialize delta sync tracking
     _disposed = false;
     _lastSyncedPages = Map.of(pages);
+    _pageJsonCache.clear();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
     // Pre-populate page ETags so the first pull doesn't see every page as
@@ -733,6 +741,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
     _lastSyncedPages = {};
+    _pageJsonCache.clear();
     // Keep _remoteMetaEtag, _lastPageEtags across
     // close/open to avoid re-pulling all pages on re-enter.
     state = null;
@@ -4376,11 +4385,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     debugPrint('[Canvas] Dirty: ${changedPages.length} pages, '
         '${changedAssets.length} assets, ${deletedPages.length} deleted');
 
-    // 1. Build the ZIP package in a background isolate (for local cache).
+    // 1. Encode pages on the main thread with a per-page cache (so unchanged
+    //    pages skip JSON encoding), then build the ZIP in a background isolate.
+    final encodedPages = _encodePagesWithCache(s.pages);
     final package = await compute(_buildPackageInIsolate, _PackageParams(
       metadata: updatedMeta,
       document: s.document,
-      pages: s.pages,
+      encodedPages: encodedPages,
       assets: s.assetBytes.isNotEmpty ? s.assetBytes : null,
       symbolLibraries: s.symbolLibraries.isNotEmpty
           ? s.symbolLibraries.map((l) => l.toJson()).toList()
@@ -4434,6 +4445,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       try { await remoteSyncFuture; } catch (_) {}
       return false;
     }
+
+    // Fire-and-forget: refresh thumbnail for the library card. Uses the
+    // first page of the document — failures are swallowed (cards fall
+    // back to the gradient placeholder).
+    () async {
+      try {
+        final thumbs = _ref.read(thumbnailServiceProvider);
+        final firstPageEntry = s.document.pages.isNotEmpty
+            ? s.document.pages.first
+            : null;
+        if (firstPageEntry == null) return;
+        final firstPage = s.pages[firstPageEntry.fileName];
+        if (firstPage == null) return;
+        await thumbs.renderAndCache(
+          updatedMeta.id,
+          firstPage,
+          imageCache: s.imageCache,
+        );
+      } catch (e) {
+        debugPrint('[Canvas] Thumbnail cache failed: $e');
+      }
+    }();
 
     // Hand the lock to a background task that waits for the remote sync
     // to finish (or fail), then releases the lock.
@@ -4992,10 +5025,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final symbolLibs = state?.symbolLibraries
           .map((l) => l.toJson())
           .toList();
+      // Pulled pages are all new to us, so the cache will miss for each of
+      // them and re-encode. This is fine — happens once after a remote pull.
+      final encodedPages = _encodePagesWithCache(pages);
       final package = await compute(_buildPackageInIsolate, _PackageParams(
         metadata: metadata,
         document: document,
-        pages: pages,
+        encodedPages: encodedPages,
         assets: assets.isNotEmpty ? assets : null,
         symbolLibraries: symbolLibs,
       ));
@@ -5019,23 +5055,59 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       print('[Canvas] Failed to save pulled changes locally: $e');
     }
   }
+
+  /// Encodes every page in [pages] to JSON bytes, reusing cached encodings for
+  /// pages whose [PageData] instance hasn't changed since the last save.
+  ///
+  /// Returns a fresh Map safe to ship to a background isolate. Stale cache
+  /// entries (for pages that were deleted) are evicted.
+  Map<String, Uint8List> _encodePagesWithCache(Map<String, PageData> pages) {
+    final result = <String, Uint8List>{};
+    final seen = <String>{};
+    for (final entry in pages.entries) {
+      seen.add(entry.key);
+      final cached = _pageJsonCache[entry.key];
+      if (cached != null && identical(cached.page, entry.value)) {
+        result[entry.key] = cached.bytes;
+        continue;
+      }
+      final bytes = Uint8List.fromList(utf8.encode(jsonEncode(entry.value.toJson())));
+      _pageJsonCache[entry.key] = _CachedPageJson(entry.value, bytes);
+      result[entry.key] = bytes;
+    }
+    // Evict deleted pages from the cache.
+    _pageJsonCache.removeWhere((k, _) => !seen.contains(k));
+    return result;
+  }
 }
 
 /// Parameters for the isolate packaging function.
 class _PackageParams {
   final NotebookMetadata metadata;
   final DocumentStructure document;
-  final Map<String, PageData> pages;
+  /// Pre-encoded page JSON bytes keyed by page file name. Encoding is done on
+  /// the main thread so unchanged pages can skip re-encoding via a cache in
+  /// [CanvasNotifier]. The isolate only ZIPs these bytes.
+  final Map<String, Uint8List> encodedPages;
   final Map<String, Uint8List>? assets;
   final List<Map<String, dynamic>>? symbolLibraries;
 
   _PackageParams({
     required this.metadata,
     required this.document,
-    required this.pages,
+    required this.encodedPages,
     this.assets,
     this.symbolLibraries,
   });
+}
+
+/// Tiny record tying cached encoded bytes to the exact [PageData] instance
+/// they were produced from. Identity check (`identical`) is enough because
+/// [PageData] is a freezed/immutable model.
+class _CachedPageJson {
+  final PageData page;
+  final Uint8List bytes;
+  const _CachedPageJson(this.page, this.bytes);
 }
 
 /// Top-level function run inside [Isolate.run] via [compute].
@@ -5053,12 +5125,11 @@ Uint8List _buildPackageInIsolate(_PackageParams p) {
   final docBytes = utf8.encode(jsonEncode(p.document.toJson()));
   archive.addFile(ArchiveFile(AppConfig.documentFile, docBytes.length, docBytes));
 
-  for (final entry in p.pages.entries) {
-    final pageBytes = utf8.encode(jsonEncode(entry.value.toJson()));
+  for (final entry in p.encodedPages.entries) {
     archive.addFile(ArchiveFile(
       '${AppConfig.pagesDir}/${entry.key}',
-      pageBytes.length,
-      pageBytes,
+      entry.value.length,
+      entry.value,
     ));
   }
 

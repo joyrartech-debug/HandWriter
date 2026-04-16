@@ -2,10 +2,16 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/services/connectivity_service.dart';
 import 'package:handwriter/core/services/file_service.dart';
+import 'package:handwriter/core/services/thumbnail_service.dart';
 
 /// Singleton FileService provider — must be initialized before use.
 final fileServiceProvider = Provider<FileService>((ref) {
   return FileService();
+});
+
+/// Singleton ThumbnailService — caches page previews to disk.
+final thumbnailServiceProvider = Provider<ThumbnailService>((ref) {
+  return ThumbnailService();
 });
 
 /// ConnectivityService provider — depends on server URL from credentials.
