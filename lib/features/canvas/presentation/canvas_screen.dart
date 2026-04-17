@@ -1561,6 +1561,51 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             ],
           ),
               const RemoteChangesBanner(),
+              // Subtle "Sincronizzazione…" pill while a remote pull is in
+              // flight — lets the user know the notebook may update shortly
+              // so they don't think the app glitched.
+              Positioned(
+                top: 64,
+                right: 12,
+                child: ValueListenableBuilder<bool>(
+                  valueListenable:
+                      ref.read(canvasProvider.notifier).isPullingFromRemote,
+                  builder: (_, pulling, __) => AnimatedOpacity(
+                    duration: const Duration(milliseconds: 250),
+                    opacity: pulling ? 1.0 : 0.0,
+                    child: IgnorePointer(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.72),
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              width: 12,
+                              height: 12,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white),
+                              ),
+                            ),
+                            SizedBox(width: 8),
+                            Text(
+                              'Sincronizzazione…',
+                              style: TextStyle(
+                                  color: Colors.white, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
             ],
           ),
         ),

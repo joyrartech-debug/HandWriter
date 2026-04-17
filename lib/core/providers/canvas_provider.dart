@@ -608,6 +608,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Timer for pulling remote changes from other devices.
   Timer? _pullTimer;
 
+  /// True while a background pull from the server is fetching data for
+  /// the currently-open notebook. The UI watches this to show a subtle
+  /// "Sincronizzazione…" banner so the user knows why the notebook might
+  /// be about to change.
+  final ValueNotifier<bool> isPullingFromRemote = ValueNotifier<bool>(false);
+
   CanvasNotifier(this._ref) : super(null);
 
   void setViewportSize(Size size) {
@@ -737,6 +743,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _pullTimer?.cancel();
     _pullTimer = null;
     _isPulling = false;
+    isPullingFromRemote.value = false;
     _forceReleaseSyncLock();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -4722,20 +4729,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state!.pendingConflicts.isNotEmpty) return;
     if (state!.pendingRemoteChanges != null) return;
     _isPulling = true;
+    isPullingFromRemote.value = true;
 
     final locked = await _acquireSyncLock();
     if (!locked) {
       _isPulling = false;
+      isPullingFromRemote.value = false;
       return;
     }
     try {
       if (state == null) return;
       final s = state!;
+      final pullNotebookId = s.metadata.id;
       final syncService = _ref.read(syncServiceProvider);
       if (syncService == null) return;
 
       // Fetch metadata ETag + page ETags in parallel
-      final changeState = await syncService.getRemoteChangeState(s.metadata.id);
+      final changeState = await syncService.getRemoteChangeState(pullNotebookId);
+
+      // Guard: did the user switch notebooks while we were awaiting the
+      // network? If so this pull belongs to the OLD notebook — dropping
+      // its data into the new one would swap the user's current notebook
+      // out from under them (the "Automotive turned into AICD" bug).
+      if (state == null || state!.metadata.id != pullNotebookId) {
+        print('[Canvas] Pull aborted — notebook switched during PROPFIND '
+            '(expected $pullNotebookId, got ${state?.metadata.id})');
+        return;
+      }
+
       if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
         print('[Canvas] Delta metadata changed, pulling delta...');
         await _pullFromDeltaFast(
@@ -4747,6 +4768,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       print('[Canvas] Pull failed: $e');
     } finally {
       _isPulling = false;
+      isPullingFromRemote.value = false;
       _releaseSyncLock();
     }
   }
@@ -4911,6 +4933,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // Notebook-switch guard: if the user opened a different notebook while
+    // we were downloading pages/assets, this data belongs to the old one.
+    // Writing it to state would corrupt the now-active notebook.
+    if (state == null || state!.metadata.id != s.metadata.id) {
+      print('[Canvas] Delta merge aborted — notebook switched mid-pull '
+          '(expected ${s.metadata.id}, got ${state?.metadata.id})');
+      return false;
+    }
+
     if ((anyPageChanged || deletionConflicts.isNotEmpty) && state != null) {
       // ── Detect conflicts: pages changed both locally AND remotely ──
       final conflicts = <PageConflict>[...deletionConflicts];
@@ -5049,6 +5080,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final s = state;
     final pending = s?.pendingRemoteChanges;
     if (s == null || pending == null) return;
+
+    // Safety net: never apply remote changes belonging to a different
+    // notebook than the one currently open (shouldn't happen with the
+    // pull-path guards in place, but cheap to double-check).
+    if (s.metadata.id != pending.metadata.id) {
+      print('[Canvas] Dropping stale pendingRemoteChanges '
+          '(pending=${pending.metadata.id}, open=${s.metadata.id})');
+      state = s.copyWith(clearPendingRemoteChanges: true);
+      return;
+    }
 
     _lastSyncedPages = Map.of(pending.pages);
     state = s.copyWith(
