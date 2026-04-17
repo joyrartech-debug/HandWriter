@@ -550,6 +550,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// race each other. Only one can modify state at a time.
   Completer<void>? _syncLock;
   bool _disposed = false;
+  /// Tracks the latest in-flight local save of pulled-from-remote changes.
+  /// Needed so [closeNotebook] can await it — otherwise the user can exit
+  /// fast enough after a pull that the merged state never hits disk, and
+  /// the next open reads a stale .ncnote (the "sync adds pages, exit,
+  /// re-enter, everything gone, re-sync" bug).
+  Future<void>? _pendingPulledLocalSave;
 
   /// Acquire exclusive sync lock. Returns when lock available.
   /// Returns false if notifier was disposed while waiting.
@@ -747,13 +753,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
   }
 
-  void closeNotebook() {
+  Future<void> closeNotebook() async {
     _disposed = true;
     _saveLastPosition();
     _pullTimer?.cancel();
     _pullTimer = null;
     _isPulling = false;
     isPullingFromRemote.value = false;
+    // Critical: if a pull just auto-accepted remote changes and started
+    // writing the merged .ncnote, let it finish before we drop state.
+    // Otherwise the next open will read the pre-pull file and the user
+    // sees the pulled pages disappear (and a fresh pull re-downloads
+    // them on re-entry).
+    final pendingSave = _pendingPulledLocalSave;
+    if (pendingSave != null) {
+      try { await pendingSave; } catch (_) {}
+    }
+    _pendingPulledLocalSave = null;
     _forceReleaseSyncLock();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -5164,12 +5180,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
     print('[Canvas] User accepted remote changes');
 
-    // Persist the merged state locally
-    _savePulledChangesLocally(
+    // Persist the merged state locally. Tracked so closeNotebook() can
+    // await it — otherwise exiting immediately after an auto-accept loses
+    // the pulled pages (they're in memory but the .ncnote wasn't rewritten
+    // in time).
+    _pendingPulledLocalSave = _savePulledChangesLocally(
       pending.metadata, pending.document,
       pending.pages, pending.assets,
     );
-
   }
 
   /// User dismissed the incoming remote changes — keep local state.

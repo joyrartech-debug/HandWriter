@@ -398,7 +398,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       if (result == 'cancel') return false;
       if (result == 'save') await _save();
     }
-    ref.read(canvasProvider.notifier).closeNotebook();
+    // Await so any in-flight local save of pulled remote changes lands
+    // on disk before we pop and the user possibly re-opens the notebook.
+    await ref.read(canvasProvider.notifier).closeNotebook();
     return true;
   }
 
