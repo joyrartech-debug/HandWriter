@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
+import 'package:handwriter/core/providers/pending_import_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
@@ -112,6 +113,58 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     WidgetsBinding.instance.addObserver(this);
     _startAutoSave();
+    _watchForPendingImport();
+  }
+
+  /// Waits for the notebook to finish loading, then runs any pending share
+  /// import (files dropped in via the Android/iOS share sheet). Fires once.
+  void _watchForPendingImport() {
+    bool handled = false;
+    ref.listenManual<CanvasState?>(canvasProvider, (prev, next) {
+      if (handled) return;
+      if (next == null) return;
+      final pending = ref.read(pendingImportProvider);
+      if (pending == null) return;
+      handled = true;
+      ref.read(pendingImportProvider.notifier).state = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) => _runPendingImport(pending));
+    });
+  }
+
+  Future<void> _runPendingImport(PendingImport pending) async {
+    if (!mounted) return;
+    final notifier = ref.read(canvasProvider.notifier);
+    if (pending.newChapterTitle != null && pending.newChapterTitle!.isNotEmpty) {
+      notifier.addChapter(pending.newChapterTitle!);
+    } else if (pending.targetChapterId != null) {
+      notifier.setActiveChapter(pending.targetChapterId);
+    }
+    for (final path in pending.filePaths) {
+      if (!mounted) break;
+      try {
+        final file = io.File(path);
+        if (!await file.exists()) continue;
+        final bytes = await file.readAsBytes();
+        final name = path.split(io.Platform.pathSeparator).last;
+        final state = ref.read(canvasProvider);
+        final pg = state?.currentPage;
+        final center = pg == null
+            ? const Offset(100, 100)
+            : Offset(pg.width / 2, pg.height / 2);
+        if (name.toLowerCase().endsWith('.pdf')) {
+          await _insertPdf(bytes, name, center);
+        } else {
+          _insertImage(bytes, name, center);
+          // For multiple shared images, give each its own page.
+          if (pending.filePaths.length > 1 &&
+              path != pending.filePaths.last) {
+            notifier.addPage();
+          }
+        }
+      } catch (e) {
+        debugPrint('[Canvas] Pending import failed for $path: $e');
+      }
+    }
   }
 
   @override
@@ -215,9 +268,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           return KeyEventResult.handled;
         case LogicalKeyboardKey.keyC:
           ref.read(canvasProvider.notifier).copySelection();
+          _toast('Selezione copiata');
           return KeyEventResult.handled;
         case LogicalKeyboardKey.keyX:
           ref.read(canvasProvider.notifier).cutSelection();
+          _toast('Selezione tagliata');
           return KeyEventResult.handled;
         case LogicalKeyboardKey.keyV:
           _pasteFromClipboard();
@@ -1440,10 +1495,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 onDeleteSelection: () => ref.read(canvasProvider.notifier).deleteSelection(),
                 onClearSelection: () => ref.read(canvasProvider.notifier).clearSelection(),
                 onInsertImage: () => _pickAndInsertImage(const Offset(100, 100)),
-                onCopySelection: () => ref.read(canvasProvider.notifier).copySelection(),
-                onCutSelection: () => ref.read(canvasProvider.notifier).cutSelection(),
+                onCopySelection: () {
+                  ref.read(canvasProvider.notifier).copySelection();
+                  _toast('Selezione copiata');
+                },
+                onCutSelection: () {
+                  ref.read(canvasProvider.notifier).cutSelection();
+                  _toast('Selezione tagliata');
+                },
                 onPasteSelection: canvasState.clipboard != null ? () => ref.read(canvasProvider.notifier).paste() : null,
-                onDuplicateSelection: () => ref.read(canvasProvider.notifier).duplicateSelection(),
+                onDuplicateSelection: () {
+                  ref.read(canvasProvider.notifier).duplicateSelection();
+                  _toast('Selezione duplicata');
+                },
                 onChangeSelectionColor: (color) => ref.read(canvasProvider.notifier).changeSelectionColor(color),
                 onOpenSymbols: () {
                   // Insert at page center (visible area)
@@ -1994,9 +2058,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         } : null,
         onCopy: isImage ? () {
           ref.read(canvasProvider.notifier).copyElement(elementId);
+          // Also push the PNG to the system clipboard so the user can
+          // paste it into another app.
+          _copyImageElementToSystemClipboard(elementId);
+          _toast('Immagine copiata');
         } : null,
         onCut: isImage ? () {
           ref.read(canvasProvider.notifier).cutElement(elementId);
+          _toast('Immagine tagliata');
         } : null,
       ),
     ];
@@ -2131,16 +2200,41 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             children: [
               _FloatingActionBtn(Icons.copy_rounded, 'Copia', () {
                 ref.read(canvasProvider.notifier).copySelection();
+                // If the selection is a single image, also push its PNG
+                // to the system clipboard so the user can paste it elsewhere.
+                final sel = state.lassoSelection;
+                if (sel != null && sel.selectedIds.length == 1) {
+                  final page = state.currentPage;
+                  final id = sel.selectedIds.first;
+                  final el = page?.layers.content.where((e) => e.map(
+                    stroke: (s) => s.id, text: (t) => t.id,
+                    image: (i) => i.id, shape: (s) => s.id,
+                  ) == id).firstOrNull;
+                  final isImg = el?.map(
+                    stroke: (_) => false, text: (_) => false,
+                    image: (_) => true, shape: (_) => false,
+                  ) ?? false;
+                  if (isImg) _copyImageElementToSystemClipboard(id);
+                }
+                _toast('Selezione copiata');
               }),
               _FloatingActionBtn(Icons.screenshot_rounded, 'Screenshot', () {
                 _copySelectionAsScreenshot();
               }),
               _FloatingActionBtn(Icons.content_cut_rounded, 'Taglia', () {
                 ref.read(canvasProvider.notifier).cutSelection();
+                _toast('Selezione tagliata');
               }),
               _FloatingActionBtn(Icons.copy_all_rounded, 'Duplica', () {
                 ref.read(canvasProvider.notifier).duplicateSelection();
+                _toast('Selezione duplicata');
               }),
+              _FloatingActionBtn(Icons.flip_rounded, 'Rifletti H', () {
+                ref.read(canvasProvider.notifier).flipSelectionHorizontal();
+              }),
+              _FloatingActionBtn(Icons.flip_rounded, 'Rifletti V', () {
+                ref.read(canvasProvider.notifier).flipSelectionVertical();
+              }, rotation: 1.5708), // 90° so the icon points vertically
               if (state.clipboard != null)
                 _FloatingActionBtn(Icons.paste_rounded, 'Incolla', () {
                   ref.read(canvasProvider.notifier).paste();
@@ -2346,10 +2440,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       if (value == null) return;
       final notifier = ref.read(canvasProvider.notifier);
       switch (value) {
-        case 'copy': notifier.copySelection(); break;
+        case 'copy': notifier.copySelection(); _toast('Selezione copiata'); break;
         case 'copy_screenshot': _copySelectionAsScreenshot(); break;
-        case 'cut': notifier.cutSelection(); break;
-        case 'duplicate_sel': notifier.duplicateSelection(); break;
+        case 'cut': notifier.cutSelection(); _toast('Selezione tagliata'); break;
+        case 'duplicate_sel': notifier.duplicateSelection(); _toast('Selezione duplicata'); break;
         case 'delete_sel': notifier.deleteSelection(); break;
         case 'paste': notifier.paste(at: pagePos); break;
         case 'paste_clipboard_image': _pasteFromClipboard(); break;
@@ -2819,6 +2913,57 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
   }
 
+  /// Encode an image element to PNG and push it onto the system clipboard
+  /// so it can be pasted into other apps. Fire-and-forget; UI toast is
+  /// shown by the caller.
+  Future<void> _copyImageElementToSystemClipboard(String elementId) async {
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    final page = state.currentPage;
+    if (page == null) return;
+    final element = page.layers.content.where((e) {
+      return e.map(stroke: (s) => s.id, text: (t) => t.id, image: (i) => i.id, shape: (s) => s.id) == elementId;
+    }).firstOrNull;
+    if (element == null) return;
+
+    ImageData? imageData;
+    element.map(
+      stroke: (_) {}, text: (_) {},
+      image: (i) => imageData = i.data,
+      shape: (_) {},
+    );
+    if (imageData == null) return;
+
+    final uiImage = state.imageCache[imageData!.assetPath];
+    if (uiImage == null) return;
+    try {
+      final byteData = await uiImage.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) return;
+      final clipboard = SystemClipboard.instance;
+      if (clipboard == null) return;
+      final item = DataWriterItem();
+      item.add(Formats.png(byteData.buffer.asUint8List()));
+      await clipboard.write([item]);
+    } catch (e) {
+      debugPrint('[Canvas] System clipboard image write failed: $e');
+    }
+  }
+
+  /// Small inline confirmation toast. Keeps a short duration so it doesn't
+  /// obscure the canvas.
+  void _toast(String message) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        duration: const Duration(milliseconds: 1400),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
   /// Show a dialog for choosing export scope.
   Future<_ExportScope?> _showExportScopeDialog({
     required String singlePageLabel,
@@ -2907,9 +3052,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   final chip = ChoiceChip(
                     label: Text(chapter.title, style: const TextStyle(fontSize: 12)),
                     selected: isActive,
-                    onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(
-                      isActive ? null : chapter.id,
-                    ),
+                    // Tapping the active chapter must NOT deselect — always
+                    // keep one chapter active so the bottom bar never falls
+                    // into an empty state.
+                    onSelected: (_) {
+                      if (isActive) return;
+                      ref.read(canvasProvider.notifier).setActiveChapter(chapter.id);
+                    },
                     visualDensity: VisualDensity.compact,
                     materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   );
@@ -3369,12 +3518,15 @@ class _FloatingActionBtn extends StatelessWidget {
   final String? label;
   final VoidCallback onTap;
   final Color? color;
+  final double rotation;
 
-  const _FloatingActionBtn(this.icon, this.label, this.onTap, {this.color});
+  const _FloatingActionBtn(this.icon, this.label, this.onTap,
+      {this.color, this.rotation = 0.0});
 
   @override
   Widget build(BuildContext context) {
     final c = color ?? Colors.grey.shade800;
+    final iconWidget = Icon(icon, size: 20, color: c);
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -3385,7 +3537,9 @@ class _FloatingActionBtn extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(icon, size: 20, color: c),
+              rotation == 0.0
+                  ? iconWidget
+                  : Transform.rotate(angle: rotation, child: iconWidget),
               if (label != null)
                 Text(label!, style: TextStyle(fontSize: 9, color: c)),
             ],
@@ -3717,6 +3871,46 @@ class _PageGridReorderable extends StatefulWidget {
 class _PageGridReorderableState extends State<_PageGridReorderable> {
   int? _dragFromVisIdx;
   int? _dragOverVisIdx;
+  bool _didInitialScroll = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToCurrentPage());
+  }
+
+  /// Jump the grid to the row containing the current page, so the sheet
+  /// opens near where the user is instead of at page 1.
+  void _scrollToCurrentPage() {
+    if (_didInitialScroll || !mounted) return;
+    final curDocIdx = widget.liveState.currentPageIndex;
+    final curVisIdx = widget.visibleIndices.indexOf(curDocIdx);
+    if (curVisIdx < 0) return;
+
+    final controller = widget.scrollController;
+    if (!controller.hasClients) return;
+
+    const crossAxisCount = 3;
+    const crossAxisSpacing = 10.0;
+    const mainAxisSpacing = 10.0;
+    const childAspectRatio = 0.60;
+    const padding = 12.0;
+
+    final viewportWidth = controller.position.viewportDimension == 0
+        ? MediaQuery.of(context).size.width
+        : context.size?.width ?? MediaQuery.of(context).size.width;
+    final tileWidth =
+        (viewportWidth - padding * 2 - crossAxisSpacing * (crossAxisCount - 1)) /
+            crossAxisCount;
+    final tileHeight = tileWidth / childAspectRatio;
+    final rowIdx = curVisIdx ~/ crossAxisCount;
+    final target = padding + rowIdx * (tileHeight + mainAxisSpacing);
+    final clamped =
+        target.clamp(0.0, controller.position.maxScrollExtent).toDouble();
+
+    controller.jumpTo(clamped);
+    _didInitialScroll = true;
+  }
 
   String? _chapterNameForPage(int docIdx) {
     final entry = widget.liveState.document.pages[docIdx];

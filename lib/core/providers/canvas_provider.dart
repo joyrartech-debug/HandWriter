@@ -773,19 +773,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       applySelectionTransform();
     }
 
-    // Auto-set highlighter to yellow, restore black for pens
+    // Auto-set highlighter to yellow; always restore pen defaults (width/opacity
+    // and color only when it was the default yellow) when leaving highlighter,
+    // so picking a custom color in highlighter mode doesn't leak into the pen.
     ToolSettings? updatedSettings;
-    if (tool == CanvasTool.highlighter && state!.toolSettings.color == 0xFF000000) {
+    if (tool == CanvasTool.highlighter &&
+        state!.currentTool != CanvasTool.highlighter) {
       updatedSettings = state!.toolSettings.copyWith(
-        color: 0xFFFFEB3B,
+        color: state!.toolSettings.color == 0xFF000000
+            ? 0xFFFFEB3B
+            : state!.toolSettings.color,
         strokeWidth: 12.0,
         opacity: 0.35,
       );
     } else if (state!.currentTool == CanvasTool.highlighter &&
-        tool != CanvasTool.highlighter &&
-        state!.toolSettings.color == 0xFFFFEB3B) {
+        tool != CanvasTool.highlighter) {
       updatedSettings = state!.toolSettings.copyWith(
-        color: 0xFF000000,
+        color: state!.toolSettings.color == 0xFFFFEB3B
+            ? 0xFF000000
+            : state!.toolSettings.color,
         strokeWidth: 2.0,
         opacity: 1.0,
       );
@@ -2285,6 +2291,135 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  /// Mirror the current selection around its horizontal center axis (flip X).
+  void flipSelectionHorizontal() => _flipSelection(horizontal: true);
+
+  /// Mirror the current selection around its vertical center axis (flip Y).
+  void flipSelectionVertical() => _flipSelection(horizontal: false);
+
+  void _flipSelection({required bool horizontal}) {
+    if (state == null || state!.lassoSelection == null) return;
+    final s = state!;
+    final sel = s.lassoSelection!;
+    final page = s.currentPage;
+    if (page == null || sel.selectedIds.isEmpty) return;
+    final fileName = s.currentPageFileName;
+    final undoStack = _pushUndo(s, fileName, page);
+
+    // Bake any pending translate/scale/rotate first so the flip axis is the
+    // *visual* center the user sees, not the original bounds center.
+    if (sel.rotation != 0.0 || sel.dragOffset != Offset.zero || sel.scale != 1.0) {
+      applySelectionTransform();
+    }
+    final postState = state!;
+    final postSel = postState.lassoSelection!;
+    final postPage = postState.currentPage!;
+    final center = postSel.bounds.center;
+
+    double reflectX(double x) => horizontal ? 2 * center.dx - x : x;
+    double reflectY(double y) => horizontal ? y : 2 * center.dy - y;
+
+    final updatedContent = postPage.layers.content.map((element) {
+      final id = element.map(
+        stroke: (e) => e.id, text: (e) => e.id,
+        image: (e) => e.id, shape: (e) => e.id,
+      );
+      if (!postSel.selectedIds.contains(id)) return element;
+      return element.map(
+        stroke: (e) => ContentElement.stroke(
+          id: e.id, zIndex: e.zIndex,
+          data: StrokeData(
+            points: e.data.points
+                .map((p) => StrokePoint(
+                      x: reflectX(p.x),
+                      y: reflectY(p.y),
+                      pressure: p.pressure,
+                      tilt: p.tilt,
+                      timestamp: p.timestamp,
+                    ))
+                .toList(),
+            toolType: e.data.toolType, color: e.data.color,
+            baseWidth: e.data.baseWidth, isHighlighter: e.data.isHighlighter,
+            opacity: e.data.opacity, timestamp: e.data.timestamp,
+          ),
+        ),
+        text: (e) => ContentElement.text(
+          id: e.id, zIndex: e.zIndex,
+          data: TextData(
+            // Reflect top-left by accounting for element size so the box
+            // mirrors properly around the axis.
+            x: horizontal ? 2 * center.dx - e.data.x - e.data.width : e.data.x,
+            y: horizontal ? e.data.y : 2 * center.dy - e.data.y - e.data.height,
+            width: e.data.width, height: e.data.height,
+            content: e.data.content, fontFamily: e.data.fontFamily,
+            fontSize: e.data.fontSize, color: e.data.color,
+            bold: e.data.bold, italic: e.data.italic, alignment: e.data.alignment,
+          ),
+        ),
+        image: (e) => ContentElement.image(
+          id: e.id, zIndex: e.zIndex,
+          data: ImageData(
+            x: horizontal ? 2 * center.dx - e.data.x - e.data.width : e.data.x,
+            y: horizontal ? e.data.y : 2 * center.dy - e.data.y - e.data.height,
+            width: e.data.width, height: e.data.height,
+            assetPath: e.data.assetPath,
+            // Mirror rotation so the image visually stays aligned.
+            rotation: -e.data.rotation,
+            opacity: e.data.opacity,
+            locked: e.data.locked,
+            comment: e.data.comment,
+          ),
+        ),
+        shape: (e) => ContentElement.shape(
+          id: e.id, zIndex: e.zIndex,
+          data: ShapeData(
+            shapeType: e.data.shapeType,
+            x1: reflectX(e.data.x1), y1: reflectY(e.data.y1),
+            x2: reflectX(e.data.x2), y2: reflectY(e.data.y2),
+            strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
+            fillColor: e.data.fillColor,
+            rotation: -e.data.rotation,
+          ),
+        ),
+      );
+    }).toList();
+
+    final updatedPage = PageData(
+      pageId: postPage.pageId, pageNumber: postPage.pageNumber,
+      width: postPage.width, height: postPage.height,
+      layers: RenderingLayers(background: postPage.layers.background, content: updatedContent),
+      assetReferences: postPage.assetReferences,
+      createdAt: postPage.createdAt, modifiedAt: DateTime.now(),
+    );
+
+    final updatedPages = Map<String, PageData>.from(postState.pages);
+    updatedPages[fileName] = updatedPage;
+
+    // Recompute selection bounds from mirrored elements.
+    Rect? newBounds;
+    for (final element in updatedContent) {
+      final id = element.map(
+        stroke: (e) => e.id, text: (e) => e.id,
+        image: (e) => e.id, shape: (e) => e.id,
+      );
+      if (!postSel.selectedIds.contains(id)) continue;
+      final eb = _getElementBounds(element);
+      if (eb == null) continue;
+      newBounds = newBounds == null ? eb : newBounds.expandToInclude(eb);
+    }
+
+    state = postState.copyWith(
+      pages: updatedPages,
+      undoStack: undoStack,
+      redoStack: [],
+      isDirty: true,
+      lassoSelection: LassoSelection(
+        selectedIds: postSel.selectedIds,
+        bounds: newBounds ?? postSel.bounds,
+      ),
+    );
+  }
+
   ContentElement _rotateElementAroundCenter(ContentElement element, Offset center, double angle) {
     Offset rotatePoint(double x, double y) {
       final cosA = cos(angle);
@@ -2500,10 +2635,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void goToPage(int index) {
     if (state == null || index < 0 || index >= state!.pageCount) return;
+    // Preserve zoom and pan so the user's viewport stays put across pages.
     state = state!.copyWith(
       currentPageIndex: index,
-      zoom: 2.0,
-      panOffset: _centeredPanOffset(2.0),
       activeStroke: [],
       clearLasso: true,
       lassoPath: [],
