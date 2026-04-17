@@ -1459,7 +1459,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 //  WIDGETS
 // ═══════════════════════════════════════════════════════════════
 
-class _NotebookCard extends ConsumerWidget {
+class _NotebookCard extends ConsumerStatefulWidget {
   final NotebookEntry entry;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
@@ -1467,7 +1467,40 @@ class _NotebookCard extends ConsumerWidget {
   const _NotebookCard({required this.entry, required this.onTap, required this.onLongPress});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_NotebookCard> createState() => _NotebookCardState();
+}
+
+class _NotebookCardState extends ConsumerState<_NotebookCard> {
+  /// Bumped each time we successfully lazy-render a missing thumbnail so
+  /// the FutureBuilder below re-evaluates and picks up the new file.
+  int _lazyRenderTick = 0;
+  bool _lazyRenderTriggered = false;
+
+  Future<void> _maybeLazyRenderThumb() async {
+    if (_lazyRenderTriggered) return;
+    _lazyRenderTriggered = true;
+    try {
+      final thumbs = ref.read(thumbnailServiceProvider);
+      final fileService = ref.read(fileServiceProvider);
+      final bytes = await fileService.readNotebookFile(widget.entry.metadata.id);
+      if (bytes == null || !mounted) return;
+      final path = await thumbs.ensureFromNcnoteBytes(
+        widget.entry.metadata.id,
+        bytes,
+      );
+      if (path != null && mounted) {
+        setState(() => _lazyRenderTick++);
+      }
+    } catch (_) {
+      // Swallow — card gracefully falls back to gradient cover.
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entry = widget.entry;
+    final onTap = widget.onTap;
+    final onLongPress = widget.onLongPress;
     final meta = entry.metadata;
     final coverColor = Color(meta.coverColor);
     final paperLabel = _paperLabel(meta.paperType);
@@ -1475,6 +1508,9 @@ class _NotebookCard extends ConsumerWidget {
     final thumbPath = thumbs.thumbnailPath(meta.id);
     // Re-read mtime so saves trigger a repaint.
     final thumbFile = File(thumbPath);
+    // Tick is referenced so the analyzer knows it's used; it's also what
+    // forces FutureBuilder to re-check file existence after a lazy render.
+    final _ = _lazyRenderTick;
 
     return GestureDetector(
       onTap: onTap,
@@ -1501,6 +1537,17 @@ class _NotebookCard extends ConsumerWidget {
                   future: thumbFile.exists(),
                   builder: (ctx, snap) {
                     final hasThumb = snap.data == true;
+                    if (snap.connectionState == ConnectionState.done &&
+                        !hasThumb) {
+                      // Schedule a one-shot lazy render from the local
+                      // notebook bytes so previously-unrendered notebooks
+                      // (downloaded, imported, or pre-thumbnail-era) get
+                      // a cover preview without the user having to edit
+                      // and save them first.
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        _maybeLazyRenderThumb();
+                      });
+                    }
                     return Stack(
                       fit: StackFit.expand,
                       children: [

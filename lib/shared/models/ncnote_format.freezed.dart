@@ -3839,6 +3839,7 @@ mixin _$ImageData {
   double get rotation => throw _privateConstructorUsedError; // radianti
   double get opacity => throw _privateConstructorUsedError;
   bool get locked => throw _privateConstructorUsedError;
+  bool get flipHorizontal => throw _privateConstructorUsedError;
   String? get comment => throw _privateConstructorUsedError;
 
   /// Serializes this ImageData to a JSON map.
@@ -3865,6 +3866,7 @@ abstract class $ImageDataCopyWith<$Res> {
       double rotation,
       double opacity,
       bool locked,
+      bool flipHorizontal,
       String? comment});
 }
 
@@ -3891,6 +3893,7 @@ class _$ImageDataCopyWithImpl<$Res, $Val extends ImageData>
     Object? rotation = null,
     Object? opacity = null,
     Object? locked = null,
+    Object? flipHorizontal = null,
     Object? comment = freezed,
   }) {
     return _then(_value.copyWith(
@@ -3926,6 +3929,10 @@ class _$ImageDataCopyWithImpl<$Res, $Val extends ImageData>
           ? _value.locked
           : locked // ignore: cast_nullable_to_non_nullable
               as bool,
+      flipHorizontal: null == flipHorizontal
+          ? _value.flipHorizontal
+          : flipHorizontal // ignore: cast_nullable_to_non_nullable
+              as bool,
       comment: freezed == comment
           ? _value.comment
           : comment // ignore: cast_nullable_to_non_nullable
@@ -3951,6 +3958,7 @@ abstract class _$$ImageDataImplCopyWith<$Res>
       double rotation,
       double opacity,
       bool locked,
+      bool flipHorizontal,
       String? comment});
 }
 
@@ -3975,6 +3983,7 @@ class __$$ImageDataImplCopyWithImpl<$Res>
     Object? rotation = null,
     Object? opacity = null,
     Object? locked = null,
+    Object? flipHorizontal = null,
     Object? comment = freezed,
   }) {
     return _then(_$ImageDataImpl(
@@ -4010,6 +4019,10 @@ class __$$ImageDataImplCopyWithImpl<$Res>
           ? _value.locked
           : locked // ignore: cast_nullable_to_non_nullable
               as bool,
+      flipHorizontal: null == flipHorizontal
+          ? _value.flipHorizontal
+          : flipHorizontal // ignore: cast_nullable_to_non_nullable
+              as bool,
       comment: freezed == comment
           ? _value.comment
           : comment // ignore: cast_nullable_to_non_nullable
@@ -4030,6 +4043,7 @@ class _$ImageDataImpl implements _ImageData {
       this.rotation = 0.0,
       this.opacity = 1.0,
       this.locked = false,
+      this.flipHorizontal = false,
       this.comment});
 
   factory _$ImageDataImpl.fromJson(Map<String, dynamic> json) =>
@@ -4057,11 +4071,14 @@ class _$ImageDataImpl implements _ImageData {
   @JsonKey()
   final bool locked;
   @override
+  @JsonKey()
+  final bool flipHorizontal;
+  @override
   final String? comment;
 
   @override
   String toString() {
-    return 'ImageData(x: $x, y: $y, width: $width, height: $height, assetPath: $assetPath, rotation: $rotation, opacity: $opacity, locked: $locked, comment: $comment)';
+    return 'ImageData(x: $x, y: $y, width: $width, height: $height, assetPath: $assetPath, rotation: $rotation, opacity: $opacity, locked: $locked, flipHorizontal: $flipHorizontal, comment: $comment)';
   }
 
   @override
@@ -4079,13 +4096,15 @@ class _$ImageDataImpl implements _ImageData {
                 other.rotation == rotation) &&
             (identical(other.opacity, opacity) || other.opacity == opacity) &&
             (identical(other.locked, locked) || other.locked == locked) &&
+            (identical(other.flipHorizontal, flipHorizontal) ||
+                other.flipHorizontal == flipHorizontal) &&
             (identical(other.comment, comment) || other.comment == comment));
   }
 
   @JsonKey(includeFromJson: false, includeToJson: false)
   @override
   int get hashCode => Object.hash(runtimeType, x, y, width, height, assetPath,
-      rotation, opacity, locked, comment);
+      rotation, opacity, locked, flipHorizontal, comment);
 
   /// Create a copy of ImageData
   /// with the given fields replaced by the non-null parameter values.
@@ -4113,6 +4132,7 @@ abstract class _ImageData implements ImageData {
       final double rotation,
       final double opacity,
       final bool locked,
+      final bool flipHorizontal,
       final String? comment}) = _$ImageDataImpl;
 
   factory _ImageData.fromJson(Map<String, dynamic> json) =
@@ -4134,6 +4154,8 @@ abstract class _ImageData implements ImageData {
   double get opacity;
   @override
   bool get locked;
+  @override
+  bool get flipHorizontal;
   @override
   String? get comment;
 

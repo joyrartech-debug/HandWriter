@@ -605,6 +605,14 @@ class CanvasRenderEngine extends CustomPainter {
       canvas.rotate(imageData.rotation);
       canvas.translate(-cx, -cy);
     }
+    // Horizontal mirror around the image's vertical centerline.
+    if (imageData.flipHorizontal) {
+      final cx = imageData.x + imageData.width / 2;
+      final cy = imageData.y + imageData.height / 2;
+      canvas.translate(cx, cy);
+      canvas.scale(-1, 1);
+      canvas.translate(-cx, -cy);
+    }
 
     final rect = Rect.fromLTWH(imageData.x, imageData.y, imageData.width, imageData.height);
 

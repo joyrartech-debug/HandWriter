@@ -222,6 +222,7 @@ class ImageData with _$ImageData {
     @Default(0.0) double rotation, // radianti
     @Default(1.0) double opacity,
     @Default(false) bool locked,
+    @Default(false) bool flipHorizontal,
     String? comment,
   }) = _ImageData;
 

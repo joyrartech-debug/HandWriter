@@ -2087,6 +2087,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       shape: (_) => false,
     );
 
+    final isFlipped = element.map(
+      stroke: (_) => false,
+      text: (_) => false,
+      image: (e) => e.data.flipHorizontal,
+      shape: (_) => false,
+    );
+
     final elementId = state.selectedElementId!;
 
     return [
@@ -2095,6 +2102,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         rotation: rotation,
         isLocked: isLocked,
         hasComment: hasComment,
+        isFlipped: isFlipped,
         onDragStart: () {
           ref.read(canvasProvider.notifier).startDragElement(elementId);
         },
@@ -2139,6 +2147,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         onCut: isImage ? () {
           ref.read(canvasProvider.notifier).cutElement(elementId);
           _toast('Immagine tagliata');
+        } : null,
+        onFlipHorizontal: isImage ? () {
+          ref.read(canvasProvider.notifier).flipImageElement(elementId);
         } : null,
       ),
     ];

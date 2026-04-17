@@ -18,8 +18,10 @@ class ImageHandleOverlay extends StatefulWidget {
   final VoidCallback? onEditComment;
   final VoidCallback? onCopy;
   final VoidCallback? onCut;
+  final VoidCallback? onFlipHorizontal;
   final bool isLocked;
   final bool hasComment;
+  final bool isFlipped;
 
   const ImageHandleOverlay({
     super.key,
@@ -38,8 +40,10 @@ class ImageHandleOverlay extends StatefulWidget {
     this.onEditComment,
     this.onCopy,
     this.onCut,
+    this.onFlipHorizontal,
     this.isLocked = false,
     this.hasComment = false,
+    this.isFlipped = false,
   });
 
   @override
@@ -285,25 +289,13 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
             ),
             _divider(),
           ],
-          if (widget.onEditComment != null) ...[
-            _actionBtn(
-              widget.hasComment ? Icons.comment_rounded : Icons.comment_outlined,
-              widget.hasComment ? Colors.green : Colors.grey.shade600,
-              widget.onEditComment!,
-              'Commento',
-            ),
-            _divider(),
-          ],
-          if (widget.onCopy != null) ...[
-            _actionBtn(Icons.copy_rounded, Colors.blueGrey, widget.onCopy!, 'Copia'),
-            _divider(),
-          ],
-          if (widget.onCut != null && !widget.isLocked) ...[
-            _actionBtn(Icons.content_cut_rounded, Colors.blueGrey, widget.onCut!, 'Taglia'),
-            _divider(),
-          ],
           if (!widget.isLocked) ...[
             _actionBtn(Icons.delete_outline_rounded, Colors.red, widget.onDelete, 'Elimina'),
+            _divider(),
+          ],
+          // Overflow menu for less-used actions (comment, reflect, copy, cut)
+          if (_hasOverflowActions()) ...[
+            _buildOverflowMenu(),
             _divider(),
           ],
           _actionBtn(Icons.close_rounded, Colors.grey.shade700, widget.onDeselect, 'Deseleziona'),
@@ -313,6 +305,86 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
   }
 
   Widget _divider() => Container(width: 1, height: 24, color: Colors.grey.shade200);
+
+  bool _hasOverflowActions() {
+    return widget.onEditComment != null ||
+        (widget.onFlipHorizontal != null && !widget.isLocked) ||
+        widget.onCopy != null ||
+        (widget.onCut != null && !widget.isLocked);
+  }
+
+  Widget _buildOverflowMenu() {
+    return Tooltip(
+      message: 'Altre azioni',
+      child: PopupMenuButton<String>(
+        tooltip: '',
+        padding: EdgeInsets.zero,
+        icon: Icon(Icons.more_vert_rounded, size: 18, color: Colors.grey.shade700),
+        onSelected: (value) {
+          switch (value) {
+            case 'comment':
+              widget.onEditComment?.call();
+              break;
+            case 'flip':
+              widget.onFlipHorizontal?.call();
+              break;
+            case 'copy':
+              widget.onCopy?.call();
+              break;
+            case 'cut':
+              widget.onCut?.call();
+              break;
+          }
+        },
+        itemBuilder: (ctx) => [
+          if (widget.onEditComment != null)
+            PopupMenuItem<String>(
+              value: 'comment',
+              child: Row(children: [
+                Icon(
+                  widget.hasComment ? Icons.comment_rounded : Icons.comment_outlined,
+                  size: 18,
+                  color: widget.hasComment ? Colors.green : Colors.grey.shade700,
+                ),
+                const SizedBox(width: 10),
+                const Text('Commento'),
+              ]),
+            ),
+          if (widget.onFlipHorizontal != null && !widget.isLocked)
+            PopupMenuItem<String>(
+              value: 'flip',
+              child: Row(children: [
+                Icon(
+                  Icons.flip_rounded,
+                  size: 18,
+                  color: widget.isFlipped ? Colors.blue : Colors.grey.shade700,
+                ),
+                const SizedBox(width: 10),
+                Text(widget.isFlipped ? 'Rifletti H ✓' : 'Rifletti H'),
+              ]),
+            ),
+          if (widget.onCopy != null)
+            const PopupMenuItem<String>(
+              value: 'copy',
+              child: Row(children: [
+                Icon(Icons.copy_rounded, size: 18, color: Colors.blueGrey),
+                SizedBox(width: 10),
+                Text('Copia'),
+              ]),
+            ),
+          if (widget.onCut != null && !widget.isLocked)
+            const PopupMenuItem<String>(
+              value: 'cut',
+              child: Row(children: [
+                Icon(Icons.content_cut_rounded, size: 18, color: Colors.blueGrey),
+                SizedBox(width: 10),
+                Text('Taglia'),
+              ]),
+            ),
+        ],
+      ),
+    );
+  }
 
   Widget _actionBtn(IconData icon, Color color, VoidCallback onTap, String tooltip) {
     return Tooltip(

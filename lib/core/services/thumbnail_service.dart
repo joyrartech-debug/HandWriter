@@ -5,6 +5,10 @@ import 'package:flutter/rendering.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
+import 'package:archive/archive.dart';
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
@@ -85,6 +89,41 @@ class ThumbnailService {
       return file.path;
     } catch (e) {
       debugPrint('[ThumbnailService] Render failed for $notebookId: $e');
+      return null;
+    }
+  }
+
+  /// Lazy thumbnail generation from the local .ncnote bytes.
+  /// Used when the library screen shows a notebook that never had a
+  /// thumbnail cached (downloaded from the server, imported, or created
+  /// before thumbnails existed). Renders the first page without images
+  /// (imageCache empty) — good enough for a card preview.
+  /// No-op if a thumbnail already exists.
+  Future<String?> ensureFromNcnoteBytes(
+    String notebookId,
+    Uint8List ncnoteBytes,
+  ) async {
+    if (!_initialized) await init();
+    final file = File(thumbnailPath(notebookId));
+    if (await file.exists()) return file.path;
+    try {
+      // Minimal parse: find the first page JSON under pages/ and decode it.
+      final archive = ZipDecoder().decodeBytes(ncnoteBytes);
+      ArchiveFile? firstPageFile;
+      const pagesPrefix = '${AppConfig.pagesDir}/';
+      for (final f in archive.files) {
+        if (f.name.startsWith(pagesPrefix) && f.name.endsWith('.json')) {
+          if (firstPageFile == null || f.name.compareTo(firstPageFile.name) < 0) {
+            firstPageFile = f;
+          }
+        }
+      }
+      if (firstPageFile == null) return null;
+      final json = jsonDecode(utf8.decode(firstPageFile.content as List<int>));
+      final page = PageData.fromJson(json as Map<String, dynamic>);
+      return renderAndCache(notebookId, page);
+    } catch (e) {
+      debugPrint('[ThumbnailService] Lazy render failed for $notebookId: $e');
       return null;
     }
   }

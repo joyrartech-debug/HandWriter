@@ -331,6 +331,7 @@ _$ImageDataImpl _$$ImageDataImplFromJson(Map<String, dynamic> json) =>
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0.0,
       opacity: (json['opacity'] as num?)?.toDouble() ?? 1.0,
       locked: json['locked'] as bool? ?? false,
+      flipHorizontal: json['flipHorizontal'] as bool? ?? false,
       comment: json['comment'] as String?,
     );
 
@@ -344,6 +345,7 @@ Map<String, dynamic> _$$ImageDataImplToJson(_$ImageDataImpl instance) =>
       'rotation': instance.rotation,
       'opacity': instance.opacity,
       'locked': instance.locked,
+      'flipHorizontal': instance.flipHorizontal,
       'comment': instance.comment,
     };
 

@@ -692,6 +692,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // Pick an initial panOffset that centers the page if the viewport
+    // size is already known. Previously we relied on setViewportSize to
+    // do this — but that only fires on FIRST layout; re-opening a
+    // notebook with a known viewport left panOffset at (0,0) which
+    // made the page render off-center (user saw it "shifted left").
+    final initialPan = _viewportSize != null
+        ? _centeredPanOffset(2.0) // 2.0 = default zoom in CanvasState
+        : Offset.zero;
+
     state = CanvasState(
       metadata: metadata,
       document: document,
@@ -701,6 +710,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       symbolLibraries: symbolLibraries ?? const [],
       activeChapterId: restoredChapterId,
       currentPageIndex: startPageIndex,
+      panOffset: initialPan,
     );
 
     // Initialize delta sync tracking
@@ -3367,6 +3377,31 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _updatePageContent(s, page, fileName, updatedContent, s.undoStack);
   }
 
+  /// Toggles horizontal flip on an image element.
+  void flipImageElement(String elementId) {
+    if (state == null) return;
+    final s = state!;
+    final page = s.currentPage;
+    if (page == null) return;
+    final fileName = s.currentPageFileName;
+
+    final updatedContent = page.layers.content.map((element) {
+      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      if (id != elementId) return element;
+      return element.map(
+        stroke: (e) => e as ContentElement,
+        text: (e) => e as ContentElement,
+        image: (e) => ContentElement.image(
+          id: e.id, zIndex: e.zIndex,
+          data: e.data.copyWith(flipHorizontal: !e.data.flipHorizontal),
+        ),
+        shape: (e) => e as ContentElement,
+      );
+    }).toList();
+
+    _updatePageContent(s, page, fileName, updatedContent, s.undoStack);
+  }
+
   void setImageComment(String elementId, String? comment) {
     if (state == null) return;
     final s = state!;
@@ -4326,12 +4361,40 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
 
     final updatedPages = Map<String, PageData>.from(s.pages)..remove(fileName);
-    final newIndex = index >= newPages.length ? newPages.length - 1 : index;
+    int newIndex = index >= newPages.length ? newPages.length - 1 : index;
 
+    // If a chapter filter is active, the naive "stay at same index" rule
+    // can land on a page outside the active chapter (the page-indicator
+    // then reads "— / N"). Snap to a page that still belongs to the
+    // chapter — the previous one within it, or the first one — and only
+    // fall back to the global index if the chapter became empty.
+    String? newActiveChapterId = s.activeChapterId;
+    if (newActiveChapterId != null) {
+      final chapterPagesInUnfiltered = <int>[
+        for (int i = 0; i < newPages.length; i++)
+          if (newPages[i].chapterId == newActiveChapterId) i,
+      ];
+      if (chapterPagesInUnfiltered.isNotEmpty) {
+        // Prefer the closest earlier page within the chapter; otherwise
+        // the first one. Keeps the user near where they were.
+        final prior = chapterPagesInUnfiltered
+            .where((i) => i < index)
+            .toList();
+        newIndex = prior.isNotEmpty ? prior.last : chapterPagesInUnfiltered.first;
+      } else {
+        // Chapter has no pages left — drop the filter so the nav isn't
+        // stuck showing "— / 0".
+        newActiveChapterId = null;
+      }
+    }
+
+    final clearChapter = newActiveChapterId == null && s.activeChapterId != null;
     state = s.copyWith(
       document: updatedDoc,
       pages: updatedPages,
       currentPageIndex: newIndex,
+      activeChapterId: clearChapter ? null : newActiveChapterId,
+      clearActiveChapter: clearChapter,
       metadata: s.metadata.copyWith(pageCount: newPages.length, modifiedAt: DateTime.now()),
       isDirty: true,
     );
