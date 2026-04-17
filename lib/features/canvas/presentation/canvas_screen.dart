@@ -38,6 +38,7 @@ class CanvasScreen extends ConsumerStatefulWidget {
 class _CanvasScreenState extends ConsumerState<CanvasScreen>
     with WidgetsBindingObserver {
   bool _isSaving = false;
+  Future<void>? _saveInFlight;
   late bool _stylusOnlyDrawing;
   bool _isTouchPanning = false;
 
@@ -224,9 +225,18 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   Future<void> _save({bool silent = false}) async {
-    if (_isSaving) return;
+    if (_isSaving) {
+      // Coalesce: let the caller await the already-running save so guards
+      // like _onWillPop don't race ahead and prompt while a save is still
+      // in flight.
+      final inFlight = _saveInFlight;
+      if (inFlight != null) await inFlight;
+      return;
+    }
     _isSaving = true;
     if (!silent && mounted) setState(() {});
+    final completer = Completer<void>();
+    _saveInFlight = completer.future;
     try {
       await ref.read(canvasProvider.notifier).save();
       if (mounted && !silent) {
@@ -240,6 +250,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       }
     } finally {
       _isSaving = false;
+      _saveInFlight = null;
+      completer.complete();
       if (!silent && mounted) setState(() {});
     }
   }
@@ -360,6 +372,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   Future<bool> _onWillPop() async {
+    // If a save is in flight, wait for it to finish before deciding whether
+    // to prompt. Otherwise the user just pressed "Save" and sees a
+    // "save before leaving?" dialog for the same changes that are already
+    // being persisted.
+    if (_isSaving) {
+      final inFlight = _saveInFlight;
+      if (inFlight != null) await inFlight;
+    }
+    if (!mounted) return true;
     final state = ref.read(canvasProvider);
     if (state != null && state.isDirty) {
       final result = await showDialog<String>(

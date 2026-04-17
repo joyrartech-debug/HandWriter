@@ -407,7 +407,14 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
         if (mounted) {
           Navigator.pop(context);
-          Navigator.push(context, MaterialPageRoute(builder: (_) => const CanvasScreen()));
+          Navigator.push(context, MaterialPageRoute(builder: (_) => const CanvasScreen()))
+              .then((_) {
+            // Coming back from the canvas: refresh the library so page
+            // count, modified-at and cover reflect any edits made inside.
+            if (mounted) {
+              ref.read(notebookListProvider.notifier).refresh();
+            }
+          });
         }
         return;
       }

@@ -620,8 +620,13 @@ class CanvasRenderEngine extends CustomPainter {
     final cachedImage = imageCache[imageData.assetPath];
     if (cachedImage != null) {
       final srcRect = Rect.fromLTWH(0, 0, cachedImage.width.toDouble(), cachedImage.height.toDouble());
+      // Use medium quality (bilinear with mipmaps) so that imported raster
+      // content — especially old handwritten notes exported from OneNote —
+      // degrades gracefully when zoomed in. `low` (nearest-neighbour) made
+      // small strokes look blocky at high zoom.
       final imgPaint = Paint()
-        ..filterQuality = FilterQuality.low
+        ..filterQuality = FilterQuality.medium
+        ..isAntiAlias = true
         ..color = Colors.white.withValues(alpha: imageData.opacity);
       canvas.drawImageRect(cachedImage, srcRect, rect, imgPaint);
     } else {
