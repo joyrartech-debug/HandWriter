@@ -1357,46 +1357,72 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     );
 
     try {
-      final rasters = <PdfRaster>[];
-      await for (final r in Printing.raster(bytes, dpi: 150)) {
-        rasters.add(r);
+      // Adaptive DPI: big PDFs get rendered at a lower resolution so the
+      // raw pixel buffers don't blow the iOS jetsam limit. 150 DPI on A4
+      // is ~8.7 MB/page of RGBA — at 67 pages that's ~580 MB resident if
+      // we buffered them, and even streamed it pressures memory.
+      final int dpi = estimated > 40 ? 100 : (estimated > 15 ? 120 : 150);
+
+      // Stream page-by-page: consume each raster → PNG → insert → let it
+      // go out of scope before pulling the next one from Printing.raster.
+      // This is what fixes the ~15-page crash on iPad with long PDFs.
+      final notifier = ref.read(canvasProvider.notifier);
+      int processed = 0;
+      await for (final raster in Printing.raster(bytes, dpi: dpi.toDouble())) {
+        if (!mounted) return;
+
+        final png = await raster.toPng();
+        if (!mounted) return;
+
+        if (processed > 0) notifier.addPage();
+
+        final st = ref.read(canvasProvider);
+        final pageW = st?.currentPage?.width ?? 595.0;
+        final pageH = st?.currentPage?.height ?? 842.0;
+        double imgW = raster.width.toDouble();
+        double imgH = raster.height.toDouble();
+        final scaleToFit = min(pageW / imgW, pageH / imgH);
+        imgW *= scaleToFit;
+        imgH *= scaleToFit;
+        final insertPos = Offset((pageW - imgW) / 2, (pageH - imgH) / 2);
+        notifier.addImageElement(
+          insertPos,
+          '${name}_p${processed + 1}.png',
+          png,
+          imgW,
+          imgH,
+        );
+
+        processed++;
+
+        // Progress feedback for long imports so the user sees we're alive.
+        if (mounted && estimated > kPageConfirmThreshold && processed % 5 == 0) {
+          ScaffoldMessenger.of(context)
+            ..clearSnackBars()
+            ..showSnackBar(SnackBar(
+              content: Text('Importazione PDF: $processed/$estimated'),
+              duration: const Duration(seconds: 30),
+            ));
+        }
+
+        // Yield to the event loop between pages so the engine can reclaim
+        // the raster's native pixel buffer before we grab the next one.
+        await Future<void>.delayed(Duration.zero);
       }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).clearSnackBars();
 
-      if (rasters.isEmpty) {
+      if (processed == 0) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Impossibile leggere il PDF: nessuna pagina trovata')),
         );
         return;
       }
 
-      final notifier = ref.read(canvasProvider.notifier);
-      for (int i = 0; i < rasters.length; i++) {
-        final png = await rasters[i].toPng();
-        if (!mounted) return;
-
-        if (i > 0) notifier.addPage();
-
-        final st = ref.read(canvasProvider);
-        final pageW = st?.currentPage?.width ?? 595.0;
-        final pageH = st?.currentPage?.height ?? 842.0;
-        // Fit the rasterized PDF page to the A4 page, preserving aspect ratio
-        final raster = rasters[i];
-        double imgW = raster.width.toDouble();
-        double imgH = raster.height.toDouble();
-        final scaleToFit = min(pageW / imgW, pageH / imgH);
-        imgW *= scaleToFit;
-        imgH *= scaleToFit;
-        // Center on the page
-        final insertPos = Offset((pageW - imgW) / 2, (pageH - imgH) / 2);
-        notifier.addImageElement(insertPos, '${name}_p${i + 1}.png', png, imgW, imgH);
-      }
-
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('PDF importato: ${rasters.length} ${rasters.length == 1 ? 'pagina' : 'pagine'}')),
+          SnackBar(content: Text('PDF importato: $processed ${processed == 1 ? 'pagina' : 'pagine'}')),
         );
       }
     } catch (e) {
