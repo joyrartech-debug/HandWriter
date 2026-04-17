@@ -2633,35 +2633,50 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
-  void goToPage(int index) {
+  /// Navigate to [index]. By default the user's zoom/pan is preserved so
+  /// arrow-button and grid taps don't rip the viewport out from under them.
+  /// Pass [resetViewport]=true for gestures where a fresh view is wanted
+  /// (e.g. swipe-to-turn-page).
+  void goToPage(int index, {bool resetViewport = false}) {
     if (state == null || index < 0 || index >= state!.pageCount) return;
-    // Preserve zoom and pan so the user's viewport stays put across pages.
-    state = state!.copyWith(
-      currentPageIndex: index,
-      activeStroke: [],
-      clearLasso: true,
-      lassoPath: [],
-      clearSelectedElement: true,
-    );
+    if (resetViewport) {
+      state = state!.copyWith(
+        currentPageIndex: index,
+        activeStroke: [],
+        clearLasso: true,
+        lassoPath: [],
+        clearSelectedElement: true,
+        zoom: 2.0,
+        panOffset: _centeredPanOffset(2.0),
+      );
+    } else {
+      state = state!.copyWith(
+        currentPageIndex: index,
+        activeStroke: [],
+        clearLasso: true,
+        lassoPath: [],
+        clearSelectedElement: true,
+      );
+    }
   }
 
-  void nextPage() {
+  void nextPage({bool resetViewport = false}) {
     if (state == null) return;
     final s = state!;
     final filtered = s.filteredPageIndices;
     final pos = filtered.indexOf(s.currentPageIndex);
     if (pos >= 0 && pos + 1 < filtered.length) {
-      goToPage(filtered[pos + 1]);
+      goToPage(filtered[pos + 1], resetViewport: resetViewport);
     }
   }
 
-  void prevPage() {
+  void prevPage({bool resetViewport = false}) {
     if (state == null) return;
     final s = state!;
     final filtered = s.filteredPageIndices;
     final pos = filtered.indexOf(s.currentPageIndex);
     if (pos > 0) {
-      goToPage(filtered[pos - 1]);
+      goToPage(filtered[pos - 1], resetViewport: resetViewport);
     }
   }
 

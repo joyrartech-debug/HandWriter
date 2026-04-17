@@ -761,6 +761,13 @@ class SyncService {
     }
   }
 
+  /// Gets both ETag + Last-Modified of the remote .ncnote in one PROPFIND.
+  /// Returns null on any error or if the file doesn't exist.
+  Future<({String? etag, DateTime? lastModified})?> getNcnoteInfo(
+      String remotePath) async {
+    return _webdav.getFileInfo(remotePath);
+  }
+
   /// Downloads raw bytes from a remote path.
   Future<Uint8List> downloadFile(String remotePath) async {
     return _webdav.downloadFile(remotePath);
