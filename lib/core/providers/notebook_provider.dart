@@ -71,6 +71,24 @@ class NotebookListNotifier
 
   NotebookListNotifier(this._ref) : super(const AsyncValue.loading());
 
+  /// True while a background sync with the server is running. The library UI
+  /// watches this to distinguish "cold install, still fetching" from "really
+  /// no notebooks" when the local DB is empty.
+  final ValueNotifier<bool> isSyncing = ValueNotifier<bool>(false);
+
+  /// Progress during first sync: "downloaded/total" where 0/0 means PROPFIND
+  /// is still in flight. UI shows this beside the spinner so first-install
+  /// users can tell work is happening.
+  final ValueNotifier<({int done, int total})> syncProgress =
+      ValueNotifier<({int done, int total})>((done: 0, total: 0));
+
+  @override
+  void dispose() {
+    isSyncing.dispose();
+    syncProgress.dispose();
+    super.dispose();
+  }
+
   /// Carica la lista dei notebook dal server, con fallback locale offline.
   Future<void> refresh() async {
     final fileService = _ref.read(fileServiceProvider);
@@ -79,6 +97,7 @@ class NotebookListNotifier
     await _loadFromLocalDb(fileService);
 
     // ── Step 2: Sync with server in background ──
+    isSyncing.value = true;
     try {
       final syncService = _ref.read(syncServiceProvider);
       final webdav = _ref.read(webdavServiceProvider);
@@ -88,6 +107,11 @@ class NotebookListNotifier
     } catch (e) {
       debugPrint('[Library] Remote sync failed: $e');
       // Local data is already shown — no need to show error
+    } finally {
+      if (mounted) {
+        isSyncing.value = false;
+        syncProgress.value = (done: 0, total: 0);
+      }
     }
   }
 
@@ -169,7 +193,9 @@ class NotebookListNotifier
     // ── Download changed/new notebooks in parallel (max 4 concurrent) ──
     if (toDownload.isNotEmpty) {
       debugPrint('[Library] Downloading ${toDownload.length} changed notebooks');
+      syncProgress.value = (done: 0, total: toDownload.length);
       const maxConcurrent = 4;
+      var completed = 0;
       for (var i = 0; i < toDownload.length; i += maxConcurrent) {
         if (!mounted) return; // notifier disposed
         final batch = toDownload.skip(i).take(maxConcurrent);
@@ -182,6 +208,13 @@ class NotebookListNotifier
             .entries
             .where((e) => !e.value)
             .map((e) => toDownload[i + e.key].file.name));
+        completed += results.length;
+        syncProgress.value = (done: completed, total: toDownload.length);
+        // Incrementally refresh the library while the batch drains so
+        // already-downloaded notebooks appear before the whole sync finishes.
+        if (changed && mounted) {
+          await _loadFromLocalDb(fileService);
+        }
       }
     }
 

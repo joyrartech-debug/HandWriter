@@ -6,6 +6,8 @@ import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
+import 'package:handwriter/core/providers/pending_import_provider.dart';
+import 'package:handwriter/core/services/share_receiver.dart';
 import 'package:handwriter/core/services/file_service.dart';
 import 'package:handwriter/core/services/search_service.dart';
 import 'package:handwriter/core/services/sync_service.dart';
@@ -905,12 +907,160 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     return '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year}';
   }
 
+  /// Ask the user where to drop the files that just arrived via the OS
+  /// share sheet, then hand off to the canvas-open flow with a
+  /// [PendingImport] so the canvas inserts them once the notebook is loaded.
+  Future<void> _handleSharedImport(SharedImport imported) async {
+    // Consume immediately so repeated rebuilds don't re-open the sheet.
+    ref.read(shareReceiverProvider.notifier).consume();
+    if (!mounted) return;
+
+    final list = ref.read(notebookListProvider).valueOrNull ?? const [];
+
+    final choice = await showModalBottomSheet<_ShareDest>(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: DraggableScrollableSheet(
+            initialChildSize: 0.7,
+            maxChildSize: 0.9,
+            minChildSize: 0.3,
+            expand: false,
+            builder: (ctx, scroll) => Column(
+              children: [
+                Center(
+                  child: Container(
+                    width: 40, height: 4,
+                    margin: const EdgeInsets.only(top: 8, bottom: 8),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Text(
+                    'Importa ${imported.files.length} ${imported.files.length == 1 ? "file" : "file"}',
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: ListView(
+                    controller: scroll,
+                    children: [
+                      ListTile(
+                        leading: const Icon(Icons.add_circle_outline, color: Colors.blue),
+                        title: const Text('Crea nuovo notebook'),
+                        subtitle: const Text('Ogni pagina del PDF diventa una pagina'),
+                        onTap: () => Navigator.pop(ctx, const _ShareDest.newNotebook()),
+                      ),
+                      const Divider(height: 1),
+                      if (list.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('Nessun notebook esistente', style: TextStyle(color: Colors.grey)),
+                        )
+                      else
+                        ...list.map((e) => ListTile(
+                              leading: Container(
+                                width: 32, height: 40,
+                                decoration: BoxDecoration(
+                                  color: Color(e.metadata.coverColor),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                              ),
+                              title: Text(e.metadata.title),
+                              subtitle: Text('${e.metadata.pageCount} pagine'),
+                              trailing: PopupMenuButton<String>(
+                                icon: const Icon(Icons.more_vert),
+                                itemBuilder: (_) => [
+                                  const PopupMenuItem(
+                                    value: 'new_chapter',
+                                    child: Text('Nuovo capitolo'),
+                                  ),
+                                  for (final c in e.metadata.chapters)
+                                    PopupMenuItem(
+                                      value: 'chap:${c.id}',
+                                      child: Text('→ ${c.title}'),
+                                    ),
+                                ],
+                                onSelected: (v) {
+                                  if (v == 'new_chapter') {
+                                    Navigator.pop(ctx, _ShareDest.existing(e, newChapter: true));
+                                  } else if (v.startsWith('chap:')) {
+                                    Navigator.pop(
+                                      ctx,
+                                      _ShareDest.existing(e, chapterId: v.substring(5)),
+                                    );
+                                  }
+                                },
+                              ),
+                              onTap: () => Navigator.pop(ctx, _ShareDest.existing(e)),
+                            )),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    if (choice == null || !mounted) return;
+    final paths = imported.files.map((f) => f.path).toList();
+
+    if (choice.isNewNotebook) {
+      // Derive a friendly title from the first file's basename.
+      final first = paths.first.split(RegExp(r'[\\/]+')).last;
+      final titleBase = first.replaceAll(RegExp(r'\.[^.]+$'), '');
+      try {
+        final entry = await ref.read(notebookListProvider.notifier).createNotebook(
+              title: titleBase.isEmpty ? 'Importato' : titleBase,
+            );
+        if (!mounted) return;
+        ref.read(pendingImportProvider.notifier).state = PendingImport(filePaths: paths);
+        _openNotebook(entry);
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Errore creazione notebook: $e')),
+          );
+        }
+      }
+      return;
+    }
+
+    final target = choice.entry!;
+    ref.read(pendingImportProvider.notifier).state = PendingImport(
+      filePaths: paths,
+      targetChapterId: choice.chapterId,
+      newChapterTitle: choice.newChapter
+          ? 'Importato ${DateTime.now().toString().substring(0, 16)}'
+          : null,
+    );
+    _openNotebook(target);
+  }
+
   @override
   Widget build(BuildContext context) {
     final notebooks = ref.watch(notebookListProvider);
     final creds = ref.watch(credentialsProvider);
     final connectivity = ref.watch(connectivityServiceProvider);
     final screenWidth = MediaQuery.of(context).size.width;
+
+    // Watch for files shared into the app from other apps (Android/iOS share
+    // sheet). When one arrives, prompt the user for a destination.
+    ref.listen<SharedImport?>(shareReceiverProvider, (_, next) {
+      if (next == null || next.files.isEmpty) return;
+      _handleSharedImport(next);
+    });
 
     int crossAxisCount;
     if (screenWidth > 1200) {
@@ -1065,24 +1215,61 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         ),
         data: (list) {
           if (list.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.shade50,
-                      shape: BoxShape.circle,
+            final notifier = ref.read(notebookListProvider.notifier);
+            return ValueListenableBuilder<bool>(
+              valueListenable: notifier.isSyncing,
+              builder: (_, syncing, __) {
+                if (syncing) {
+                  return Center(
+                    child: ValueListenableBuilder<({int done, int total})>(
+                      valueListenable: notifier.syncProgress,
+                      builder: (_, progress, __) {
+                        final label = progress.total == 0
+                            ? 'Caricamento notebook dal server…'
+                            : 'Download ${progress.done}/${progress.total} notebook…';
+                        return Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            SizedBox(
+                              width: 48,
+                              height: 48,
+                              child: CircularProgressIndicator(
+                                value: progress.total == 0
+                                    ? null
+                                    : progress.done / progress.total,
+                              ),
+                            ),
+                            const SizedBox(height: 20),
+                            Text(
+                              label,
+                              style: TextStyle(color: Colors.grey.shade600),
+                            ),
+                          ],
+                        );
+                      },
                     ),
-                    child: Icon(Icons.note_add_rounded, size: 48, color: Colors.blue.shade300),
+                  );
+                }
+                return Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade50,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(Icons.note_add_rounded, size: 48, color: Colors.blue.shade300),
+                      ),
+                      const SizedBox(height: 20),
+                      Text('Nessun notebook', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
+                      const SizedBox(height: 8),
+                      Text('Crea il tuo primo notebook premendo il bottone +', style: TextStyle(color: Colors.grey.shade500)),
+                    ],
                   ),
-                  const SizedBox(height: 20),
-                  Text('Nessun notebook', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
-                  const SizedBox(height: 8),
-                  Text('Crea il tuo primo notebook premendo il bottone +', style: TextStyle(color: Colors.grey.shade500)),
-                ],
-              ),
+                );
+              },
             );
           }
 
@@ -1511,4 +1698,21 @@ class _PaperChip extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Destination chosen by the user in the "import shared files" bottom sheet.
+class _ShareDest {
+  final bool isNewNotebook;
+  final NotebookEntry? entry;
+  final String? chapterId;
+  final bool newChapter;
+
+  const _ShareDest.newNotebook()
+      : isNewNotebook = true,
+        entry = null,
+        chapterId = null,
+        newChapter = false;
+
+  const _ShareDest.existing(NotebookEntry this.entry, {this.chapterId, this.newChapter = false})
+      : isNewNotebook = false;
 }
