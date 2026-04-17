@@ -217,6 +217,49 @@ class WebDavService {
     }
   }
 
+  /// Ottieni ETag + Last-Modified di un file remoto in una sola PROPFIND.
+  /// Usato dal sync per decidere chi vince in caso di conflitto (remote vs local).
+  Future<({String? etag, DateTime? lastModified})?> getFileInfo(
+      String remotePath) async {
+    try {
+      final request = http.Request('PROPFIND', Uri.parse(_fullUrl(remotePath)));
+      request.headers.addAll({
+        ..._authHeaders,
+        'Depth': '0',
+        'Content-Type': 'application/xml; charset=utf-8',
+      });
+      request.body = '''<?xml version="1.0" encoding="UTF-8"?>
+<d:propfind xmlns:d="DAV:">
+  <d:prop>
+    <d:getetag/>
+    <d:getlastmodified/>
+  </d:prop>
+</d:propfind>''';
+
+      final streamedResponse = await _client
+          .send(request)
+          .timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
+
+      if (streamedResponse.statusCode != 207) return null;
+
+      final body = await streamedResponse.stream.bytesToString();
+      final document = XmlDocument.parse(body);
+      String? etag;
+      final etagEls = document.findAllElements('d:getetag');
+      if (etagEls.isNotEmpty) {
+        etag = etagEls.first.innerText.replaceAll('"', '');
+      }
+      DateTime? lastModified;
+      final lmEls = document.findAllElements('d:getlastmodified');
+      if (lmEls.isNotEmpty && lmEls.first.innerText.isNotEmpty) {
+        lastModified = _parseHttpDate(lmEls.first.innerText);
+      }
+      return (etag: etag, lastModified: lastModified);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Ottieni l'ETag di un file remoto (per conflict detection).
   Future<String?> getEtag(String remotePath) async {
     final request = http.Request('PROPFIND', Uri.parse(_fullUrl(remotePath)));

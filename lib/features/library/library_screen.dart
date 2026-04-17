@@ -67,6 +67,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       final id = row['id'] as String;
       final remotePath = row['remote_path'] as String;
       final cachedEtag = row['etag'] as String?;
+      final localModifiedAt = DateTime.tryParse(
+        row['local_modified_at'] as String? ?? '',
+      );
       try {
         final localData = await fileService.readNotebookFile(id);
         if (localData == null) continue;
@@ -74,12 +77,58 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         SyncService.validateNcnoteArchive(localData, context: 'reconnect-sync $id');
 
         // ── Conflict check: did another device change the remote file? ──
-        final remoteEtag = await syncService.getNcnoteEtag(remotePath);
-        if (cachedEtag != null &&
+        final remoteInfo = await syncService.getNcnoteInfo(remotePath);
+        final remoteEtag = remoteInfo?.etag;
+        final remoteLastModified = remoteInfo?.lastModified;
+
+        final etagChanged = cachedEtag != null &&
             remoteEtag != null &&
-            cachedEtag != remoteEtag) {
-          // Conflict: back up the remote version, then upload ours.
-          debugPrint('[Library] Conflict detected for $id — backing up remote version');
+            cachedEtag != remoteEtag;
+
+        if (etagChanged) {
+          // True conflict. Decide winner by timestamp instead of blindly
+          // overwriting the remote. Symptom we're fixing: PC opens stale,
+          // uploads old ZIP, and clobbers iPad's recent edits on the server.
+          final remoteIsNewer = remoteLastModified != null &&
+              localModifiedAt != null &&
+              remoteLastModified.isAfter(
+                // Allow a small clock-skew grace window so we don't ping-pong
+                // when both devices bumped mtime within a second.
+                localModifiedAt.add(const Duration(seconds: 2)),
+              );
+          if (remoteIsNewer) {
+            // Remote wins. Back up OUR local copy as a conflict file so no
+            // unsynced edits are lost, then replace local with the remote.
+            debugPrint(
+              '[Library] Conflict for $id — remote newer '
+              '(local=$localModifiedAt, remote=$remoteLastModified). Pulling remote.',
+            );
+            try {
+              final timestamp = DateTime.now().millisecondsSinceEpoch;
+              final conflictPath = remotePath.replaceAll(
+                '.ncnote',
+                '_local_conflict_$timestamp.ncnote',
+              );
+              await syncService.uploadRawPackage(conflictPath, localData);
+              debugPrint('[Library] Local backup saved: $conflictPath');
+            } catch (e) {
+              debugPrint('[Library] Could not back up local version: $e');
+            }
+            try {
+              final remoteData = await syncService.downloadFile(remotePath);
+              await fileService.saveNotebookFile(id, remoteData);
+              await fileService.markNotebookSynced(id, remoteEtag);
+              debugPrint('[Library] $id replaced with remote version');
+            } catch (e) {
+              debugPrint('[Library] Failed to pull remote for $id: $e');
+            }
+            // Skip the upload path entirely — remote already has what we want.
+            continue;
+          }
+          // Local is newer (or timestamps unavailable but ETag differs and
+          // we genuinely have dirty local edits). Preserve the existing
+          // remote as a conflict file, then upload local.
+          debugPrint('[Library] Conflict for $id — local newer, backing up remote');
           try {
             final remoteData = await syncService.downloadFile(remotePath);
             final timestamp = DateTime.now().millisecondsSinceEpoch;

@@ -441,10 +441,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       if (isLastPage) {
         ref.read(canvasProvider.notifier).addPage();
       } else if (hasNext) {
-        ref.read(canvasProvider.notifier).nextPage();
+        // Swipe commit: reset zoom/pan so the next page opens centered.
+        ref.read(canvasProvider.notifier).nextPage(resetViewport: true);
       }
     } else if (pageLeftScreen > canvasSize.width * 0.50 && hasPrev) {
-      ref.read(canvasProvider.notifier).prevPage();
+      // Swipe commit: reset zoom/pan so the prev page opens centered.
+      ref.read(canvasProvider.notifier).prevPage(resetViewport: true);
     }
 
     _clearPageHints();
