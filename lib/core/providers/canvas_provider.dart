@@ -754,22 +754,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   Future<void> closeNotebook() async {
-    _disposed = true;
-    _saveLastPosition();
+    // Stop the timer so it doesn't fire a fresh pull after this point.
     _pullTimer?.cancel();
     _pullTimer = null;
-    _isPulling = false;
-    isPullingFromRemote.value = false;
-    // Critical: if a pull just auto-accepted remote changes and started
-    // writing the merged .ncnote, let it finish before we drop state.
-    // Otherwise the next open will read the pre-pull file and the user
-    // sees the pulled pages disappear (and a fresh pull re-downloads
-    // them on re-entry).
+    _saveLastPosition();
+
+    // Critical ordering — DO NOT null state yet. We need to:
+    //   1. Let any in-flight pull finish (so it can apply + persist
+    //      pulled pages), and
+    //   2. Let the resulting local-save future land on disk,
+    // BEFORE dropping state. Otherwise exiting right after the pull
+    // populates the canvas causes the pulled pages to "disappear"
+    // on re-open — the user's "ci rientro ed e' scomparso tutto" bug.
+    final pendingPull = _pendingPullFuture;
+    if (pendingPull != null) {
+      try { await pendingPull; } catch (_) {}
+    }
+    _pendingPullFuture = null;
+
     final pendingSave = _pendingPulledLocalSave;
     if (pendingSave != null) {
       try { await pendingSave; } catch (_) {}
     }
     _pendingPulledLocalSave = null;
+
+    // Only now tear down — everything that needed state has finished.
+    _disposed = true;
+    _isPulling = false;
+    isPullingFromRemote.value = false;
     _forceReleaseSyncLock();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -4784,14 +4796,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void _startPullTimer() {
     _pullTimer?.cancel();
-    // Immediate pull on notebook open — don't wait first interval
-    _pullRemoteChanges();
+    // Immediate pull on notebook open — don't wait first interval.
+    // Track the future so closeNotebook can await it.
+    _pendingPullFuture = _pullRemoteChanges();
     _pullTimer = Timer.periodic(AppConfig.deltaPullInterval, (_) {
-      _pullRemoteChanges();
+      _pendingPullFuture = _pullRemoteChanges();
     });
   }
 
   bool _isPulling = false;
+  /// The in-flight pull Future, if any. Tracked so that [closeNotebook]
+  /// can await an in-progress pull before dropping state — otherwise
+  /// exiting mid-download drops the pulled pages before they reach disk
+  /// and the next open reads the stale local file.
+  Future<void>? _pendingPullFuture;
   // _isSyncing tracked by _syncLock mutex
 
   /// Checks if the remote metadata.json ETag has changed, then pulls
@@ -4808,12 +4826,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state!.pendingConflicts.isNotEmpty) return;
     if (state!.pendingRemoteChanges != null) return;
     _isPulling = true;
-    isPullingFromRemote.value = true;
+    // NOTE: isPullingFromRemote is NOT flipped here. The pill should only
+    // appear when we're actually *downloading* new remote content — not
+    // during every 30-second PROPFIND poll, which is silent and quick.
+    // We set it true below only if the metadata ETag indicates real
+    // changes to fetch.
 
     final locked = await _acquireSyncLock();
     if (!locked) {
       _isPulling = false;
-      isPullingFromRemote.value = false;
       return;
     }
     try {
@@ -4838,9 +4859,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
       if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
         print('[Canvas] Delta metadata changed, pulling delta...');
-        await _pullFromDeltaFast(
-          s, syncService, changeState.pageEtags,
-        );
+        // NOW we're actually fetching new data — show the pill. The
+        // silent PROPFIND-only polling (every 30s) does not trigger it.
+        isPullingFromRemote.value = true;
+        try {
+          await _pullFromDeltaFast(
+            s, syncService, changeState.pageEtags,
+          );
+        } finally {
+          isPullingFromRemote.value = false;
+        }
         _remoteMetaEtag = changeState.metaEtag;
       }
     } catch (e) {
