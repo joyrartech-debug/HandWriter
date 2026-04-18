@@ -424,6 +424,34 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
       final result = await syncService.downloadExplodedFull(entry.metadata.id);
 
+      // Persist the freshly downloaded exploded tree to a local .ncnote
+      // immediately. Otherwise a subsequent close + reopen re-downloads
+      // everything from the server (there was no local cache entry).
+      try {
+        final bytes = SyncService.buildPackageBytes(
+          metadata: result.metadata,
+          document: result.document,
+          pages: result.pages,
+          assets: result.assets,
+          symbolLibraries: result.symbolLibraries,
+        );
+        await fileService.saveNotebookFile(result.metadata.id, bytes);
+        await fileService.upsertNotebookMeta(
+          id: result.metadata.id,
+          title: result.metadata.title,
+          remotePath: entry.remotePath,
+          localModifiedAt: result.metadata.modifiedAt,
+          syncStatus: 'synced',
+          fileSize: bytes.length,
+          coverColor: result.metadata.coverColor,
+          paperType: result.metadata.paperType,
+          pageCount: result.metadata.pageCount,
+          createdAt: result.metadata.createdAt,
+        );
+      } catch (e) {
+        debugPrint('[Library] Failed to persist downloaded notebook locally: $e');
+      }
+
       ref.read(canvasProvider.notifier).openNotebook(
         metadata: result.metadata,
         document: result.document,

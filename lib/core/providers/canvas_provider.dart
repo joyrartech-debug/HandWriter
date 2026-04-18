@@ -611,6 +611,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Per-page WebDAV ETags from the last pull — used to detect which pages changed.
   Map<String, String> _lastPageEtags = {};
 
+  /// Which notebook the ETag caches above belong to. Guards against cross-
+  /// contamination when the user switches notebooks: notebook-A's ETag set
+  /// must never be used to diff notebook-B's remote state, or the first
+  /// pull on B either misses real changes or fakes false positives.
+  String? _etagNotebookId;
+
   /// Timer for pulling remote changes from other devices.
   Timer? _pullTimer;
 
@@ -725,6 +731,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _pageJsonCache.clear();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
+    // If the cached ETags belong to a different notebook, flush them so
+    // notebook-A's diff never bleeds into notebook-B's first pull.
+    if (_etagNotebookId != metadata.id) {
+      _remoteMetaEtag = null;
+      _lastPageEtags = {};
+      _etagNotebookId = metadata.id;
+    }
     // Pre-populate page ETags so the first pull doesn't see every page as
     // "changed" (empty cache vs all remote ETags → false positives).
     _initPageEtags(metadata.id);
@@ -3529,15 +3542,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   Future<void> _decodeAndCacheImage(String assetId, Uint8List bytes) async {
+    // Remember which notebook this decode belongs to. If the user switches
+    // notebooks while we're awaiting the codec, the decoded ui.Image must
+    // not leak into the new notebook's imageCache (would show a stale
+    // image on a different page, or worse, under a conflicting assetId).
+    final ownerNotebookId = state?.metadata.id;
+    if (ownerNotebookId == null) return;
     try {
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       final image = frame.image;
-      if (state != null) {
-        final newCache = Map<String, ui.Image>.from(state!.imageCache);
-        newCache[assetId] = image;
-        state = state!.copyWith(imageCache: newCache);
+      // Re-check: still the same notebook, still not disposed, assetBytes
+      // still references this asset.
+      if (_disposed ||
+          state == null ||
+          state!.metadata.id != ownerNotebookId) {
+        image.dispose();
+        return;
       }
+      final newCache = Map<String, ui.Image>.from(state!.imageCache);
+      newCache[assetId] = image;
+      state = state!.copyWith(imageCache: newCache);
     } catch (_) {
       // Image decoding failed — placeholder will be shown
     }
@@ -4859,16 +4884,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
       if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
         print('[Canvas] Delta metadata changed, pulling delta...');
-        // NOW we're actually fetching new data — show the pill. The
-        // silent PROPFIND-only polling (every 30s) does not trigger it.
-        isPullingFromRemote.value = true;
-        try {
-          await _pullFromDeltaFast(
-            s, syncService, changeState.pageEtags,
-          );
-        } finally {
-          isPullingFromRemote.value = false;
-        }
+        // The pill is NOT flipped here — metadata ETag changes even when
+        // nothing of substance was downloaded (e.g. same content re-uploaded
+        // from this device, weak/strong ETag reformatting by the server).
+        // Showing it every 4s during normal polling is distracting.
+        // _pullFromDeltaInner flips it only when real pages/assets will
+        // actually be fetched.
+        await _pullFromDeltaFast(
+          s, syncService, changeState.pageEtags,
+        );
         _remoteMetaEtag = changeState.metaEtag;
       }
     } catch (e) {
@@ -4922,6 +4946,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     print('[Canvas] Delta pull: ${pagesToPull.length} pages changed, '
         '${deletedRemotelyByEtag.length} pages deleted remotely');
 
+    // Real download starting — show the "Sincronizzazione…" pill. Flipped
+    // here (not in the outer PROPFIND-only cycle) so the indicator only
+    // appears when we're actually bringing down new content, not during
+    // the silent 4-second polling.
+    isPullingFromRemote.value = true;
+    try {
+      return await _pullFromDeltaDownload(
+        s, syncService, remotePageEtags, pagesToPull, deletedRemotelyByEtag,
+      );
+    } finally {
+      isPullingFromRemote.value = false;
+    }
+  }
+
+  Future<bool> _pullFromDeltaDownload(
+    CanvasState s,
+    SyncService syncService,
+    Map<String, String> remotePageEtags,
+    List<String> pagesToPull,
+    Set<String> deletedRemotelyByEtag,
+  ) async {
     // Download metadata + changed pages in parallel (one round-trip)
     late final ({NotebookMetadata metadata, DocumentStructure document}) remoteMeta;
     final updatedPages = Map<String, PageData>.from(s.pages);

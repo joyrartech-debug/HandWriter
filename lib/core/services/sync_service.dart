@@ -920,6 +920,52 @@ class SyncService {
     );
   }
 
+  /// Builds a .ncnote ZIP package from already-decoded parts.
+  ///
+  /// Used after [downloadExplodedFull] so the caller can persist the freshly
+  /// downloaded notebook to local storage (otherwise re-opening would
+  /// re-download the whole exploded tree — the "open from server, close,
+  /// reopen, re-downloads everything" bug).
+  static Uint8List buildPackageBytes({
+    required NotebookMetadata metadata,
+    required DocumentStructure document,
+    required Map<String, PageData> pages,
+    Map<String, Uint8List>? assets,
+    List<Map<String, dynamic>>? symbolLibraries,
+  }) {
+    final archive = Archive();
+
+    final metaBytes = utf8.encode(jsonEncode(metadata.toJson()));
+    archive.addFile(ArchiveFile(AppConfig.metadataFile, metaBytes.length, metaBytes));
+
+    final docBytes = utf8.encode(jsonEncode(document.toJson()));
+    archive.addFile(ArchiveFile(AppConfig.documentFile, docBytes.length, docBytes));
+
+    for (final entry in pages.entries) {
+      final bytes = utf8.encode(jsonEncode(entry.value.toJson()));
+      archive.addFile(ArchiveFile(
+        '${AppConfig.pagesDir}/${entry.key}', bytes.length, bytes,
+      ));
+    }
+
+    if (assets != null) {
+      for (final entry in assets.entries) {
+        archive.addFile(ArchiveFile(
+          '${AppConfig.assetsDir}/${entry.key}',
+          entry.value.length,
+          entry.value,
+        ));
+      }
+    }
+
+    if (symbolLibraries != null && symbolLibraries.isNotEmpty) {
+      final symBytes = utf8.encode(jsonEncode(symbolLibraries));
+      archive.addFile(ArchiveFile('symbols.json', symBytes.length, symBytes));
+    }
+
+    return Uint8List.fromList(ZipEncoder().encode(archive)!);
+  }
+
   /// Estrae tutte le pagine da un archivio .ncnote raw bytes.
   Map<String, PageData> extractAllPages(Uint8List data) {
     final archive = ZipDecoder().decodeBytes(data);

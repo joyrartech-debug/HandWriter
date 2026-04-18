@@ -39,6 +39,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     with WidgetsBindingObserver {
   bool _isSaving = false;
   Future<void>? _saveInFlight;
+  bool _closing = false;
   late bool _stylusOnlyDrawing;
   bool _isTouchPanning = false;
 
@@ -217,6 +218,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
       // App is being backgrounded or screen locked — flush unsaved work.
+      // Skip if we're already tearing down (via _onWillPop → closeNotebook)
+      // to avoid two concurrent save paths fighting over the .ncnote.
+      if (_closing) return;
       final canvas = ref.read(canvasProvider);
       if (canvas != null && canvas.isDirty && !_isSaving) {
         _save(silent: true);
@@ -372,6 +376,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   Future<bool> _onWillPop() async {
+    // Mark closing so didChangeAppLifecycleState doesn't fire a parallel
+    // save if the OS backgrounds the app during the pop dialog.
+    _closing = true;
     // If a save is in flight, wait for it to finish before deciding whether
     // to prompt. Otherwise the user just pressed "Save" and sees a
     // "save before leaving?" dialog for the same changes that are already
@@ -395,7 +402,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           ],
         ),
       );
-      if (result == 'cancel') return false;
+      if (result == 'cancel') {
+        // User backed out — re-enable lifecycle autosave.
+        _closing = false;
+        return false;
+      }
       if (result == 'save') await _save();
     }
     // Await so any in-flight local save of pulled remote changes lands
