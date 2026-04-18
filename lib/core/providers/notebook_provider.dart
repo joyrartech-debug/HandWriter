@@ -201,6 +201,36 @@ class NotebookListNotifier
           if (localDt != null && localDt.isAfter(file.lastModified!)) {
             debugPrint('[Library] Skipping .ncnote download for $remotePath '
                 '(local $localDt > server ${file.lastModified})');
+            // Even though we skip the download, refresh the DB from the local
+            // .ncnote so the library card always shows correct page-count/title.
+            // Without this, a notebook that was never opened on this device
+            // (so _savePulledChangesLocally never ran) can show stale metadata.
+            final nbId = localRow['id'] as String;
+            try {
+              final localBytes = await fileService.readNotebookFile(nbId);
+              if (localBytes != null) {
+                final parsed = syncService.parseNcnoteMetadata(localBytes);
+                final existingPageCount = localRow['page_count'] as int? ?? 0;
+                if (parsed.metadata.pageCount != existingPageCount) {
+                  await fileService.upsertNotebookMeta(
+                    id: nbId,
+                    title: parsed.metadata.title,
+                    remotePath: remotePath,
+                    localModifiedAt: parsed.metadata.modifiedAt,
+                    syncStatus: localRow['sync_status'] as String? ?? 'synced',
+                    fileSize: localBytes.length,
+                    coverColor: parsed.metadata.coverColor,
+                    paperType: parsed.metadata.paperType,
+                    pageCount: parsed.metadata.pageCount,
+                    createdAt: parsed.metadata.createdAt,
+                    etag: localRow['etag'] as String?,
+                  );
+                  changed = true;
+                }
+              }
+            } catch (e) {
+              debugPrint('[Library] Could not refresh DB from local cache for $nbId: $e');
+            }
             continue;
           }
         }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -5,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
+import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/providers/pending_import_provider.dart';
@@ -26,6 +28,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
   final Set<String> _selectedTags = <String>{};
+  Timer? _bgSyncTimer;
 
   @override
   void initState() {
@@ -33,13 +36,169 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     Future.microtask(() {
       ref.read(notebookListProvider.notifier).refresh();
       _startConnectivityMonitor();
+      _startBackgroundSync();
     });
   }
 
   @override
   void dispose() {
+    _bgSyncTimer?.cancel();
     _searchController.dispose();
     super.dispose();
+  }
+
+  void _startBackgroundSync() {
+    _bgSyncTimer?.cancel();
+    // Run every 90 seconds. First run after 30s (give app time to settle).
+    Future.delayed(const Duration(seconds: 30), () {
+      if (!mounted) return;
+      _runBackgroundSync();
+      _bgSyncTimer = Timer.periodic(const Duration(seconds: 90), (_) {
+        if (mounted) _runBackgroundSync();
+      });
+    });
+  }
+
+  Future<void> _runBackgroundSync() async {
+    final syncService = ref.read(syncServiceProvider);
+    final fileService = ref.read(fileServiceProvider);
+    if (syncService == null) return;
+
+    // Don't compete with the open notebook's own pull timer
+    final openId = ref.read(canvasProvider)?.metadata.id;
+
+    final notebooks = ref.read(notebookListProvider).valueOrNull ?? const [];
+    if (notebooks.isEmpty) return;
+
+    bool anyUpdated = false;
+
+    for (final entry in notebooks) {
+      final id = entry.metadata.id;
+      if (id == openId) continue; // the open notebook handles its own sync
+
+      try {
+        // 1. Check if anything changed remotely
+        final changeState = await syncService.getRemoteChangeState(id);
+        final storedMeta = await fileService.getNotebookMeta(id);
+        final storedEtag = storedMeta?['etag'] as String?;
+        if (changeState.metaEtag != null && changeState.metaEtag == storedEtag) {
+          continue; // nothing changed
+        }
+
+        debugPrint('[BgSync] Syncing ${entry.metadata.title}...');
+
+        // 2. Load local .ncnote
+        final localBytes = await fileService.readNotebookFile(id);
+
+        // 3. Download remote metadata + only MISSING pages (incremental)
+        final remoteMeta = await syncService.downloadDeltaMeta(id);
+
+        Map<String, PageData> mergedPages;
+        Map<String, Uint8List> mergedAssets;
+        List<Map<String, dynamic>> symbols = [];
+
+        if (localBytes != null) {
+          mergedPages = Map<String, PageData>.from(syncService.extractAllPages(localBytes));
+          mergedAssets = Map<String, Uint8List>.from(syncService.extractAllAssets(localBytes));
+          try {
+            symbols = syncService.extractSymbolLibraries(localBytes);
+          } catch (_) {}
+        } else {
+          mergedPages = {};
+          mergedAssets = {};
+        }
+
+        // Find pages in remote document that are missing locally
+        final missingPageNames = remoteMeta.document.pages
+            .map((p) => p.fileName)
+            .where((fn) => !mergedPages.containsKey(fn))
+            .toList();
+
+        if (missingPageNames.isNotEmpty) {
+          debugPrint('[BgSync] Downloading ${missingPageNames.length} missing pages for ${entry.metadata.title}');
+          final pageResults = await Future.wait(
+            missingPageNames.map((fn) async {
+              try {
+                final page = await syncService.downloadDeltaPage(id, fn);
+                return (fn, page, null as Object?);
+              } catch (e) {
+                return (fn, null as PageData?, e);
+              }
+            }),
+          );
+          for (final (fn, page, _) in pageResults) {
+            if (page != null) mergedPages[fn] = page;
+          }
+        }
+
+        // Download missing assets
+        final allAssetRefs = <String>{};
+        for (final page in mergedPages.values) {
+          allAssetRefs.addAll(page.assetReferences);
+          for (final el in page.layers.content) {
+            el.map(
+              stroke: (_) {},
+              text: (_) {},
+              shape: (_) {},
+              image: (img) {
+                if (img.data.assetPath.isNotEmpty) allAssetRefs.add(img.data.assetPath);
+              },
+            );
+          }
+        }
+        final missingAssets = allAssetRefs.where((r) => !mergedAssets.containsKey(r)).toList();
+        if (missingAssets.isNotEmpty) {
+          final assetResults = await Future.wait(
+            missingAssets.map((assetRef) async {
+              try {
+                final data = await syncService.downloadDeltaAsset(id, assetRef);
+                return (assetRef, data, null as Object?);
+              } catch (e) {
+                return (assetRef, null as Uint8List?, e);
+              }
+            }),
+          );
+          for (final (assetRef, data, _) in assetResults) {
+            if (data != null) mergedAssets[assetRef] = data;
+          }
+        }
+
+        // 4. Build and save updated .ncnote
+        final bytes = SyncService.buildPackageBytes(
+          metadata: remoteMeta.metadata,
+          document: remoteMeta.document,
+          pages: mergedPages,
+          assets: mergedAssets,
+          symbolLibraries: symbols,
+        );
+        await fileService.saveNotebookFile(id, bytes);
+
+        // 5. Update DB
+        await fileService.upsertNotebookMeta(
+          id: id,
+          title: remoteMeta.metadata.title,
+          remotePath: entry.remotePath,
+          localModifiedAt: remoteMeta.metadata.modifiedAt,
+          syncStatus: 'synced',
+          fileSize: bytes.length,
+          coverColor: remoteMeta.metadata.coverColor,
+          paperType: remoteMeta.metadata.paperType,
+          pageCount: remoteMeta.metadata.pageCount,
+          createdAt: remoteMeta.metadata.createdAt,
+          etag: changeState.metaEtag,
+        );
+
+        anyUpdated = true;
+        debugPrint('[BgSync] ${entry.metadata.title} synced (${missingPageNames.length} new pages)');
+      } catch (e) {
+        debugPrint('[BgSync] Failed to sync ${entry.metadata.title}: $e');
+      }
+    }
+
+    // Refresh library cards if anything changed
+    if (anyUpdated && mounted) {
+      ref.read(notebookListProvider.notifier).refresh();
+    }
   }
 
   void _startConnectivityMonitor() {
@@ -402,7 +561,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         final assets = syncService.extractAllAssets(localData);
         final symbols = syncService.extractSymbolLibraries(localData);
 
-        ref.read(canvasProvider.notifier).openNotebook(
+        await ref.read(canvasProvider.notifier).openNotebook(
           metadata: result.metadata,
           document: result.document,
           pages: pages,
@@ -460,7 +619,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         debugPrint('[Library] Failed to persist downloaded notebook locally: $e');
       }
 
-      ref.read(canvasProvider.notifier).openNotebook(
+      await ref.read(canvasProvider.notifier).openNotebook(
         metadata: result.metadata,
         document: result.document,
         pages: result.pages,
@@ -1145,6 +1304,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     final notebooks = ref.watch(notebookListProvider);
     final creds = ref.watch(credentialsProvider);
     final connectivity = ref.watch(connectivityServiceProvider);
+    final crossClip = ref.watch(crossNotebookClipboardProvider);
     final screenWidth = MediaQuery.of(context).size.width;
 
     // Watch for files shared into the app from other apps (Android/iOS share
@@ -1285,7 +1445,38 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         label: const Text('Nuovo', style: TextStyle(fontWeight: FontWeight.w600)),
         elevation: 2,
       ),
-      body: notebooks.when(
+      body: Column(
+        children: [
+          if (crossClip != null)
+            Material(
+              color: Colors.blue.shade700,
+              child: SafeArea(
+                bottom: false,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.content_paste_rounded, color: Colors.white, size: 18),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          '${crossClip.elements.length} element${crossClip.elements.length == 1 ? "o" : "i"} copiati — apri un notebook per incollare',
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white, size: 18),
+                        onPressed: () => ref.read(crossNotebookClipboardProvider.notifier).state = null,
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          Expanded(
+            child: notebooks.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Center(
           child: Column(
@@ -1493,6 +1684,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             ),
           );
         },
+      ),
+          ),
+        ],
       ),
     );
   }

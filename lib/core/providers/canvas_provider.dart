@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/sync_service.dart';
@@ -747,16 +748,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     return Offset(vp.width * (1 - zoom) / 2, 0);
   }
 
-  void openNotebook({
+  Future<void> openNotebook({
     required NotebookMetadata metadata,
     required DocumentStructure document,
     required Map<String, PageData> pages,
     required String remotePath,
     Map<String, Uint8List>? assets,
     List<SymbolLibrary>? symbolLibraries,
-  }) {
-    // Try to restore the last viewed chapter and page for this notebook
-    _restoreLastPosition(metadata, document, pages, remotePath, assets, symbolLibraries);
+  }) async {
+    // Await so that state is set before the caller pushes CanvasScreen.
+    // Without this, CanvasScreen briefly shows "Nessun notebook aperto"
+    // (the null-state fallback) while SharedPreferences loads.
+    await _restoreLastPosition(metadata, document, pages, remotePath, assets, symbolLibraries);
   }
 
   Future<void> _restoreLastPosition(
@@ -779,11 +782,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // Validate saved chapter still exists
       if (savedChapter != null && metadata.chapters.any((c) => c.id == savedChapter)) {
         restoredChapterId = savedChapter;
-        // Validate saved page index is within range and belongs to the chapter
-        if (savedPage >= 0 && savedPage < document.pages.length) {
+        // Validate saved page index is within range AND belongs to this chapter.
+        // After a pull/merge the document may be reordered, so savedPage might
+        // now point to a page in a different chapter → shows "—/N" in the nav.
+        if (savedPage >= 0 &&
+            savedPage < document.pages.length &&
+            document.pages[savedPage].chapterId == savedChapter) {
           startPageIndex = savedPage;
         } else {
-          // Page index out of range, find first page of the chapter
+          // Page out of range or in wrong chapter: find first page of the chapter
           final idx = document.pages.indexWhere((p) => p.chapterId == savedChapter);
           if (idx >= 0) startPageIndex = idx;
         }
@@ -848,6 +855,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _initPageEtags(metadata.id);
     _startPullTimer();
 
+    // If there's a cross-notebook clipboard pending, apply it to this canvas
+    // so the user can paste immediately after switching notebooks.
+    final crossClip = _ref.read(crossNotebookClipboardProvider);
+    if (crossClip != null) {
+      state = state?.copyWith(
+        clipboard: crossClip,
+        pendingPaste: true,
+      );
+      // Consume — don't carry over to a third notebook accidentally
+      _ref.read(crossNotebookClipboardProvider.notifier).state = null;
+    }
+
     // Decode all asset images into the render cache
     if (assets != null) {
       for (final entry in assets.entries) {
@@ -858,13 +877,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   /// Fetch current page ETags from the server and cache them so the first
   /// pull cycle has a baseline to diff against.
+  ///
+  /// IMPORTANT: we intentionally do NOT set _remoteMetaEtag here.
+  /// Setting it would suppress the very first _pullRemoteChanges() call
+  /// (which fires immediately on open), because that call gates on
+  ///   changeState.metaEtag != _remoteMetaEtag
+  /// If _initPageEtags races ahead and sets _remoteMetaEtag to the current
+  /// remote value, the pull sees a match and exits early — the user is left
+  /// with the (potentially stale) local .ncnote instead of the fresh server
+  /// state.  Let _pullRemoteChanges own _remoteMetaEtag exclusively.
   Future<void> _initPageEtags(String notebookId) async {
     try {
       final syncService = _ref.read(syncServiceProvider);
       if (syncService == null) return;
       final changeState = await syncService.getRemoteChangeState(notebookId);
       _lastPageEtags = Map.of(changeState.pageEtags);
-      _remoteMetaEtag = changeState.metaEtag;
+      // _remoteMetaEtag intentionally NOT set here — see doc comment above.
       debugPrint('[Canvas] Initialized ${_lastPageEtags.length} page ETags');
     } catch (e) {
       debugPrint('[Canvas] Could not init page ETags: $e');
@@ -3801,7 +3829,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }).toList();
 
     if (copied.isEmpty) return;
-    state = state!.copyWith(clipboard: CanvasClipboard(elements: copied, bounds: sel.bounds));
+    final _clip0 = CanvasClipboard(elements: copied, bounds: sel.bounds);
+    state = state!.copyWith(clipboard: _clip0);
+    _ref.read(crossNotebookClipboardProvider.notifier).state = _clip0;
   }
 
   void cutSelection() {
@@ -3821,7 +3851,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (element == null) return;
     final bounds = _getElementBounds(element);
     if (bounds == null) return;
-    state = state!.copyWith(clipboard: CanvasClipboard(elements: [element], bounds: bounds));
+    final _clip1 = CanvasClipboard(elements: [element], bounds: bounds);
+    state = state!.copyWith(clipboard: _clip1);
+    _ref.read(crossNotebookClipboardProvider.notifier).state = _clip1;
   }
 
   /// Cut a single element: copy to clipboard, then delete.
@@ -3895,8 +3927,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // Copy the element to clipboard and enter placement mode
     final bounds = _elementBounds(original);
+    final _clip2 = CanvasClipboard(elements: [original], bounds: bounds);
+    _ref.read(crossNotebookClipboardProvider.notifier).state = _clip2;
     state = s.copyWith(
-      clipboard: CanvasClipboard(elements: [original], bounds: bounds),
+      clipboard: _clip2,
       pendingPaste: true,
       clearSelectedElement: true,
     );
@@ -5054,10 +5088,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   ) async {
     print('[Canvas] Remote has ${remotePageEtags.length} pages, local cache has ${_lastPageEtags.length} ETags');
 
-    // Find pages whose WebDAV ETag changed since last pull
+    // Find pages whose WebDAV ETag changed since last pull, OR that exist
+    // on the server but are missing from the local state.
+    //
+    // The second condition handles stale local caches: _initPageEtags may
+    // have pre-populated _lastPageEtags from the server, so a stale local
+    // notebook (e.g. opened with 1 page when server has 100) would have
+    // matching ETags for all 100 pages and download nothing. Checking
+    // s.pages directly ensures every page the server has is materialised
+    // locally, regardless of whether the ETag cache looks up-to-date.
     final pagesToPull = <String>[];
     for (final entry in remotePageEtags.entries) {
-      if (_lastPageEtags[entry.key] != entry.value) {
+      final etagChanged = _lastPageEtags[entry.key] != entry.value;
+      final missingLocally = !s.pages.containsKey(entry.key);
+      if (etagChanged || missingLocally) {
         pagesToPull.add(entry.key);
       }
     }
@@ -5437,6 +5481,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // After repair the page index may need adjusting (entries were renamed
     // but not reordered, so the index is still valid).
 
+    // ── Sync activeChapterId with the page's actual chapter ──
+    // After a merge the absolute page ordering can shift. The page at
+    // newPageIndex might now belong to a different chapter than the current
+    // activeChapterId filter. If we leave them mismatched, the nav bar
+    // computes filteredPageIndices.indexOf(newPageIndex) == -1 → shows "—/N".
+    String? mergedChapterId = s.activeChapterId;
+    if (repaired.document.pages.isNotEmpty) {
+      final pageChapterId = repaired.document.pages[newPageIndex].chapterId;
+      if (pageChapterId != s.activeChapterId) {
+        mergedChapterId = pageChapterId;
+        print('[Canvas] activeChapterId corrected after merge: '
+            '${s.activeChapterId} → $mergedChapterId');
+      }
+    }
+
     // ── Preserve locally-added assets that haven't been uploaded yet ──
     // pending.assets contains only what the server currently has.  Any
     // assets in s.assetBytes that are absent from the remote set are
@@ -5462,10 +5521,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       pages: repaired.pages,
       assetBytes: mergedAssets,
       currentPageIndex: newPageIndex,
+      activeChapterId: mergedChapterId,
       clearPendingRemoteChanges: true,
     );
     _lastSyncedPages = Map.of(repaired.pages);
-    print('[Canvas] User accepted remote changes (landed on page $newPageIndex)');
+    print('[Canvas] User accepted remote changes (landed on page $newPageIndex, '
+        'chapter $mergedChapterId)');
 
     // Persist the merged state locally. Tracked so closeNotebook() can
     // await it — otherwise exiting immediately after an auto-accept loses

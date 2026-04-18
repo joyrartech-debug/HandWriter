@@ -15,6 +15,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
+import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/pending_import_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
@@ -2372,6 +2373,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 _FloatingActionBtn(Icons.paste_rounded, 'Incolla', () {
                   ref.read(canvasProvider.notifier).paste();
                 }),
+              if (state.clipboard != null)
+                _FloatingActionBtn(Icons.drive_file_move_outlined, 'Incolla in...', () {
+                  _pasteInAnotherNotebook(context, state.clipboard!);
+                }),
               _FloatingActionBtn(Icons.delete_outline, 'Elimina', () {
                 ref.read(canvasProvider.notifier).deleteSelection();
               }, color: Colors.red),
@@ -3084,6 +3089,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   /// Small inline confirmation toast. Keeps a short duration so it doesn't
   /// obscure the canvas.
+  Future<void> _pasteInAnotherNotebook(BuildContext ctx, CanvasClipboard clip) async {
+    // Persist the clipboard globally so the target notebook can pick it up
+    ref.read(crossNotebookClipboardProvider.notifier).state = clip;
+
+    // Navigate back to library (pop canvas)
+    Navigator.of(ctx).pop();
+    // The library will show a banner; user taps a notebook to open it.
+    // The cross-notebook clipboard is consumed by _restoreLastPosition.
+  }
+
   void _toast(String message) {
     if (!mounted) return;
     final messenger = ScaffoldMessenger.of(context);
