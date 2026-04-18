@@ -98,8 +98,12 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         List<Map<String, dynamic>> symbols = [];
 
         if (localBytes != null) {
-          mergedPages = Map<String, PageData>.from(syncService.extractAllPages(localBytes));
-          mergedAssets = Map<String, Uint8List>.from(syncService.extractAllAssets(localBytes));
+          // Run ZIP decoding off the UI thread — large notebooks with many
+          // pages/images would otherwise freeze the app (especially on iPad).
+          mergedPages = Map<String, PageData>.from(
+              await syncService.extractAllPagesIsolated(localBytes));
+          mergedAssets = Map<String, Uint8List>.from(
+              await syncService.extractAllAssetsIsolated(localBytes));
           try {
             symbols = syncService.extractSymbolLibraries(localBytes);
           } catch (_) {}
@@ -163,8 +167,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           }
         }
 
-        // 4. Build and save updated .ncnote
-        final bytes = SyncService.buildPackageBytes(
+        // 4. Build and save updated .ncnote (off the UI thread)
+        final bytes = await SyncService.buildPackageBytesIsolated(
           metadata: remoteMeta.metadata,
           document: remoteMeta.document,
           pages: mergedPages,
@@ -561,29 +565,42 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         final assets = syncService.extractAllAssets(localData);
         final symbols = syncService.extractSymbolLibraries(localData);
 
-        await ref.read(canvasProvider.notifier).openNotebook(
-          metadata: result.metadata,
-          document: result.document,
-          pages: pages,
-          remotePath: entry.remotePath,
-          assets: assets,
-          symbolLibraries: symbols.isNotEmpty
-              ? symbols.map((j) => SymbolLibrary.fromJson(j)).toList()
-              : null,
-        );
-
-        if (mounted) {
-          Navigator.pop(context);
-          Navigator.push(context, MaterialPageRoute(builder: (_) => const CanvasScreen()))
-              .then((_) {
-            // Coming back from the canvas: refresh the library so page
-            // count, modified-at and cover reflect any edits made inside.
-            if (mounted) {
-              ref.read(notebookListProvider.notifier).refresh();
-            }
-          });
+        // Corruption guard: if the local .ncnote has document entries but the
+        // pages/ directory is empty (or missing data for every entry), the
+        // notebook would open showing "Nessuna pagina" forever.  Detect this
+        // and fall through to a fresh server download instead.
+        final corruptedLocal = pages.isEmpty && result.document.pages.isNotEmpty;
+        if (corruptedLocal) {
+          debugPrint('[Library] Local .ncnote for ${entry.metadata.title} has '
+              '${result.document.pages.length} doc entries but 0 pages — '
+              'forcing fresh download');
+          localData = null; // fall through to downloadExplodedFull below
         }
-        return;
+
+        if (!corruptedLocal) {
+          await ref.read(canvasProvider.notifier).openNotebook(
+            metadata: result.metadata,
+            document: result.document,
+            pages: pages,
+            remotePath: entry.remotePath,
+            assets: assets,
+            symbolLibraries: symbols.isNotEmpty
+                ? symbols.map((j) => SymbolLibrary.fromJson(j)).toList()
+                : null,
+          );
+
+          if (mounted) {
+            Navigator.pop(context);
+            Navigator.push(context, MaterialPageRoute(builder: (_) => const CanvasScreen()))
+                .then((_) {
+              if (mounted) {
+                ref.read(notebookListProvider.notifier).refresh();
+              }
+            });
+          }
+          return;
+        }
+        // corruptedLocal == true: fall through to downloadExplodedFull below
       }
 
       // No local cache — must download from server

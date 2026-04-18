@@ -2979,6 +2979,78 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  /// Paste pages from [PageClipboard] into this notebook at [insertDocIndex].
+  ///
+  /// Each page gets a fresh [pageId] and [fileName] so it doesn't collide with
+  /// any existing page.  The [chapterId] from the clipboard entry is preserved
+  /// unless the target notebook has no chapters, in which case it is cleared.
+  void pastePages({
+    required List<PageData> pages,
+    required List<PageEntry> entries,
+    int? insertDocIndex, // null → append at end
+  }) {
+    if (state == null) return;
+    final s = state!;
+    if (pages.isEmpty) return;
+
+    const uuid = Uuid();
+    final now = DateTime.now();
+    final existingChapterIds = s.metadata.chapters.map((c) => c.id).toSet();
+
+    final insertIdx = (insertDocIndex ?? s.document.pages.length)
+        .clamp(0, s.document.pages.length);
+
+    final newEntries = <PageEntry>[];
+    final newPagesMap = Map<String, PageData>.from(s.pages);
+
+    for (int i = 0; i < pages.length; i++) {
+      final pageId = uuid.v4();
+      final fileName = _nextPageFileName(
+        s.copyWith(
+          document: s.document.copyWith(
+            pages: [
+              ...s.document.pages,
+              ...newEntries,
+            ],
+          ),
+        ),
+      );
+      // Only keep chapter id if the chapter still exists in this notebook
+      final chapterId = existingChapterIds.contains(entries[i].chapterId)
+          ? entries[i].chapterId
+          : null;
+      final newEntry = PageEntry(
+        pageId: pageId,
+        pageNumber: 0, // renumbered below
+        fileName: fileName,
+        lastModified: now,
+        chapterId: chapterId,
+      );
+      newEntries.add(newEntry);
+      newPagesMap[fileName] = pages[i].copyWith(pageId: pageId, modifiedAt: now);
+    }
+
+    final allEntries = List<PageEntry>.from(s.document.pages)
+      ..insertAll(insertIdx, newEntries);
+    // Renumber
+    for (int i = 0; i < allEntries.length; i++) {
+      allEntries[i] = allEntries[i].copyWith(pageNumber: i + 1);
+    }
+
+    final updatedDoc = s.document.copyWith(pages: allEntries);
+
+    state = s.copyWith(
+      document: updatedDoc,
+      pages: newPagesMap,
+      currentPageIndex: insertIdx,
+      metadata: s.metadata.copyWith(
+        pageCount: allEntries.length,
+        modifiedAt: now,
+      ),
+      isDirty: true,
+    );
+  }
+
   /// Move a page to a different chapter.
   void movePageToChapter(int pageIndex, String? chapterId) {
     assignPageToChapter(pageIndex, chapterId);
@@ -4592,6 +4664,93 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  /// Delete multiple pages in a single state update.
+  ///
+  /// [docIndices] are absolute document indices (not filtered/visible indices).
+  /// Must contain at least one index and must not delete ALL pages if only one
+  /// page remains.
+  void deletePages(List<int> docIndices) {
+    if (state == null) return;
+    final s = state!;
+    if (docIndices.isEmpty) return;
+    // Never delete the last page
+    final effective = docIndices.where((i) => i >= 0 && i < s.document.pages.length).toList();
+    if (effective.isEmpty) return;
+    if (s.pageCount - effective.length < 1) {
+      // Keep at least one page — remove excess from deletion list
+      effective.sort();
+      effective.removeLast(); // keep the last one
+      if (effective.isEmpty) return;
+    }
+
+    final indicesToRemove = effective.toSet();
+    final removedFileNames = indicesToRemove.map((i) => s.document.pages[i].fileName).toSet();
+
+    final newPages = <PageEntry>[];
+    for (int i = 0; i < s.document.pages.length; i++) {
+      if (!indicesToRemove.contains(i)) {
+        newPages.add(s.document.pages[i].copyWith(pageNumber: newPages.length + 1));
+      }
+    }
+
+    final updatedDoc = DocumentStructure(
+      notebookId: s.document.notebookId,
+      formatVersion: s.document.formatVersion,
+      pages: newPages,
+    );
+    final updatedPagesMap = Map<String, PageData>.from(s.pages)
+      ..removeWhere((k, _) => removedFileNames.contains(k));
+
+    // Snap current page index to a valid position
+    int newIndex = s.currentPageIndex;
+    while (newIndex >= newPages.length && newIndex > 0) {
+      newIndex--;
+    }
+
+    String? newActiveChapterId = s.activeChapterId;
+    if (newActiveChapterId != null) {
+      final chapterPages = [
+        for (int i = 0; i < newPages.length; i++)
+          if (newPages[i].chapterId == newActiveChapterId) i,
+      ];
+      if (chapterPages.isEmpty) {
+        newActiveChapterId = null;
+      } else if (!chapterPages.contains(newIndex)) {
+        newIndex = chapterPages.first;
+      }
+    }
+
+    final clearChapter = newActiveChapterId == null && s.activeChapterId != null;
+    state = s.copyWith(
+      document: updatedDoc,
+      pages: updatedPagesMap,
+      currentPageIndex: newIndex,
+      activeChapterId: clearChapter ? null : newActiveChapterId,
+      clearActiveChapter: clearChapter,
+      metadata: s.metadata.copyWith(pageCount: newPages.length, modifiedAt: DateTime.now()),
+      isDirty: true,
+    );
+  }
+
+  /// Assign multiple pages to a chapter (or clear their chapter) in a single
+  /// state update.
+  void assignPagesToChapter(List<int> docIndices, String? chapterId) {
+    if (state == null) return;
+    final s = state!;
+    if (docIndices.isEmpty) return;
+    final indicesSet = docIndices.toSet();
+    final pages = List<PageEntry>.from(s.document.pages);
+    for (final i in indicesSet) {
+      if (i >= 0 && i < pages.length) {
+        pages[i] = pages[i].copyWith(chapterId: chapterId);
+      }
+    }
+    state = s.copyWith(
+      document: s.document.copyWith(pages: pages),
+      isDirty: true,
+    );
+  }
+
   void duplicatePage(int index) {
     if (state == null) return;
     final s = state!;
@@ -5112,6 +5271,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         .where((k) => !remotePageEtags.containsKey(k))
         .toSet();
 
+    // ── Structure-based deletion detection ──
+    // ETag-based deletion detection (_lastPageEtags diff) can miss remote
+    // deletions when _initPageEtags pre-populated the cache from the
+    // already-updated remote state (after another device deleted a page):
+    //   • remote deleted page X → remote no longer has page X
+    //   • _initPageEtags fetches remote ETags → _lastPageEtags has no page X
+    //   • deletedRemotelyByEtag = {} (page X was never in the cache we built)
+    //   • early-return fires → deletion never applied → user stuck with dead page
+    //
+    // Fix: also mark a page as deleted remotely if:
+    //   - it's in the local document AND local pages map
+    //   - it's absent from the remote folder (remotePageEtags)
+    //   - it was previously synced (_lastSyncedPages has its data) ← was on server
+    for (final pageEntry in s.document.pages) {
+      final fn = pageEntry.fileName;
+      if (remotePageEtags.containsKey(fn)) continue; // still exists on remote
+      if (deletedRemotelyByEtag.contains(fn)) continue; // already detected
+      if (s.pages[fn] == null) continue; // no local data (nothing to delete)
+      // Was this page previously synced (i.e. was on server at some point)?
+      // _lastSyncedPages is initialised from the local .ncnote on open, so a
+      // page that was uploaded in a past session will be in it.  A truly
+      // local-only page (added this session but never uploaded) would NOT be
+      // in _lastSyncedPages from a previous session.
+      if (_lastSyncedPages.containsKey(fn)) {
+        deletedRemotelyByEtag.add(fn);
+      }
+    }
+
     if (pagesToPull.isEmpty && deletedRemotelyByEtag.isEmpty) {
       print('[Canvas] Delta pull: no page ETags changed, no deletions');
       _lastPageEtags = Map.of(remotePageEtags);
@@ -5280,16 +5467,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
         // Skip pages where local and remote have identical content —
         // no conflict and no change to report.
-        if (localPage != null && localPage == remotePage) {
+        // Compare without modifiedAt: a re-upload of identical content sets a
+        // new modifiedAt timestamp, but that is NOT a real conflict.
+        if (localPage != null &&
+            localPage.copyWith(modifiedAt: null) ==
+                remotePage.copyWith(modifiedAt: null)) {
           continue;
         }
 
         // Conflict: local page was edited since last sync AND remote changed.
-        // Use deep equality (==) instead of identical() — object identity
-        // breaks after state rebuilds even when content hasn't changed.
+        // Compare without modifiedAt so that a sync-induced timestamp change on
+        // an otherwise identical page doesn't count as a local edit.
+        final lastSynced = _lastSyncedPages[fileName];
         final locallyEdited = localPage != null &&
-            _lastSyncedPages[fileName] != null &&
-            localPage != _lastSyncedPages[fileName];
+            lastSynced != null &&
+            localPage.copyWith(modifiedAt: null) !=
+                lastSynced.copyWith(modifiedAt: null);
         if (locallyEdited) {
           final pageIndex = remoteMeta.document.pages.indexWhere(
               (e) => e.fileName == fileName);
@@ -5639,6 +5832,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, PageData> pages,
     Map<String, Uint8List> assets,
   ) async {
+    // Safety guard: refuse to persist a package where the document references
+    // pages that have no data in the pages map.  This would produce a
+    // .ncnote that shows "Nessuna pagina" on every subsequent open.
+    // Better to skip the save and let the next pull try again.
+    if (pages.isEmpty && document.pages.isNotEmpty) {
+      print('[Canvas] _savePulledChangesLocally: refusing to save — '
+          'pages map is empty but document has ${document.pages.length} entries');
+      return;
+    }
+    final missingCount =
+        document.pages.where((e) => !pages.containsKey(e.fileName)).length;
+    if (missingCount > 0) {
+      print('[Canvas] _savePulledChangesLocally: $missingCount page entries '
+          'have no data — skipping save to avoid corrupted .ncnote');
+      return;
+    }
     try {
       final fileService = _ref.read(fileServiceProvider);
       final symbolLibs = state?.symbolLibraries

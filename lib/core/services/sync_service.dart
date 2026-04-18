@@ -1030,6 +1030,35 @@ class SyncService {
     return assets;
   }
 
+  /// Background-isolate version of [extractAllAssets].
+  /// Hop off the UI thread for large notebooks that contain many images.
+  Future<Map<String, Uint8List>> extractAllAssetsIsolated(Uint8List data) {
+    return compute(_extractAllAssetsInIsolate, data);
+  }
+
+  /// Background-isolate version of [buildPackageBytes].
+  ///
+  /// Serialises the parameters to plain JSON-compatible types (sendable across
+  /// isolate boundaries), builds the ZIP on a worker thread, and returns the
+  /// raw bytes.  Use this whenever you build a .ncnote off the UI thread.
+  static Future<Uint8List> buildPackageBytesIsolated({
+    required NotebookMetadata metadata,
+    required DocumentStructure document,
+    required Map<String, PageData> pages,
+    Map<String, Uint8List>? assets,
+    List<Map<String, dynamic>>? symbolLibraries,
+  }) {
+    final params = <String, Object?>{
+      'metadata': metadata.toJson(),
+      'document': document.toJson(),
+      'pages': pages.map((k, v) => MapEntry(k, v.toJson())),
+      if (assets != null) 'assets': assets,
+      if (symbolLibraries != null && symbolLibraries.isNotEmpty)
+        'symbols': symbolLibraries,
+    };
+    return compute(_buildPackageBytesInIsolate, params);
+  }
+
   void dispose() {
     stopAutoSync();
   }
@@ -1060,4 +1089,48 @@ Map<String, PageData> _extractAllPagesInIsolate(Uint8List data) {
     }
   }
   return pages;
+}
+
+/// Top-level entry point for [SyncService.extractAllAssetsIsolated].
+Map<String, Uint8List> _extractAllAssetsInIsolate(Uint8List data) {
+  final archive = ZipDecoder().decodeBytes(data);
+  final assets = <String, Uint8List>{};
+  const prefix = '${AppConfig.assetsDir}/';
+  for (final file in archive.files) {
+    if (file.name.startsWith(prefix) && file.isFile) {
+      final fileName = file.name.substring(prefix.length);
+      if (fileName.isNotEmpty) {
+        assets[fileName] = Uint8List.fromList(file.content as List<int>);
+      }
+    }
+  }
+  return assets;
+}
+
+/// Top-level entry point for [SyncService.buildPackageBytesIsolated].
+///
+/// Accepts plain JSON-compatible types so the data can cross the isolate
+/// boundary via SendPort. All Freezed models are pre-serialised by the
+/// calling side and reconstructed here before building the archive.
+Uint8List _buildPackageBytesInIsolate(Map<String, Object?> params) {
+  final metadataJson = params['metadata'] as Map<String, dynamic>;
+  final documentJson = params['document'] as Map<String, dynamic>;
+  final pagesRaw    = params['pages']    as Map<String, dynamic>;
+  final assetsRaw   = params['assets']   as Map<String, Uint8List>?;
+  final symbolsRaw  = params['symbols']  as List<dynamic>?;
+
+  final pages = pagesRaw.map(
+    (k, v) => MapEntry(k, PageData.fromJson(v as Map<String, dynamic>)),
+  );
+  final symbols = symbolsRaw
+      ?.map((e) => e as Map<String, dynamic>)
+      .toList();
+
+  return SyncService.buildPackageBytes(
+    metadata: NotebookMetadata.fromJson(metadataJson),
+    document: DocumentStructure.fromJson(documentJson),
+    pages: pages,
+    assets: assetsRaw,
+    symbolLibraries: symbols,
+  );
 }
