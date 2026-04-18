@@ -4876,10 +4876,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }) async {
     try {
       await fileService.saveNotebookFile(updatedMeta.id, package);
+      // Preserve the remote delta ETag that was stored by the last successful
+      // syncDelta call.  upsertNotebookMeta uses ConflictAlgorithm.replace, so
+      // omitting the etag field would erase it — causing _syncWithServer to
+      // re-download the (stale) .ncnote on the next library refresh, which
+      // corrupts the local cache and resets the visible page count.
       await fileService.upsertNotebookMeta(
         id: updatedMeta.id,
         title: updatedMeta.title,
         remotePath: remotePath,
+        etag: _remoteMetaEtag,  // keep delta ETag across saves
         localModifiedAt: updatedMeta.modifiedAt,
         syncStatus: 'modified',
         fileSize: package.length,
@@ -5589,11 +5595,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       ));
       await fileService.saveNotebookFile(metadata.id, package);
       // Also update DB metadata so the library screen reflects the pulled
-      // title, page count, cover color, etc. without a full re-download.
+      // title, page count, cover colour, etc. without a full re-download.
+      // Pass _remoteMetaEtag so the delta ETag is preserved in the DB row —
+      // without it upsertNotebookMeta (ConflictAlgorithm.replace) erases the
+      // ETag, making _syncWithServer think the notebook changed and re-download
+      // the stale server .ncnote on every library refresh.
       await fileService.upsertNotebookMeta(
         id: metadata.id,
         title: metadata.title,
         remotePath: state?.remotePath ?? '',
+        etag: _remoteMetaEtag,  // keep delta ETag across pull-saves
         localModifiedAt: metadata.modifiedAt,
         syncStatus: 'synced',
         fileSize: package.length,

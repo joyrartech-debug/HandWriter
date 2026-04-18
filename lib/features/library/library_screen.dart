@@ -377,30 +377,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       final syncService = ref.read(syncServiceProvider);
       final fileService = ref.read(fileServiceProvider);
 
-      // Try local cache first (instant, works offline).
-      // But first check whether the delta folder on the server is NEWER
-      // than what we last saved into the .ncnote ZIP.  This catches the
-      // force-kill scenario: syncDelta uploaded all page files to the
-      // delta folder but the app was killed before _savePulledChangesLocally
-      // (or _localSave) wrote the ZIP — so the local file is stale even
-      // though the delta folder has the latest content.
+      // Try local cache first — instant and works offline.
+      // We no longer do a pre-open ETag network round-trip here because:
+      //  • Every open fires _startPullTimer() → _pullRemoteChanges() immediately,
+      //    which already checks the remote delta ETag and downloads any changes.
+      //  • The old getDeltaMetaEtag check used a delta ETag for comparison but
+      //    _syncWithServer stores the .ncnote file ETag — always a mismatch →
+      //    forced a full delta re-download on every single open.
+      // The pull timer is the correct place for remote-change detection.
       Uint8List? localData = await fileService.readNotebookFile(entry.metadata.id);
-      if (localData != null && syncService != null) {
-        try {
-          final dbMeta = await fileService.getNotebookMeta(entry.metadata.id);
-          final storedEtag = dbMeta?['etag'] as String?;
-          final deltaEtag  = await syncService.getDeltaMetaEtag(entry.metadata.id);
-          if (deltaEtag != null && storedEtag != null && deltaEtag != storedEtag) {
-            // Delta folder is newer — the local ZIP is missing changes.
-            // Force a fresh download from the delta folder below.
-            debugPrint('[Library] Delta etag ($deltaEtag) ≠ stored ($storedEtag) '
-                '— local .ncnote stale, re-downloading from server');
-            localData = null;
-          }
-        } catch (_) {
-          // Network check failed (offline) — proceed with local data.
-        }
-      }
 
       if (localData != null && syncService != null) {
         SyncService.validateNcnoteArchive(localData, context: 'open local ${entry.metadata.title}');

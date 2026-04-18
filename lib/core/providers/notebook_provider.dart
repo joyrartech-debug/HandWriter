@@ -184,8 +184,27 @@ class NotebookListNotifier
       final localRow = localByPath[remotePath];
       final localEtag = localRow?['etag'] as String?;
 
-      // Skip if ETag matches — notebook hasn't changed
+      // Skip if ETag matches — notebook hasn't changed on the server.
       if (localEtag != null && localEtag == file.etag) continue;
+
+      // Skip downloading the server .ncnote if local data is NEWER.
+      // Notebooks that use delta sync are never re-packaged into the server
+      // .ncnote — their local copy is always more up-to-date than the static
+      // file on the server.  Re-downloading would corrupt the local cache
+      // with stale data and reset the library page-count to an old value.
+      // The pull timer inside CanvasNotifier handles actual remote-change
+      // detection for delta notebooks.
+      if (localRow != null && file.lastModified != null) {
+        final localModAt = localRow['local_modified_at'] as String?;
+        if (localModAt != null) {
+          final localDt = DateTime.tryParse(localModAt);
+          if (localDt != null && localDt.isAfter(file.lastModified!)) {
+            debugPrint('[Library] Skipping .ncnote download for $remotePath '
+                '(local $localDt > server ${file.lastModified})');
+            continue;
+          }
+        }
+      }
 
       toDownload.add((remotePath: remotePath, file: file));
     }
