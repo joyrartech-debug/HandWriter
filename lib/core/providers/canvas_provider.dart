@@ -628,6 +628,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// pull on B either misses real changes or fakes false positives.
   String? _etagNotebookId;
 
+  /// True while a multi-step bulk operation (e.g. PDF import) is in
+  /// progress. Pull cycles are suppressed so an intervening network
+  /// round-trip cannot re-order document.pages mid-insert and corrupt
+  /// chapter assignments or currentPageIndex.
+  bool _bulkOperationInProgress = false;
+
+  /// Pause automatic remote pulls. Call [endBulkOperation] when done.
+  void beginBulkOperation() => _bulkOperationInProgress = true;
+
+  /// Resume automatic remote pulls after a bulk operation.
+  void endBulkOperation() => _bulkOperationInProgress = false;
+
   /// Timer for pulling remote changes from other devices.
   Timer? _pullTimer;
 
@@ -4632,7 +4644,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final fileService = _ref.read(fileServiceProvider);
     if (syncService == null) return false;
 
-    final updatedMeta = s.metadata.copyWith(modifiedAt: DateTime.now());
+    // Always derive pageCount from the live document so the DB is never
+    // left with a stale count (e.g. after an auto-accept stamped the
+    // server's old count onto metadata).
+    final updatedMeta = s.metadata.copyWith(
+      modifiedAt: DateTime.now(),
+      pageCount: s.document.pages.length,
+    );
 
     // ── Detect which pages actually changed (identity comparison) ──
     final changedPages = <String, PageData>{};
@@ -4863,7 +4881,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// and if local pages are dirty, creates per-page conflicts instead of
   /// silently overwriting.
   Future<void> _pullRemoteChanges() async {
-    if (_isPulling || state == null) return;
+    if (_isPulling || state == null || _bulkOperationInProgress) return;
     // Don't pull while user is resolving conflicts or reviewing pending
     // remote changes — avoids overwriting with a fresh pull.
     if (state!.pendingConflicts.isNotEmpty) return;
@@ -5205,12 +5223,36 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // Count safe deletions (auto-removed, not conflicting)
       final safeDeleteCount = deletedRemotelyByEtag.length - deletionConflicts.length;
 
+      // ── Preserve locally-added pages that the server hasn't seen yet ──
+      // remoteMeta.document only lists pages the server knows about.
+      // Any pages added locally but not yet fully uploaded are absent from
+      // that list. If we let auto-accept replace state.document with the
+      // remote-only version, those page entries disappear even though their
+      // data is still alive in updatedPages — they become unreachable and
+      // appear to vanish (chapter mixing / "page loss after PDF import").
+      //
+      // Fix: append local-only entries after the remote list so they survive
+      // the merge. Remote's ordering and chapter assignments win for shared
+      // pages; local-only entries keep their original chapterId.
+      final remoteFileNames =
+          remoteMeta.document.pages.map((p) => p.fileName).toSet();
+      final localOnlyEntries = s.document.pages
+          .where((p) => !remoteFileNames.contains(p.fileName))
+          .toList();
+      final mergedDocument = localOnlyEntries.isEmpty
+          ? remoteMeta.document
+          : DocumentStructure(
+              notebookId: remoteMeta.document.notebookId,
+              formatVersion: remoteMeta.document.formatVersion,
+              pages: [...remoteMeta.document.pages, ...localOnlyEntries],
+            );
+
       // Show conflicts if any, plus non-conflicting changes banner
       if (conflicts.isNotEmpty || details.isNotEmpty || safeDeleteCount > 0) {
         final pending = (details.isNotEmpty || safeDeleteCount > 0)
             ? PendingRemoteChanges(
                 metadata: remoteMeta.metadata,
-                document: remoteMeta.document,
+                document: mergedDocument,
                 pages: updatedPages,
                 assets: updatedAssets,
                 changedPages: details,
@@ -5300,8 +5342,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // Stamp the actual merged page count so the library card is always
+    // accurate — remote metadata.pageCount may be stale if local pages
+    // were added after the last upload.
+    final mergedMeta = pending.metadata.copyWith(
+      pageCount: pending.document.pages.length,
+    );
+
     state = s.copyWith(
-      metadata: pending.metadata,
+      metadata: mergedMeta,
       document: pending.document,
       pages: pending.pages,
       assetBytes: pending.assets,

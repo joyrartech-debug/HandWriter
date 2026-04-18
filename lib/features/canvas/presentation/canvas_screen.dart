@@ -1406,6 +1406,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       // go out of scope before pulling the next one from Printing.raster.
       // This is what fixes the ~15-page crash on iPad with long PDFs.
       final notifier = ref.read(canvasProvider.notifier);
+
+      // Suppress remote pulls for the duration of the import.
+      // The await Future.delayed(Duration.zero) between pages yields to the
+      // event loop; without this guard a pull can fire mid-loop, shifting
+      // document.pages and causing insertions at the wrong position or with
+      // the wrong chapter assignment.
+      notifier.beginBulkOperation();
       int processed = 0;
       await for (final raster in Printing.raster(bytes, dpi: dpi.toDouble())) {
         if (!mounted) return;
@@ -1449,6 +1456,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         await Future<void>.delayed(Duration.zero);
       }
 
+      notifier.endBulkOperation();
+
       if (!mounted) return;
       ScaffoldMessenger.of(context).clearSnackBars();
 
@@ -1465,6 +1474,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         );
       }
     } catch (e) {
+      ref.read(canvasProvider.notifier).endBulkOperation();
       if (mounted) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
