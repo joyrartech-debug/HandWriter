@@ -387,7 +387,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final inFlight = _saveInFlight;
       if (inFlight != null) await inFlight;
     }
-    if (!mounted) return true;
+    if (!mounted) return false;
     final state = ref.read(canvasProvider);
     if (state != null && state.isDirty) {
       final result = await showDialog<String>(
@@ -409,10 +409,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       }
       if (result == 'save') await _save();
     }
-    // Await so any in-flight local save of pulled remote changes lands
-    // on disk before we pop and the user possibly re-opens the notebook.
-    await ref.read(canvasProvider.notifier).closeNotebook();
-    return true;
+    // Pop FIRST to eliminate the black-screen flash. closeNotebook awaits
+    // in-flight pulls/saves — if we wait for it before popping, state goes
+    // null while the screen is still in the tree and the user sees a blank
+    // Scaffold for the whole pop-animation duration.
+    // We capture the notifier before pop because ref may be invalid after.
+    final notifier = ref.read(canvasProvider.notifier);
+    if (mounted) Navigator.of(context).pop();
+    await notifier.closeNotebook();
+    return false; // already popped above — don't pop again
   }
 
   // ── Drag-left/right page navigation ──
@@ -1660,8 +1665,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           IconButton(
             icon: Icon(Icons.arrow_back_ios_new_rounded, color: Colors.grey.shade800, size: 18),
             onPressed: () async {
-              final shouldPop = await _onWillPop();
-              if (shouldPop && mounted) Navigator.of(context).pop();
+              // _onWillPop handles pop + cleanup internally; it returns false.
+              await _onWillPop();
             },
           ),
           const SizedBox(width: 4),

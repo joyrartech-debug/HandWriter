@@ -433,8 +433,19 @@ class CanvasState {
 
   PageData? get currentPage {
     if (document.pages.isEmpty) return null;
-    final entry = document.pages[currentPageIndex];
-    return pages[entry.fileName];
+    // Guard against out-of-bounds index (shouldn't happen, but be safe).
+    final safeIdx = currentPageIndex.clamp(0, document.pages.length - 1);
+    final entry = document.pages[safeIdx];
+    final page = pages[entry.fileName];
+    if (page != null) return page;
+    // Fallback: the pages Map is missing the current fileName (e.g. a
+    // partial pull that didn't download every page). Try to return page 0
+    // so the screen stays usable rather than showing "Nessuna pagina".
+    for (final e in document.pages) {
+      final p = pages[e.fileName];
+      if (p != null) return p;
+    }
+    return null;
   }
 
   String get currentPageFileName => document.pages[currentPageIndex].fileName;
@@ -4825,6 +4836,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Track the future so closeNotebook can await it.
     _pendingPullFuture = _pullRemoteChanges();
     _pullTimer = Timer.periodic(AppConfig.deltaPullInterval, (_) {
+      // If a pull is already in flight, do NOT overwrite _pendingPullFuture
+      // with a no-op Future — _pullRemoteChanges returns immediately when
+      // _isPulling is true, and that stub would trick closeNotebook() into
+      // tearing down state before the real in-flight pull has merged its
+      // download. The result: pulled pages visible for a moment, then lost
+      // on exit — the "ci rientro ed è scomparso tutto" bug.
+      if (_isPulling) return;
       _pendingPullFuture = _pullRemoteChanges();
     });
   }
@@ -4893,7 +4911,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         await _pullFromDeltaFast(
           s, syncService, changeState.pageEtags,
         );
-        _remoteMetaEtag = changeState.metaEtag;
+        // Only advance _remoteMetaEtag if the notebook is STILL open and
+        // still the same one we started the pull for. If the user closed or
+        // switched mid-pull, the merge aborted and the pulled pages never
+        // reached local disk — advancing the ETag here would tell the next
+        // session "you're already in sync" and permanently lose those pages.
+        if (state != null && state!.metadata.id == pullNotebookId) {
+          _remoteMetaEtag = changeState.metaEtag;
+        }
       }
     } catch (e) {
       print('[Canvas] Pull failed: $e');
@@ -5244,14 +5269,46 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     _lastSyncedPages = Map.of(pending.pages);
+
+    // ── Keep the user on the same page they were viewing ──
+    // After a pull the remote document may have reordered pages or added
+    // new ones before/after the current index. Look up the current page
+    // by fileName so the absolute index stays correct rather than
+    // accidentally jumping to a different page (the "chapter mixing" bug).
+    int newPageIndex = s.currentPageIndex;
+    if (s.document.pages.isNotEmpty) {
+      final currentFileName = s.document.pages[s.currentPageIndex].fileName;
+      final found = pending.document.pages.indexWhere(
+          (p) => p.fileName == currentFileName);
+      if (found >= 0) {
+        newPageIndex = found;
+      } else {
+        // Current page was deleted remotely — land on the nearest page.
+        newPageIndex = s.currentPageIndex.clamp(
+            0, pending.document.pages.length - 1);
+      }
+    }
+
+    // ── Guard against a page whose data wasn't downloaded ("Nessuna pagina") ──
+    // Walk forward from newPageIndex until we find an index whose fileName
+    // exists in the merged pages Map. Fall back to 0 if none found.
+    for (int attempt = 0; attempt < pending.document.pages.length; attempt++) {
+      final idx = (newPageIndex + attempt) % pending.document.pages.length;
+      if (pending.pages.containsKey(pending.document.pages[idx].fileName)) {
+        newPageIndex = idx;
+        break;
+      }
+    }
+
     state = s.copyWith(
       metadata: pending.metadata,
       document: pending.document,
       pages: pending.pages,
       assetBytes: pending.assets,
+      currentPageIndex: newPageIndex,
       clearPendingRemoteChanges: true,
     );
-    print('[Canvas] User accepted remote changes');
+    print('[Canvas] User accepted remote changes (landed on page $newPageIndex)');
 
     // Persist the merged state locally. Tracked so closeNotebook() can
     // await it — otherwise exiting immediately after an auto-accept loses
