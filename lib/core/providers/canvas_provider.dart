@@ -640,6 +640,81 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Resume automatic remote pulls after a bulk operation.
   void endBulkOperation() => _bulkOperationInProgress = false;
 
+  // ── Page filename helpers ────────────────────────────────────────────────
+
+  /// Returns a safe, non-colliding fileName for a **new** page.
+  ///
+  /// Uses `max(existing numeric suffix) + 1` rather than
+  /// `document.pages.length + 1`.  The two values diverge whenever pages
+  /// are reordered, deleted, or merged from multiple sessions — which is
+  /// exactly when the simple `length + 1` scheme re-uses an already-taken
+  /// number and causes the "chapter mixing / duplicate page" bug.
+  String _nextPageFileName(CanvasState s) {
+    int maxNum = s.document.pages.length; // safe lower bound
+    for (final p in s.document.pages) {
+      final m = RegExp(r'page_(\d+)\.json').firstMatch(p.fileName);
+      if (m != null) {
+        final n = int.tryParse(m.group(1)!) ?? 0;
+        if (n > maxNum) maxNum = n;
+      }
+    }
+    return 'page_${(maxNum + 1).toString().padLeft(3, '0')}.json';
+  }
+
+  /// Scans [doc].pages for duplicate fileNames and renames every second-or-
+  /// later occurrence to a fresh, unique name.  The corresponding [PageData]
+  /// is copied to the new key so content is preserved.
+  ///
+  /// Called at notebook-open and after every remote-pull merge so that
+  /// collisions introduced by concurrent sessions are healed before the user
+  /// ever navigates to the affected pages.
+  static ({DocumentStructure document, Map<String, PageData> pages})
+      _repairDuplicateFileNames(
+          DocumentStructure doc, Map<String, PageData> pages) {
+    // Compute the current max numeric suffix so we can mint fresh names.
+    int maxNum = 0;
+    for (final p in doc.pages) {
+      final m = RegExp(r'page_(\d+)\.json').firstMatch(p.fileName);
+      if (m != null) {
+        final n = int.tryParse(m.group(1)!) ?? 0;
+        if (n > maxNum) maxNum = n;
+      }
+    }
+
+    final seen = <String>{};
+    final repairedEntries = <PageEntry>[];
+    final repairedPages = Map<String, PageData>.from(pages);
+    bool anyFixed = false;
+
+    for (final entry in doc.pages) {
+      if (seen.contains(entry.fileName)) {
+        // Duplicate: assign a new non-colliding fileName.
+        maxNum++;
+        final newFileName =
+            'page_${maxNum.toString().padLeft(3, '0')}.json';
+        // Copy the PageData under the new key so the content is not lost.
+        final originalData = repairedPages[entry.fileName];
+        if (originalData != null) {
+          repairedPages[newFileName] = originalData;
+        }
+        repairedEntries.add(entry.copyWith(fileName: newFileName));
+        anyFixed = true;
+        print('[Canvas] _repairDuplicateFileNames: '
+            '${entry.fileName} → $newFileName (pageId ${entry.pageId})');
+      } else {
+        seen.add(entry.fileName);
+        repairedEntries.add(entry);
+      }
+    }
+
+    if (!anyFixed) return (document: doc, pages: pages);
+
+    return (
+      document: doc.copyWith(pages: repairedEntries),
+      pages: repairedPages,
+    );
+  }
+
   /// Timer for pulling remote changes from other devices.
   Timer? _pullTimer;
 
@@ -736,10 +811,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         ? _centeredPanOffset(2.0) // 2.0 = default zoom in CanvasState
         : Offset.zero;
 
+    // ── Self-healing: repair duplicate fileNames before first render ──
+    // Two sessions running simultaneously can independently generate the
+    // same sequential fileName (e.g. page_068.json) for different pages.
+    // Detect and rename any such duplicates so every PageEntry has a
+    // unique key into the pages map.
+    final repaired = CanvasNotifier._repairDuplicateFileNames(document, pages);
+
     state = CanvasState(
       metadata: metadata,
-      document: document,
-      pages: Map.of(pages),
+      document: repaired.document,
+      pages: Map.of(repaired.pages),
       remotePath: remotePath,
       assetBytes: assets != null ? Map.of(assets) : const {},
       symbolLibraries: symbolLibraries ?? const [],
@@ -750,7 +832,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // Initialize delta sync tracking
     _disposed = false;
-    _lastSyncedPages = Map.of(pages);
+    _lastSyncedPages = Map.of(repaired.pages);
     _pageJsonCache.clear();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -2768,7 +2850,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final pageId = uuid.v4();
     final now = DateTime.now();
     final pageNum = s.pageCount + 1;
-    final fileName = 'page_${pageNum.toString().padLeft(3, '0')}.json';
+    final fileName = _nextPageFileName(s);
 
     final currentBg = s.currentPage?.layers.background;
     final bgType = currentBg?.type ?? 'blank';
@@ -2822,7 +2904,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final pageId = uuid.v4();
     final now = DateTime.now();
     final pageNum = s.pageCount + 1;
-    final fileName = 'page_${pageNum.toString().padLeft(3, '0')}.json';
+    final fileName = _nextPageFileName(s);
 
     final currentBg = s.currentPage?.layers.background;
     final bgType = currentBg?.type ?? 'blank';
@@ -2884,7 +2966,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Create a new blank page for the chapter instead of reassigning the current page
     final pageId = uuid.v4();
     final pageNum = s.pageCount + 1;
-    final fileName = 'page_${pageNum.toString().padLeft(3, '0')}.json';
+    final fileName = _nextPageFileName(s);
 
     final currentBg = s.currentPage?.layers.background;
     final bgType = currentBg?.type ?? 'blank';
@@ -4487,7 +4569,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final pageId = uuid.v4();
     final now = DateTime.now();
     final pageNum = s.pageCount + 1;
-    final fileName = 'page_${pageNum.toString().padLeft(3, '0')}.json';
+    final fileName = _nextPageFileName(s);
 
     final newPage = PageData(
       pageId: pageId, pageNumber: pageNum,
@@ -5310,7 +5392,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       return;
     }
 
-    _lastSyncedPages = Map.of(pending.pages);
+    // Note: _lastSyncedPages is set after repair, below, once repaired is computed.
 
     // ── Keep the user on the same page they were viewing ──
     // After a pull the remote document may have reordered pages or added
@@ -5342,21 +5424,41 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // ── Self-healing: repair duplicate fileNames introduced by the merge ──
+    final repaired = CanvasNotifier._repairDuplicateFileNames(
+        pending.document, pending.pages);
+
+    // After repair the page index may need adjusting (entries were renamed
+    // but not reordered, so the index is still valid).
+
+    // ── Preserve locally-added assets that haven't been uploaded yet ──
+    // pending.assets contains only what the server currently has.  Any
+    // assets in s.assetBytes that are absent from the remote set are
+    // locally-added (e.g. a just-imported PDF that save() hasn't flushed
+    // yet).  Discarding them here means save() can no longer find their
+    // bytes and they are silently dropped → blank pages after re-open.
+    // Fix: merge local-only assets back into the combined set.
+    final mergedAssets = Map<String, Uint8List>.from(pending.assets);
+    for (final entry in s.assetBytes.entries) {
+      mergedAssets.putIfAbsent(entry.key, () => entry.value);
+    }
+
     // Stamp the actual merged page count so the library card is always
     // accurate — remote metadata.pageCount may be stale if local pages
     // were added after the last upload.
     final mergedMeta = pending.metadata.copyWith(
-      pageCount: pending.document.pages.length,
+      pageCount: repaired.document.pages.length,
     );
 
     state = s.copyWith(
       metadata: mergedMeta,
-      document: pending.document,
-      pages: pending.pages,
-      assetBytes: pending.assets,
+      document: repaired.document,
+      pages: repaired.pages,
+      assetBytes: mergedAssets,
       currentPageIndex: newPageIndex,
       clearPendingRemoteChanges: true,
     );
+    _lastSyncedPages = Map.of(repaired.pages);
     print('[Canvas] User accepted remote changes (landed on page $newPageIndex)');
 
     // Persist the merged state locally. Tracked so closeNotebook() can
@@ -5364,8 +5466,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // the pulled pages (they're in memory but the .ncnote wasn't rewritten
     // in time).
     _pendingPulledLocalSave = _savePulledChangesLocally(
-      pending.metadata, pending.document,
-      pending.pages, pending.assets,
+      mergedMeta, repaired.document,
+      repaired.pages, mergedAssets,
     );
   }
 
