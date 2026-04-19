@@ -81,6 +81,14 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         final changeState = await syncService.getRemoteChangeState(id);
         final storedMeta = await fileService.getNotebookMeta(id);
         final storedEtag = storedMeta?['etag'] as String?;
+
+        // Skip notebooks with local unsaved changes — _syncDirtyNotebooks handles
+        // them and has conflict-resolution logic.  'pending' is intentionally not
+        // skipped: it means a prior BgSync cycle saved a partial notebook and this
+        // cycle should retry downloading the remaining pages.
+        final bgSyncStatus = storedMeta?['sync_status'] as String?;
+        if (bgSyncStatus == 'modified' || bgSyncStatus == 'new') continue;
+
         if (changeState.metaEtag != null && changeState.metaEtag == storedEtag) {
           continue; // nothing changed
         }
@@ -90,7 +98,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         // 2. Load local .ncnote
         final localBytes = await fileService.readNotebookFile(id);
 
-        // 3. Download remote metadata + only MISSING pages (incremental)
+        // 3. Download remote metadata + ALL pages from the delta folder.
+        //
+        // Previously this only fetched pages *missing* from the local .ncnote.
+        // That was wrong: a page can exist locally but have *stale content*
+        // (modified on another device since the last sync).  We must overwrite
+        // those pages so the device gets the up-to-date content.
+        //
+        // Safety: we only reach here for 'synced' / 'pending' notebooks (the
+        // 'modified' / 'new' guard above skips notebooks with local edits), so
+        // overwriting every page with the server version is safe.
         final remoteMeta = await syncService.downloadDeltaMeta(id);
 
         Map<String, PageData> mergedPages;
@@ -112,14 +129,17 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           mergedAssets = {};
         }
 
-        // Find pages in remote document that are missing locally
-        final missingPageNames = remoteMeta.document.pages
+        // Download ALL pages listed in the remote document (new + modified).
+        final allRemotePageNames = remoteMeta.document.pages
             .map((p) => p.fileName)
-            .where((fn) => !mergedPages.containsKey(fn))
+            .where((fn) => fn.isNotEmpty)
             .toList();
 
-        if (missingPageNames.isNotEmpty) {
-          debugPrint('[BgSync] Downloading ${missingPageNames.length} missing pages for ${entry.metadata.title}');
+        if (allRemotePageNames.isNotEmpty) {
+          debugPrint('[BgSync] Downloading ${allRemotePageNames.length} pages '
+              'for ${entry.metadata.title} '
+              '(${allRemotePageNames.where((fn) => !mergedPages.containsKey(fn)).length} new, '
+              '${allRemotePageNames.where((fn) => mergedPages.containsKey(fn)).length} refresh)');
 
           // Helper: download a single page with retries
           Future<PageData?> fetchPage(String fn) async {
@@ -139,7 +159,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           }
 
           final pageResults = await Future.wait(
-            missingPageNames.map((fn) async => (fn, await fetchPage(fn))),
+            allRemotePageNames.map((fn) async => (fn, await fetchPage(fn))),
           );
           for (final (fn, page) in pageResults) {
             if (page != null) mergedPages[fn] = page;
