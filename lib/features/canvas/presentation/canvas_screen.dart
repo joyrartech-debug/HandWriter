@@ -1766,25 +1766,39 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                           color: Colors.black.withValues(alpha: 0.72),
                           borderRadius: BorderRadius.circular(14),
                         ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            SizedBox(
-                              width: 12,
-                              height: 12,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                    Colors.white),
-                              ),
-                            ),
-                            SizedBox(width: 8),
-                            Text(
-                              'Sincronizzazione…',
-                              style: TextStyle(
-                                  color: Colors.white, fontSize: 12),
-                            ),
-                          ],
+                        child: ValueListenableBuilder<({int done, int total})>(
+                          valueListenable: ref
+                              .read(canvasProvider.notifier)
+                              .pullProgress,
+                          builder: (_, progress, __) {
+                            final label = progress.total > 0
+                                ? 'Sincronizzazione ${progress.done}/${progress.total}'
+                                : 'Sincronizzazione…';
+                            return Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    value: progress.total > 0
+                                        ? progress.done / progress.total
+                                        : null,
+                                    valueColor:
+                                        const AlwaysStoppedAnimation<Color>(
+                                            Colors.white),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  label,
+                                  style: const TextStyle(
+                                      color: Colors.white, fontSize: 12),
+                                ),
+                              ],
+                            );
+                          },
                         ),
                       ),
                     ),

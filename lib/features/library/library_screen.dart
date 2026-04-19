@@ -641,39 +641,25 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         // notebook would open showing "Nessuna pagina" forever.  Detect this
         // and fall through to a fresh server download instead.
         final corruptedLocal = pages.isEmpty && result.document.pages.isNotEmpty;
-
-        // Staleness guard: the library sync only caches the root `.ncnote`
-        // plus a delta-metadata pass that refreshes SQLite's pageCount —
-        // the actual pages aren't hydrated locally until the user opens the
-        // notebook.  If the cached ZIP has fewer pages than SQLite says
-        // (i.e. `entry.metadata.pageCount`), opening with the local data
-        // alone would force the canvas pull timer to re-download every
-        // missing page each time the notebook is opened — and if the user
-        // quits the app before `_savePulledChangesLocally` lands the
-        // merged ZIP on disk, the same download repeats on every launch
-        // ("chiudo, riapro e la sincronizzazione ricomincia da zero").
-        //
-        // Fix: when stale, do one authoritative downloadExplodedFull inside
-        // the "Apertura notebook..." dialog and persist the complete ZIP
-        // locally BEFORE we open.  Subsequent opens hit the full local
-        // cache and the pull timer has nothing to do (ETags match).
-        final libraryPageCount = entry.metadata.pageCount;
-        final staleLocal = !corruptedLocal &&
-            libraryPageCount > 0 &&
-            result.document.pages.length < libraryPageCount;
         if (corruptedLocal) {
           debugPrint('[Library] Local .ncnote for ${entry.metadata.title} has '
               '${result.document.pages.length} doc entries but 0 pages — '
               'forcing fresh download');
           localData = null; // fall through to downloadExplodedFull below
-        } else if (staleLocal) {
-          debugPrint('[Library] Local .ncnote for ${entry.metadata.title} has '
-              '${result.document.pages.length} pages but library card says '
-              '$libraryPageCount — hydrating from delta before open');
-          localData = null; // fall through to downloadExplodedFull below
         }
 
-        if (!corruptedLocal && !staleLocal) {
+        // NOTE: we no longer force a blocking `downloadExplodedFull` when
+        // the local ZIP has fewer pages than the library card shows.
+        // Previously that staleness check ran in the "Apertura notebook..."
+        // dialog and could take minutes on a 100-page first-time hydration
+        // (user complaint: "ho aspettato piu di 2 minuti e non ha sincro-
+        // nizzato tutte le strokes, la scritta sincronizzazione non e' mai
+        // apparsa").  The canvas pull timer handles missing pages
+        // incrementally, shows a live progress pill, and now persists
+        // partial state to disk after every cycle — so closing the app
+        // mid-sync no longer throws away the already-downloaded pages.
+
+        if (!corruptedLocal) {
           await ref.read(canvasProvider.notifier).openNotebook(
             metadata: result.metadata,
             document: result.document,

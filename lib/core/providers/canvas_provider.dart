@@ -227,6 +227,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// be about to change.
   final ValueNotifier<bool> isPullingFromRemote = ValueNotifier<bool>(false);
 
+  /// Live progress of the current pull: `(done, total)`. `total == 0` means
+  /// "indeterminate" (no count yet).  Wired to the sync pill so the user
+  /// sees actual progress during a long first-time hydration instead of a
+  /// generic spinner that looks like the app has hung.
+  final ValueNotifier<({int done, int total})> pullProgress =
+      ValueNotifier<({int done, int total})>((done: 0, total: 0));
+
   CanvasNotifier(this._ref) : super(null);
 
   void setViewportSize(Size size) {
@@ -5138,6 +5145,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       );
     } finally {
       isPullingFromRemote.value = false;
+      pullProgress.value = (done: 0, total: 0);
     }
   }
 
@@ -5155,36 +5163,64 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     var anyPageChanged = false;
 
     final metaFuture = syncService.downloadDeltaMeta(s.metadata.id);
-    final pagesFuture = Future.wait(
-      pagesToPull.map((pageFileName) async {
+
+    // ── Per-page download with retry + live progress counter ──
+    //
+    // The previous code fired `Future.wait` with a single attempt per
+    // page; any transient failure (Tailscale relay flap, Nextcloud
+    // hiccup, TLS reset) dropped that page and left the user's notebook
+    // incomplete until the NEXT 4-second pull cycle fired.  For a
+    // 100-page first-time hydration over a flaky network that could mean
+    // minutes of incomplete state without any visible progress.
+    //
+    // Now each page has its own 3-attempt retry loop with exponential
+    // backoff, capped by [AppConfig.webdavDeltaTimeoutSeconds] per attempt.
+    // A live counter feeds [pullProgress] so the sync pill can show
+    // "Sincronizzazione 23/100" instead of a generic spinner.
+    final completed = <String>[];
+    final failedPages = <String>[];
+    var completedCount = 0;
+    pullProgress.value = (done: 0, total: pagesToPull.length);
+
+    Future<void> pullOne(String pageFileName) async {
+      const maxAttempts = 3;
+      Object? lastError;
+      for (var attempt = 0; attempt < maxAttempts; attempt++) {
         try {
-          final remotePage = await syncService.downloadDeltaPage(
-            s.metadata.id,
-            pageFileName,
-          );
-          return (pageFileName, remotePage, null as Object?);
+          final remotePage = await syncService
+              .downloadDeltaPage(s.metadata.id, pageFileName);
+          updatedPages[pageFileName] = remotePage;
+          anyPageChanged = true;
+          completed.add(pageFileName);
+          completedCount++;
+          pullProgress.value =
+              (done: completedCount, total: pagesToPull.length);
+          return;
         } catch (e) {
-          return (pageFileName, null as PageData?, e);
+          lastError = e;
+          if (attempt == maxAttempts - 1) break;
+          // Exponential backoff: 200 ms, 600 ms, 1.8 s.
+          await Future.delayed(
+              Duration(milliseconds: 200 * (1 << attempt)));
+          // Abort all further attempts if the notebook was closed.
+          if (_disposed || state?.metadata.id != s.metadata.id) return;
         }
-      }),
-    );
-    // Await both in parallel — pages and metadata finish together
-    final results = await pagesFuture;
+      }
+      failedPages.add(pageFileName);
+      _pullHadFailures = true;
+      print('[Canvas] Failed to pull page $pageFileName '
+          'after $maxAttempts attempts: $lastError');
+    }
+
+    // Fire all pulls; the outer IOClient pool caps actual concurrency at
+    // `_maxConnectionsPerHost` (16), so this queues the rest rather than
+    // overwhelming the server.
+    await Future.wait(pagesToPull.map(pullOne));
     remoteMeta = await metaFuture;
 
-    final failedPages = <String>[];
-    for (final (fileName, page, error) in results) {
-      if (page != null) {
-        updatedPages[fileName] = page;
-        anyPageChanged = true;
-      } else {
-        failedPages.add(fileName);
-        _pullHadFailures = true;
-        print('[Canvas] Failed to pull page $fileName: $error');
-      }
-    }
     if (anyPageChanged) {
-      print('[Canvas] Pulled ${results.where((r) => r.$2 != null).length} pages in parallel');
+      print('[Canvas] Pulled ${completed.length}/${pagesToPull.length} pages '
+          '(${failedPages.length} failed)');
     }
     // Evict per-page ETags for any download that failed so the next pull
     // re-attempts them; we must NOT advance _lastPageEtags for pages we
@@ -5816,28 +5852,58 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   /// Build a ZIP from the pulled state and save it locally so changes
   /// survive close/reopen without re-downloading.
+  ///
+  /// PARTIAL saves are allowed: if the document references pages whose data
+  /// hasn't been pulled yet, they're silently dropped from the stored ZIP
+  /// AND from the stored document, so the library card stays accurate and
+  /// the next pull will re-request them via the "missingLocally" branch of
+  /// `_pullFromDeltaInner`.  This replaces the old behaviour that REFUSED
+  /// to save on any missing page — that guard was meant to prevent a
+  /// "Nessuna pagina" state but in practice it meant that on a 100-page
+  /// first-time pull a single transient failure threw away every already-
+  /// downloaded page, forcing the whole thing to restart from zero on every
+  /// app launch.
   Future<void> _savePulledChangesLocally(
     NotebookMetadata metadata,
     DocumentStructure document,
     Map<String, PageData> pages,
     Map<String, Uint8List> assets,
   ) async {
-    // Safety guard: refuse to persist a package where the document references
-    // pages that have no data in the pages map.  This would produce a
-    // .ncnote that shows "Nessuna pagina" on every subsequent open.
-    // Better to skip the save and let the next pull try again.
+    // Total abort only when we'd save a wholly empty notebook on top of a
+    // non-empty one — that's a sign the call chain is broken, not a
+    // recoverable missing-page scenario.
     if (pages.isEmpty && document.pages.isNotEmpty) {
       print('[Canvas] _savePulledChangesLocally: refusing to save — '
           'pages map is empty but document has ${document.pages.length} entries');
       return;
     }
-    final missingCount =
-        document.pages.where((e) => !pages.containsKey(e.fileName)).length;
-    if (missingCount > 0) {
-      print('[Canvas] _savePulledChangesLocally: $missingCount page entries '
-          'have no data — skipping save to avoid corrupted .ncnote');
-      return;
+
+    // Drop document entries whose page data is missing so the saved ZIP is
+    // internally consistent (every PageEntry has matching page bytes).  The
+    // server's canonical document structure is preserved via the delta
+    // folder; the next pull re-discovers the dropped entries as new pages
+    // and merges them in.
+    DocumentStructure persistedDoc = document;
+    NotebookMetadata persistedMeta = metadata;
+    final missingEntries = document.pages
+        .where((e) => !pages.containsKey(e.fileName))
+        .toList();
+    if (missingEntries.isNotEmpty) {
+      print('[Canvas] _savePulledChangesLocally: saving PARTIAL snapshot — '
+          '${missingEntries.length} / ${document.pages.length} entries have '
+          'no data yet, deferred to next pull');
+      persistedDoc = DocumentStructure(
+        notebookId: document.notebookId,
+        formatVersion: document.formatVersion,
+        pages: document.pages
+            .where((e) => pages.containsKey(e.fileName))
+            .toList(),
+      );
+      persistedMeta = metadata.copyWith(
+        pageCount: persistedDoc.pages.length,
+      );
     }
+
     try {
       final fileService = _ref.read(fileServiceProvider);
       final symbolLibs = state?.symbolLibraries
@@ -5847,8 +5913,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // them and re-encode. This is fine — happens once after a remote pull.
       final encodedPages = _encodePagesWithCache(pages);
       final package = await compute(_buildPackageInIsolate, _PackageParams(
-        metadata: metadata,
-        document: document,
+        metadata: persistedMeta,
+        document: persistedDoc,
         encodedPages: encodedPages,
         assets: assets.isNotEmpty ? assets : null,
         symbolLibraries: symbolLibs,
