@@ -413,19 +413,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       }
       if (result == 'save') await _save();
     }
-    // IMPORTANT ordering:
-    //  1) flushPendingWork() — drains pending pulls + pulled-saves +
-    //     remote-syncs so the SQLite row + .ncnote on disk reflect the
-    //     final state. Must happen BEFORE pop so the library's `.then()`
-    //     callback (fired when the route pops) sees the updated DB
-    //     metadata — otherwise a notebook that syncs e.g. 31 pages on
-    //     open still shows "1 pagina" on the library card after exit.
-    //  2) Navigator.pop() — kick off the pop animation.
-    //  3) closeNotebook() (non-awaited) — final teardown (null state,
-    //     release lock). Fire-and-forget so we don't block the pop.
+    // Fast-close flow:
+    //
+    //  1) Kick off flushPendingWork() in the background — it drains
+    //     pending pulls + pulled-saves + remote-syncs so the SQLite row
+    //     reflects the final state.  We do NOT await it before popping
+    //     because on a slow network the flush can take seconds and the
+    //     user should not be held hostage to a spinner when pressing
+    //     back.
+    //  2) Hand the flush Future to the route as the pop result.  The
+    //     library's `.then()` callback awaits it before refreshing so
+    //     the library card still shows the up-to-date pageCount the
+    //     moment the flush lands (no stale "1 pagina" card).
+    //  3) Fire closeNotebook() unawaited — it internally awaits
+    //     flushPendingWork (idempotent) and then tears down state.
     final notifier = ref.read(canvasProvider.notifier);
-    await notifier.flushPendingWork();
-    if (mounted) Navigator.of(context).pop();
+    final flushFuture = notifier.flushPendingWork();
+    if (mounted) Navigator.of(context).pop<Future<void>>(flushFuture);
     unawaited(notifier.closeNotebook());
     return false; // already popped above — don't pop again
   }

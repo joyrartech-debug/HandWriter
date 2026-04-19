@@ -4732,6 +4732,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           updatedMeta.id,
           firstPage,
           imageCache: s.imageCache,
+          // Pass the raw asset bytes too — if the canvas hasn't finished
+          // decoding every image yet (e.g. save() fires right after open
+          // on a notebook with many images), the thumbnail would render
+          // blank rectangles where the images should be without this
+          // fallback decode path.
+          assetBytes: s.assetBytes,
         );
       } catch (e) {
         debugPrint('[Canvas] Thumbnail cache failed: $e');

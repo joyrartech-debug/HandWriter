@@ -55,13 +55,52 @@ class ThumbnailService {
 
   /// Renders [page] offscreen and writes the PNG to disk.
   /// Returns the written path, or null on failure.
+  ///
+  /// [imageCache] and [assetBytes]: the canvas render engine looks up image
+  /// elements by their `assetPath` inside `imageCache`.  If the caller's
+  /// cache doesn't contain a needed image (library-screen lazy-render
+  /// path, or thumbnails rendered before the canvas decoded its assets),
+  /// we fall back to decoding the raw bytes from [assetBytes] on the fly.
+  /// Without this fallback the PNG shows a blank rectangle where every
+  /// image element would appear (the "thumbnail immagini blank" bug).
   Future<String?> renderAndCache(
     String notebookId,
     PageData page, {
     Map<String, ui.Image> imageCache = const {},
+    Map<String, Uint8List> assetBytes = const {},
   }) async {
     if (!_initialized) await init();
     try {
+      // ── Collect asset paths referenced by the page's image elements ──
+      final neededAssets = <String>{};
+      for (final el in page.layers.content) {
+        el.map(
+          stroke: (_) {},
+          text: (_) {},
+          shape: (_) {},
+          image: (img) {
+            final path = img.data.assetPath;
+            if (path.isNotEmpty) neededAssets.add(path);
+          },
+        );
+      }
+
+      // ── Decode any needed assets that aren't in the provided cache ──
+      final combinedCache = Map<String, ui.Image>.from(imageCache);
+      for (final ref in neededAssets) {
+        if (combinedCache.containsKey(ref)) continue;
+        final bytes = assetBytes[ref];
+        if (bytes == null) continue;
+        try {
+          final codec = await ui.instantiateImageCodec(bytes);
+          final frame = await codec.getNextFrame();
+          combinedCache[ref] = frame.image;
+          codec.dispose();
+        } catch (e) {
+          debugPrint('[ThumbnailService] Decode failed for asset $ref: $e');
+        }
+      }
+
       final recorder = ui.PictureRecorder();
       final size = Size(thumbWidth.toDouble(), thumbHeight.toDouble());
       final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, size.width, size.height));
@@ -74,7 +113,7 @@ class ThumbnailService {
 
       CanvasRenderEngine(
         pageData: page,
-        imageCache: imageCache,
+        imageCache: combinedCache,
       ).paint(canvas, size);
 
       final picture = recorder.endRecording();
@@ -82,6 +121,12 @@ class ThumbnailService {
       final data = await img.toByteData(format: ui.ImageByteFormat.png);
       picture.dispose();
       img.dispose();
+      // Dispose any images we decoded ourselves (not the caller's).
+      for (final ref in neededAssets) {
+        if (!imageCache.containsKey(ref) && combinedCache.containsKey(ref)) {
+          combinedCache[ref]!.dispose();
+        }
+      }
       if (data == null) return null;
 
       final file = File(thumbnailPath(notebookId));
@@ -96,8 +141,7 @@ class ThumbnailService {
   /// Lazy thumbnail generation from the local .ncnote bytes.
   /// Used when the library screen shows a notebook that never had a
   /// thumbnail cached (downloaded from the server, imported, or created
-  /// before thumbnails existed). Renders the first page without images
-  /// (imageCache empty) — good enough for a card preview.
+  /// before thumbnails existed).
   /// No-op if a thumbnail already exists.
   Future<String?> ensureFromNcnoteBytes(
     String notebookId,
@@ -121,7 +165,36 @@ class ThumbnailService {
       if (firstPageFile == null) return null;
       final json = jsonDecode(utf8.decode(firstPageFile.content as List<int>));
       final page = PageData.fromJson(json as Map<String, dynamic>);
-      return renderAndCache(notebookId, page);
+
+      // Collect only the asset bytes referenced by this first page so the
+      // thumbnail renders image elements instead of blank rectangles.
+      final neededRefs = <String>{};
+      for (final el in page.layers.content) {
+        el.map(
+          stroke: (_) {},
+          text: (_) {},
+          shape: (_) {},
+          image: (img) {
+            final path = img.data.assetPath;
+            if (path.isNotEmpty) neededRefs.add(path);
+          },
+        );
+      }
+      final assetBytes = <String, Uint8List>{};
+      if (neededRefs.isNotEmpty) {
+        const assetsPrefix = '${AppConfig.assetsDir}/';
+        for (final f in archive.files) {
+          if (!f.isFile) continue;
+          if (!f.name.startsWith(assetsPrefix)) continue;
+          final ref = f.name.substring(assetsPrefix.length);
+          if (ref.isEmpty) continue;
+          if (!neededRefs.contains(ref)) continue;
+          assetBytes[ref] =
+              Uint8List.fromList(f.content as List<int>);
+        }
+      }
+
+      return renderAndCache(notebookId, page, assetBytes: assetBytes);
     } catch (e) {
       debugPrint('[ThumbnailService] Lazy render failed for $notebookId: $e');
       return null;

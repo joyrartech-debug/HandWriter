@@ -267,6 +267,69 @@ class NotebookListNotifier
       }
     }
 
+    // ── Lightweight library-meta refresh for ETag-unchanged notebooks ──
+    //
+    // The root `.ncnote` ETag doesn't move when another device delta-syncs
+    // (it writes to `.sync/<id>/*` and never re-packs the root), so the
+    // ETag-skip above can leave the library card stuck at an old page
+    // count even though the real content moved on.  Fix: for every
+    // ETag-unchanged notebook, fetch ONLY `.sync/<id>/metadata.json` (tiny)
+    // and upsert its pageCount/title into SQLite.  This is much cheaper
+    // than downloading the whole delta tree but keeps the library card
+    // accurate between opens.
+    final etagUnchanged = <Map<String, dynamic>>[];
+    for (final file in remoteFiles) {
+      final remotePath = '${AppConfig.defaultRemotePath}${file.name}';
+      final localRow = localByPath[remotePath];
+      if (localRow == null) continue;
+      final localEtag = localRow['etag'] as String?;
+      if (localEtag == null || localEtag != file.etag) continue;
+      // Only ETag-unchanged notebooks that we didn't already redownload.
+      etagUnchanged.add(localRow);
+    }
+    if (etagUnchanged.isNotEmpty && mounted) {
+      const metaConcurrency = 6;
+      for (var i = 0; i < etagUnchanged.length; i += metaConcurrency) {
+        if (!mounted) return;
+        final batch = etagUnchanged.skip(i).take(metaConcurrency).toList();
+        final metas = await Future.wait(batch.map((row) {
+          final id = row['id'] as String;
+          return syncService.downloadDeltaMetadataOnly(id);
+        }));
+        for (var k = 0; k < batch.length; k++) {
+          final row = batch[k];
+          final deltaMeta = metas[k];
+          if (deltaMeta == null) continue;
+          final id = row['id'] as String;
+          final existingCount = row['page_count'] as int? ?? 0;
+          final existingTitle = row['title'] as String? ?? '';
+          // Skip the UPDATE when nothing user-visible differs — avoids
+          // spurious SQLite writes and library rebuilds.
+          if (existingCount == deltaMeta.pageCount &&
+              existingTitle == deltaMeta.title) {
+            continue;
+          }
+          await fileService.upsertNotebookMeta(
+            id: id,
+            title: deltaMeta.title,
+            remotePath: row['remote_path'] as String? ?? '',
+            etag: row['etag'] as String?,
+            localModifiedAt: deltaMeta.modifiedAt,
+            remoteModifiedAt: row['remote_modified_at'] != null
+                ? DateTime.tryParse(row['remote_modified_at'] as String)
+                : null,
+            syncStatus: row['sync_status'] as String? ?? 'synced',
+            fileSize: row['file_size'] as int?,
+            coverColor: deltaMeta.coverColor,
+            paperType: deltaMeta.paperType,
+            pageCount: deltaMeta.pageCount,
+            createdAt: deltaMeta.createdAt,
+          );
+          changed = true;
+        }
+      }
+    }
+
     // ── Detect remote deletions: remove notebooks no longer on server ──
     for (final row in localRows) {
       final rp = row['remote_path'] as String? ?? '';
@@ -290,21 +353,26 @@ class NotebookListNotifier
     }
   }
 
-  /// Download a single notebook, parse metadata off main thread, and cache it.
-  /// Returns true on success, false on failure.
+  /// Download a single notebook's cache + library metadata.
   ///
   /// IMPORTANT: the `<name>.ncnote` file at the server root is NOT updated
   /// by other devices doing delta-sync — they write pages directly to the
   /// `.sync/<id>/` folder and never re-pack the monolithic ZIP.  Downloading
-  /// the root `.ncnote` therefore yields a stale snapshot (often just the
-  /// single page the notebook was created with), which the library then
-  /// shows as "1 pagina" until the user opens the notebook and the canvas
-  /// pull timer merges the actual content.
+  /// the root `.ncnote` therefore yields a stale snapshot for the page
+  /// count (often just "1 pagina" until the user opens the notebook).
   ///
-  /// Fix: after reading metadata from the root `.ncnote`, check whether a
-  /// delta folder exists on the server; if so, pull the authoritative
-  /// exploded state, rebuild the `.ncnote`, and cache that instead.  The
-  /// library card then shows the real page count immediately.
+  /// Two-stage strategy to keep the library fast AND show a correct count:
+  ///   1. Cache the root `.ncnote` bytes as-is so `_openNotebook` has
+  ///      something to open instantly offline.
+  ///   2. Fetch ONLY `.sync/<id>/metadata.json` (tiny, ~1 KB) and use
+  ///      that metadata to stamp the library card — gives real pageCount
+  ///      without downloading all pages.  Pages are fetched on-demand by
+  ///      the canvas pull timer when the notebook is opened.
+  ///
+  /// Previously this did a full `downloadExplodedFull` on every notebook
+  /// on first-sync, which issued N+1 HTTP requests per notebook (N pages
+  /// + assets + PROPFINDs).  For a library of 10 large notebooks this
+  /// turned into 1000+ requests sequentially → "estremamente lento".
   Future<bool> _downloadAndCache(
     dynamic webdav,
     SyncService syncService,
@@ -322,87 +390,61 @@ class NotebookListNotifier
             fullData, context: 'downloadAndCache $remotePath');
 
         // Parse metadata off the main thread (cheap, single-file decode)
-        final metadata = await SyncService.parseNcnoteMetadataIsolate(fullData);
+        final rootMeta = await SyncService.parseNcnoteMetadataIsolate(fullData);
 
-        // ── Prefer exploded delta folder when present (authoritative) ──
+        // ── Get authoritative pageCount from delta folder if present ──
         //
-        // Other devices write new pages to `.sync/<id>/pages/*.json` and
-        // touch `.sync/<id>/metadata.json` as the commit marker, but they
-        // never re-pack the monolithic `.ncnote` at the server root — so
-        // the root ZIP is stale the moment a second device edits the
-        // notebook.  On first-install we want the real state, not the
-        // leftover single-page snapshot.
-        Uint8List cacheBytes = fullData;
-        int cachePageCount = metadata.pageCount;
-        NotebookMetadata cacheMeta = metadata;
-        DateTime cacheModifiedAt = metadata.modifiedAt;
-
-        bool deltaExists = false;
-        try {
-          deltaExists = await syncService.deltaFolderExists(metadata.id);
-        } catch (_) {
-          deltaExists = false;
-        }
-
-        if (deltaExists) {
-          try {
-            final exploded =
-                await syncService.downloadExplodedFull(metadata.id);
-            // Rebuild a fresh .ncnote from the exploded content so the local
-            // cache reflects the true current state.
-            cacheBytes = SyncService.buildPackageBytes(
-              metadata: exploded.metadata,
-              document: exploded.document,
-              pages: exploded.pages,
-              assets: exploded.assets,
-              symbolLibraries: exploded.symbolLibraries,
-            );
-            SyncService.validateNcnoteArchive(cacheBytes,
-                context: 'downloadAndCache exploded ${metadata.id}');
-            cachePageCount = exploded.document.pages.isNotEmpty
-                ? exploded.document.pages.length
-                : exploded.metadata.pageCount;
-            cacheMeta = exploded.metadata;
-            cacheModifiedAt = exploded.metadata.modifiedAt;
-            debugPrint('[Library] Hydrated ${metadata.title} from delta '
-                'folder ($cachePageCount pages, ${cacheBytes.length} bytes)');
-          } catch (e) {
-            // Exploded download failed — fall back to the (possibly stale)
-            // root .ncnote so the user at least has something offline.
-            debugPrint('[Library] Delta hydrate failed for '
-                '${metadata.title}, using stale root .ncnote: $e');
-          }
+        // Fetch only `.sync/<id>/metadata.json` (≤1 KB) to refresh the
+        // library card.  We deliberately do NOT pull the exploded pages
+        // here — that's what made initial sync crawl.  The canvas opens
+        // from the cached root .ncnote and the pull timer brings in any
+        // newer page data on first view.
+        //
+        // Kicked off in parallel with the root ZIP parse so the two
+        // round-trips overlap rather than serialising.
+        NotebookMetadata libraryMeta = rootMeta;
+        DateTime libraryModifiedAt = rootMeta.modifiedAt;
+        final deltaMeta =
+            await syncService.downloadDeltaMetadataOnly(rootMeta.id);
+        if (deltaMeta != null) {
+          libraryMeta = deltaMeta;
+          libraryModifiedAt = deltaMeta.modifiedAt;
+          debugPrint('[Library] Refreshed library meta for '
+              '"${rootMeta.title}" from delta '
+              '(pageCount=${deltaMeta.pageCount})');
         } else {
-          // No delta folder — legacy notebook, root .ncnote is authoritative.
-          // Still run the old integrity check so a truncated download fails
-          // loudly rather than caching partial data.
-          if (metadata.pageCount > 0) {
+          // No delta metadata (legacy single-device notebook or transient
+          // network failure) — fall back to the root .ncnote's metadata
+          // and integrity-check it since it's now our source of truth.
+          if (rootMeta.pageCount > 0) {
             final actualPages = syncService.extractAllPages(fullData);
-            if (actualPages.length < metadata.pageCount) {
+            if (actualPages.length < rootMeta.pageCount) {
               throw CorruptedArchiveException(
                 'Page count mismatch for $remotePath: '
-                'metadata says ${metadata.pageCount} pages, '
+                'metadata says ${rootMeta.pageCount} pages, '
                 'archive contains ${actualPages.length}',
               );
             }
           }
         }
 
-        // Save file + DB entry
-        await fileService.saveNotebookFile(cacheMeta.id, cacheBytes);
+        // Save file + DB entry (root .ncnote is what we cache locally;
+        // the canvas pull will overwrite it with the exploded state when
+        // the user opens the notebook for the first time).
+        await fileService.saveNotebookFile(rootMeta.id, fullData);
         await fileService.upsertNotebookMeta(
-          id: cacheMeta.id,
-          title: cacheMeta.title,
+          id: rootMeta.id,
+          title: libraryMeta.title,
           remotePath: remotePath,
           etag: file.etag,
-          localModifiedAt: cacheModifiedAt,
+          localModifiedAt: libraryModifiedAt,
           remoteModifiedAt: file.lastModified,
           syncStatus: 'synced',
-          fileSize: cacheBytes.length,
-          coverColor: cacheMeta.coverColor,
-          paperType: cacheMeta.paperType,
-          pageCount: cachePageCount,
-          createdAt: cacheMeta.createdAt,
+          fileSize: fullData.length,
+          coverColor: libraryMeta.coverColor,
+          paperType: libraryMeta.paperType,
+          pageCount: libraryMeta.pageCount,
+          createdAt: libraryMeta.createdAt,
         );
         return true;
       } catch (e) {

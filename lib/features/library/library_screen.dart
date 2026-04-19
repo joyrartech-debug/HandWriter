@@ -662,8 +662,18 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
           if (mounted) {
             Navigator.pop(context);
-            Navigator.push(context, MaterialPageRoute(builder: (_) => const CanvasScreen()))
-                .then((_) {
+            Navigator.push<Object?>(
+              context,
+              MaterialPageRoute(builder: (_) => const CanvasScreen()),
+            ).then((result) async {
+              // The canvas screen hands back its flushPendingWork()
+              // future as the pop result so we can await it without
+              // blocking the pop animation.  Refreshing BEFORE the
+              // flush lands would re-read a stale SQLite row and the
+              // library card would still show the old pageCount.
+              if (result is Future) {
+                try { await result; } catch (_) {}
+              }
               if (mounted) {
                 ref.read(notebookListProvider.notifier).refresh();
               }
@@ -720,7 +730,17 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
       if (mounted) {
         Navigator.pop(context);
-        Navigator.push(context, MaterialPageRoute(builder: (_) => const CanvasScreen()));
+        Navigator.push<Object?>(
+          context,
+          MaterialPageRoute(builder: (_) => const CanvasScreen()),
+        ).then((result) async {
+          if (result is Future) {
+            try { await result; } catch (_) {}
+          }
+          if (mounted) {
+            ref.read(notebookListProvider.notifier).refresh();
+          }
+        });
       }
     } catch (e) {
       if (mounted) {

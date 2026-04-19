@@ -821,6 +821,26 @@ class SyncService {
     return PageData.fromJson(json as Map<String, dynamic>);
   }
 
+  /// Fetches ONLY `.sync/<id>/metadata.json` — a ≤1 KB file containing the
+  /// authoritative library-card info (title, pageCount, coverColor, ...).
+  /// Much cheaper than [downloadDeltaMeta] (which also pulls the entire
+  /// document.json) or [downloadExplodedFull] (which pulls every page).
+  ///
+  /// Returns null on any error so the caller can fall back to the root
+  /// .ncnote metadata without propagating a failure.
+  Future<NotebookMetadata?> downloadDeltaMetadataOnly(String notebookId) async {
+    try {
+      final bytes = await _webdav
+          .downloadFile('${_deltaDir(notebookId)}metadata.json')
+          .timeout(const Duration(seconds: 10));
+      return NotebookMetadata.fromJson(
+        jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Downloads metadata + document from the exploded folder.
   /// Parallel download — both requests fire simultaneously.
   Future<({NotebookMetadata metadata, DocumentStructure document})>
