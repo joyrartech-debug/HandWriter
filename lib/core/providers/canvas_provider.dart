@@ -40,6 +40,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// race each other. Only one can modify state at a time.
   Completer<void>? _syncLock;
   bool _disposed = false;
+
+   /// Tracks the in-flight remote save (launched fire-and-forget by save())
+  /// so [closeNotebook] can await it — otherwise we may null out state while
+  /// syncDelta is still mid-upload, abandoning the upload (PUT on the page
+  /// file happened, but metadata.json never lands → server has half a
+  /// commit which the next pull will try to reconcile).
+  Future<void>? _pendingRemoteSave;
+
   /// Tracks the latest in-flight local save of pulled-from-remote changes.
   /// Needed so [closeNotebook] can await it — otherwise the user can exit
   /// fast enough after a pull that the merged state never hits disk, and
@@ -106,6 +114,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// must never be used to diff notebook-B's remote state, or the first
   /// pull on B either misses real changes or fakes false positives.
   String? _etagNotebookId;
+
+  /// Set to true by [_pullFromDeltaDownload] when any page/asset download
+  /// failed in the current pull cycle. [_pullRemoteChanges] checks this flag
+  /// before advancing [_remoteMetaEtag] — advancing the meta ETag on a
+  /// partial pull would lie to the next sync ("already in sync") and those
+  /// missing pages would never be retried until the remote file changed
+  /// again.
+  bool _pullHadFailures = false;
+
 
   /// True while a multi-step bulk operation (e.g. PDF import) is in
   /// progress. Pull cycles are suppressed so an intervening network
@@ -452,6 +469,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       try { await pendingSave; } catch (_) {}
     }
     _pendingPulledLocalSave = null;
+
+    // Await any in-flight remote sync (launched fire-and-forget by save())
+    // — without this, exiting during an upload can leave a half-committed
+    // delta folder on the server (pages written, metadata.json stale),
+    // which another device will then see as a conflict.
+    final pendingRemoteSave = _pendingRemoteSave;
+    if (pendingRemoteSave != null) {
+      try { await pendingRemoteSave; } catch (_) {}
+    }
+    _pendingRemoteSave = null;
 
     // Only now tear down — everything that needed state has finished.
     _disposed = true;
@@ -3282,8 +3309,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // image on a different page, or worse, under a conflicting assetId).
     final ownerNotebookId = state?.metadata.id;
     if (ownerNotebookId == null) return;
+    ui.Codec? codec;
     try {
-      final codec = await ui.instantiateImageCodec(bytes);
+      codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
       final image = frame.image;
       // Re-check: still the same notebook, still not disposed, assetBytes
@@ -3295,10 +3323,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         return;
       }
       final newCache = Map<String, ui.Image>.from(state!.imageCache);
+      // Dispose any previously cached image for this assetId to avoid GPU
+      // memory leaks on iPad when re-decoding (e.g. after a pull merge or
+      // a crop that reuses the same assetId).
+      final previous = newCache[assetId];
+      if (previous != null && !identical(previous, image)) {
+        previous.dispose();
+      }
       newCache[assetId] = image;
       state = state!.copyWith(imageCache: newCache);
     } catch (_) {
       // Image decoding failed — placeholder will be shown
+    } finally {
+      // Dispose the codec to release native decoder resources.
+      // On iPad, leaking codecs quickly exhausts GPU memory and causes the
+      // renderer to be jettisoned by the OS.
+      codec?.dispose();
     }
   }
 
@@ -3347,12 +3387,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       Paint()..filterQuality = FilterQuality.high,
     );
     final picture = recorder.endRecording();
-    final croppedImage = await picture.toImage(cropW, cropH);
-
-    // Encode the cropped image to PNG bytes
-    final byteData = await croppedImage.toByteData(format: ui.ImageByteFormat.png);
-    if (byteData == null) return;
-    final croppedBytes = Uint8List.view(byteData.buffer);
+    ui.Image croppedImage;
+    Uint8List croppedBytes;
+    try {
+      croppedImage = await picture.toImage(cropW, cropH);
+      // Encode the cropped image to PNG bytes
+      final byteData = await croppedImage.toByteData(format: ui.ImageByteFormat.png);
+      if (byteData == null) {
+        croppedImage.dispose();
+        return;
+      }
+      croppedBytes = Uint8List.fromList(byteData.buffer.asUint8List());
+    } finally {
+      // Picture holds GPU/CPU display-list memory; release ASAP.
+      picture.dispose();
+    }
 
     final newAssetId = '${const Uuid().v4()}_cropped.png';
 
@@ -3401,6 +3450,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // Update caches
     final newCache = Map<String, ui.Image>.from(s.imageCache);
+    // Defensive: if a previous image happened to be keyed under the new
+    // (unique UUID) assetId — shouldn't happen but we've seen IDs collide
+    // after aborted crop+undo sequences — dispose it before replacing.
+    final previousAtNewId = newCache[newAssetId];
+    if (previousAtNewId != null && !identical(previousAtNewId, croppedImage)) {
+      previousAtNewId.dispose();
+    }
     newCache[newAssetId] = croppedImage;
     final newAssets = Map<String, Uint8List>.from(s.assetBytes);
     newAssets[newAssetId] = croppedBytes;
@@ -4575,7 +4631,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // Hand the lock to a background task that waits for the remote sync
     // to finish (or fail), then releases the lock.
-    () async {
+    //
+    // Track the background task so closeNotebook() can await it.
+    // Without this, the user can exit mid-upload and the sync ends up
+    // half-committed on the server (pages uploaded, metadata.json never
+    // rewritten), which the next pull then has to reconcile as a conflict.
+    _pendingRemoteSave = () async {
       try {
         await remoteSyncFuture;
       } catch (e) {
@@ -4587,6 +4648,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         _releaseSyncLock();
       }
     }();
+    // Clear the tracking slot when this particular save settles — a later
+    // save() may have already replaced it, so only clear if still us.
+    final thisRemoteSave = _pendingRemoteSave;
+    unawaited(thisRemoteSave!.whenComplete(() {
+      if (identical(_pendingRemoteSave, thisRemoteSave)) {
+        _pendingRemoteSave = null;
+      }
+    }));
     return true;
   }
 
@@ -4697,6 +4766,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state!.pendingConflicts.isNotEmpty) return;
     if (state!.pendingRemoteChanges != null) return;
     _isPulling = true;
+    _pullHadFailures = false;
     // NOTE: isPullingFromRemote is NOT flipped here. The pill should only
     // appear when we're actually *downloading* new remote content — not
     // during every 30-second PROPFIND poll, which is silent and quick.
@@ -4744,8 +4814,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         // switched mid-pull, the merge aborted and the pulled pages never
         // reached local disk — advancing the ETag here would tell the next
         // session "you're already in sync" and permanently lose those pages.
-        if (state != null && state!.metadata.id == pullNotebookId) {
+        if (state != null &&
+            state!.metadata.id == pullNotebookId &&
+            !_pullHadFailures) {
           _remoteMetaEtag = changeState.metaEtag;
+        } else if (_pullHadFailures) {
+          print('[Canvas] Pull had failures — leaving _remoteMetaEtag stale '
+              'so next sync retries missing content');
         }
       }
     } catch (e) {
@@ -4753,7 +4828,31 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     } finally {
       _isPulling = false;
       isPullingFromRemote.value = false;
-      _releaseSyncLock();
+      // Hand the lock to a background task that awaits any local-save
+      // spawned by acceptRemoteChanges() before releasing. Without this
+      // the next save() / pull can race the pulled ZIP rewrite on disk:
+      //   • save() would overwrite the on-disk file before the pulled
+      //     pages are persisted → pulled edits lost on next open
+      //   • the _pageJsonCache would be re-populated out of order
+      final pendingSave = _pendingPulledLocalSave;
+      if (pendingSave == null) {
+        _releaseSyncLock();
+      } else {
+        () async {
+          try {
+            await pendingSave;
+          } catch (e) {
+            print('[Canvas] Pending pulled-save failed: $e');
+          } finally {
+            // Clear only if still the same future (a later pull may have
+            // replaced it).
+            if (identical(_pendingPulledLocalSave, pendingSave)) {
+              _pendingPulledLocalSave = null;
+            }
+            _releaseSyncLock();
+          }
+        }();
+      }
     }
   }
 
@@ -4882,17 +4981,33 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final results = await pagesFuture;
     remoteMeta = await metaFuture;
 
+    final failedPages = <String>[];
     for (final (fileName, page, error) in results) {
       if (page != null) {
         updatedPages[fileName] = page;
         anyPageChanged = true;
       } else {
+        failedPages.add(fileName);
+        _pullHadFailures = true;
         print('[Canvas] Failed to pull page $fileName: $error');
       }
     }
     if (anyPageChanged) {
       print('[Canvas] Pulled ${results.where((r) => r.$2 != null).length} pages in parallel');
     }
+    // Evict per-page ETags for any download that failed so the next pull
+    // re-attempts them; we must NOT advance _lastPageEtags for pages we
+    // didn't actually receive.
+    if (failedPages.isNotEmpty) {
+      for (final fn in failedPages) {
+        // Keep the previous ETag we had (if any) so the "changed" comparison
+        // still picks this page up next time the ETag actually changes again,
+        // but ensure the new remotePageEtags entry for this file does NOT
+        // make it into _lastPageEtags below.
+        remotePageEtags = Map.of(remotePageEtags)..remove(fn);
+      }
+    }
+
 
     // Download new assets in parallel
     // Collect asset references from both assetReferences list AND image elements
@@ -4940,12 +5055,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             }
           }),
         );
-        for (final (ref, data, _) in batchResults) {
+        for (final (ref, data, err) in batchResults) {
           if (data != null) {
             updatedAssets[ref] = data;
             newlyDownloaded[ref] = data;
             anyPageChanged = true;
             downloadedCount++;
+          } else if (err != null) {
+            _pullHadFailures = true;
+            print('[Canvas] Failed to pull asset $ref: $err');
           }
         }
       }
@@ -5285,6 +5403,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // await it — otherwise exiting immediately after an auto-accept loses
     // the pulled pages (they're in memory but the .ncnote wasn't rewritten
     // in time).
+    //
+    // Validate BEFORE kicking off the save: the merged state already lives
+    // in the notifier's state, so if we let _savePulledChangesLocally's own
+    // skip conditions trigger later, the in-memory merge survives but disk
+    // never catches up → first re-open reverts to pre-merge .ncnote and
+    // the pulled pages silently vanish.
+    final missingCount = repaired.document.pages
+        .where((e) => !repaired.pages.containsKey(e.fileName))
+        .length;
+    if (repaired.pages.isEmpty && repaired.document.pages.isNotEmpty) {
+      print('[Canvas] acceptRemoteChanges: merged pages empty — '
+          'skipping disk persist but state updated; next pull will retry');
+      return;
+    }
+    if (missingCount > 0) {
+      print('[Canvas] acceptRemoteChanges: $missingCount merged page entries '
+          'have no data — skipping disk persist; next pull will retry');
+      return;
+    }
     _pendingPulledLocalSave = _savePulledChangesLocally(
       mergedMeta, repaired.document,
       repaired.pages, mergedAssets,
@@ -5307,6 +5444,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final s = state!;
     final updatedPages = Map<String, PageData>.from(s.pages);
     var anyRemoteAccepted = false;
+    var anyLocalKept = false;
 
     for (final conflict in s.pendingConflicts) {
       final keepLocal = resolutions[conflict.fileName] ?? true;
@@ -5315,19 +5453,39 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         anyRemoteAccepted = true;
         print('[Canvas] Conflict resolved → REMOTE: ${conflict.fileName}');
       } else {
+        anyLocalKept = true;
+        // Force the local page to be treated as dirty so the next save
+        // uploads it — otherwise the server still holds the rejected
+        // remote version and other devices will re-pull that version.
+        _dirtyPageFileNames.add(conflict.fileName);
         print('[Canvas] Conflict resolved → LOCAL: ${conflict.fileName}');
       }
     }
+    // For pages whose local version won the conflict, set their baseline
+    // to the CURRENT local page so the next diff doesn't mistake them as
+    // still locally-edited; for pages where remote won, baseline is the
+    // new (remote) content.
+    //
+    // IMPORTANT: pages NOT involved in the conflict keep their previous
+    // _lastSyncedPages entry intact — overwriting with the current in-memory
+    // page would hide legitimate local edits on unrelated pages.
+    final newBaseline = Map<String, PageData>.from(_lastSyncedPages);
+    for (final conflict in s.pendingConflicts) {
+      newBaseline[conflict.fileName] = updatedPages[conflict.fileName]!;
+    }
+    _lastSyncedPages = newBaseline;
 
-    _lastSyncedPages = Map.of(updatedPages);
     state = s.copyWith(
       pages: updatedPages,
-      isDirty: anyRemoteAccepted || s.isDirty,
+      isDirty: anyRemoteAccepted || anyLocalKept || s.isDirty,
       clearPendingConflicts: true,
     );
 
     // Save merged result locally + trigger sync
-    if (anyRemoteAccepted) {
+    // Save merged result locally + trigger sync whenever the user touched
+    // the conflict set, regardless of direction — keep-local still needs an
+    // upload so the server reflects the user's chosen version.
+    if (anyRemoteAccepted || anyLocalKept) {
       _triggerSaveAfterConflictResolution();
     }
   }
