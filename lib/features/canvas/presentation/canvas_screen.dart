@@ -1543,7 +1543,120 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
     final currentPage = canvasState.currentPage;
     if (currentPage == null) {
-      return const Scaffold(body: Center(child: Text('Nessuna pagina')));
+      // Two distinct null-currentPage cases:
+      //  (A) Notebook has zero pages altogether — rare, show plain message.
+      //  (B) The PageEntry exists but its PageData is missing (server lost
+      //      the file / partial pull / corruption). Offer recovery actions
+      //      so the user isn't trapped — previously the canvas silently
+      //      fell back to a different page's content, which hid the bug
+      //      entirely ("pagine di 1P inv uguali a Control's prima pagina").
+      final doc = canvasState.document;
+      final isMissing = doc.pages.isNotEmpty &&
+          canvasState.currentPageIndex >= 0 &&
+          canvasState.currentPageIndex < doc.pages.length;
+      final missingCount = ref
+          .read(canvasProvider.notifier)
+          .missingPageCount();
+      return Scaffold(
+        appBar: AppBar(
+          title: Text(canvasState.metadata.title),
+          leading: IconButton(
+            icon: const Icon(Icons.arrow_back),
+            onPressed: () => _onWillPop(),
+          ),
+        ),
+        body: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  isMissing ? Icons.warning_amber_rounded : Icons.description_outlined,
+                  size: 64,
+                  color: Colors.orange.shade600,
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  isMissing
+                      ? 'Dati pagina mancanti'
+                      : 'Nessuna pagina',
+                  style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                ),
+                if (isMissing) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    missingCount > 1
+                        ? 'Questa pagina e altre ${missingCount - 1} non sono state '
+                          'recuperate dal server. I file potrebbero essere '
+                          'andati persi durante una sincronizzazione parziale.'
+                        : 'Il file di questa pagina non è stato recuperato dal '
+                          'server. Potrebbe essere andato perso durante una '
+                          'sincronizzazione parziale.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.grey.shade700),
+                  ),
+                  const SizedBox(height: 24),
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 8,
+                    alignment: WrapAlignment.center,
+                    children: [
+                      OutlinedButton.icon(
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Riprova sync'),
+                        onPressed: () {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Sincronizzazione in corso…'),
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        },
+                      ),
+                      FilledButton.tonalIcon(
+                        icon: const Icon(Icons.note_add_outlined),
+                        label: const Text('Ripristina come pagina vuota'),
+                        onPressed: () async {
+                          final n = ref.read(canvasProvider.notifier);
+                          n.repairMissingPageData(canvasState.currentPageIndex);
+                          await n.save();
+                        },
+                      ),
+                      if (missingCount > 1)
+                        FilledButton.icon(
+                          icon: const Icon(Icons.auto_fix_high),
+                          label: Text('Ripristina tutte ($missingCount)'),
+                          onPressed: () async {
+                            final messenger = ScaffoldMessenger.of(context);
+                            final n = ref.read(canvasProvider.notifier);
+                            final repaired = n.repairAllMissingPages();
+                            await n.save();
+                            if (!mounted) return;
+                            messenger.showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                    '$repaired pagine ripristinate come vuote'),
+                              ),
+                            );
+                          },
+                        ),
+                      TextButton.icon(
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Elimina pagina'),
+                        onPressed: () {
+                          ref.read(canvasProvider.notifier)
+                              .deletePage(canvasState.currentPageIndex);
+                        },
+                      ),
+                    ],
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      );
     }
 
     return PopScope(

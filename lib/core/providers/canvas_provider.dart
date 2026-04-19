@@ -4221,6 +4221,85 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   // ── Page management ──
 
+  /// Replace a PageEntry whose PageData is missing with a fresh blank page.
+  ///
+  /// Used to recover from server-side corruption: when the delta folder
+  /// references page files that were never uploaded (or were deleted), the
+  /// notebook is permanently stuck with "Nessuna pagina" on the affected
+  /// pages and no amount of re-syncing will restore them.  This method
+  /// replaces the missing entry with a blank PageData so the user can at
+  /// least continue to use the notebook; subsequent save() re-uploads the
+  /// fresh blank page to the server, ending the corruption cycle.
+  ///
+  /// Caller is expected to trigger save() afterwards (or let auto-save fire).
+  bool repairMissingPageData(int docIndex) {
+    if (state == null) return false;
+    final s = state!;
+    if (docIndex < 0 || docIndex >= s.document.pages.length) return false;
+    final entry = s.document.pages[docIndex];
+    // Only repair if data is genuinely missing — do not clobber real content.
+    if (s.pages.containsKey(entry.fileName)) return false;
+
+    final now = DateTime.now();
+    // Inherit background from the surrounding page so the visual style of
+    // the notebook stays consistent.
+    final referencePage = s.pages.isNotEmpty ? s.pages.values.first : null;
+    final bgType = referencePage?.layers.background.type ?? 'blank';
+    final lineSpacing = referencePage?.layers.background.lineSpacing ?? 30.0;
+    final width = referencePage?.width ?? AppConfig.defaultPageWidth;
+    final height = referencePage?.height ?? AppConfig.defaultPageHeight;
+
+    final blank = PageData(
+      pageId: entry.pageId,
+      pageNumber: entry.pageNumber,
+      width: width,
+      height: height,
+      layers: RenderingLayers(
+        background: BackgroundLayer(type: bgType, lineSpacing: lineSpacing),
+        content: const [],
+      ),
+      createdAt: now,
+      modifiedAt: now,
+    );
+
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[entry.fileName] = blank;
+    // Track as dirty so next save() pushes the blank page and clears the
+    // server-side gap.
+    _dirtyPageFileNames.add(entry.fileName);
+
+    state = s.copyWith(pages: updatedPages, isDirty: true);
+    print('[Canvas] repairMissingPageData: restored ${entry.fileName} '
+        'as blank at index $docIndex');
+    return true;
+  }
+
+  /// Count how many PageEntries in the current document reference a
+  /// fileName whose PageData is missing from [state.pages].
+  int missingPageCount() {
+    final s = state;
+    if (s == null) return 0;
+    var count = 0;
+    for (final entry in s.document.pages) {
+      if (!s.pages.containsKey(entry.fileName)) count++;
+    }
+    return count;
+  }
+
+  /// Heal every page whose data is missing. Returns the number of pages
+  /// that were replaced with a blank.
+  int repairAllMissingPages() {
+    final s = state;
+    if (s == null) return 0;
+    var repaired = 0;
+    for (int i = 0; i < s.document.pages.length; i++) {
+      if (!state!.pages.containsKey(s.document.pages[i].fileName)) {
+        if (repairMissingPageData(i)) repaired++;
+      }
+    }
+    return repaired;
+  }
+
   void deletePage(int index) {
     if (state == null || state!.pageCount <= 1) return;
     final s = state!;

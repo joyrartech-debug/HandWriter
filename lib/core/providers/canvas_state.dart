@@ -437,16 +437,17 @@ class CanvasState {
     // Guard against out-of-bounds index (shouldn't happen, but be safe).
     final safeIdx = currentPageIndex.clamp(0, document.pages.length - 1);
     final entry = document.pages[safeIdx];
-    final page = pages[entry.fileName];
-    if (page != null) return page;
-    // Fallback: the pages Map is missing the current fileName (e.g. a
-    // partial pull that didn't download every page). Try to return page 0
-    // so the screen stays usable rather than showing "Nessuna pagina".
-    for (final e in document.pages) {
-      final p = pages[e.fileName];
-      if (p != null) return p;
-    }
-    return null;
+    return pages[entry.fileName];
+    //
+    // Nota: in passato qui c'era un fallback che tornava la prima pagina
+    // disponibile quando `pages[entry.fileName]` era null. Rimosso perché
+    // mostrava il contenuto di un altro capitolo come se fosse la pagina
+    // richiesta, mascherando pagine la cui data era andata persa sul
+    // server ("nel capitolo 1P inv, dopo la pagina 41 in poi escono tutte
+    // uguali alla prima pagina del capitolo Control").
+    // Meglio mostrare "Nessuna pagina" così l'utente capisce che c'è un
+    // problema reale e può usare il meccanismo di recovery (healMissing
+    // Pages) invece di vedere dati sbagliati.
   }
 
   String get currentPageFileName => document.pages[currentPageIndex].fileName;
