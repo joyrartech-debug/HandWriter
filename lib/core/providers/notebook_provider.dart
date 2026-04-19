@@ -383,6 +383,19 @@ class NotebookListNotifier
     const maxRetries = 2;
     for (var attempt = 0; attempt < maxRetries; attempt++) {
       try {
+        // ── Best-effort UUID extraction from filename ──────────────────
+        // The app names new notebooks as `${sanitized_title}_${uuid}.ncnote`.
+        // If the pattern matches we can kick off the delta-metadata GET in
+        // PARALLEL with the root download, halving the per-notebook latency
+        // on the initial sync pass.  If the filename doesn't embed a UUID,
+        // fall back to sequential fetch after parsing the root ZIP.
+        final uuidRe = RegExp(
+            r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.ncnote$');
+        final uuidMatch = uuidRe.firstMatch(file.name);
+        final Future<NotebookMetadata?> deltaFut = uuidMatch != null
+            ? syncService.downloadDeltaMetadataOnly(uuidMatch.group(1)!)
+            : Future.value(null);
+
         final Uint8List fullData = await webdav.downloadFile(remotePath);
 
         // Validate ZIP integrity before touching anything else
@@ -393,19 +406,24 @@ class NotebookListNotifier
         final rootMeta = await SyncService.parseNcnoteMetadataIsolate(fullData);
 
         // ── Get authoritative pageCount from delta folder if present ──
-        //
-        // Fetch only `.sync/<id>/metadata.json` (≤1 KB) to refresh the
-        // library card.  We deliberately do NOT pull the exploded pages
-        // here — that's what made initial sync crawl.  The canvas opens
-        // from the cached root .ncnote and the pull timer brings in any
-        // newer page data on first view.
-        //
-        // Kicked off in parallel with the root ZIP parse so the two
-        // round-trips overlap rather than serialising.
         NotebookMetadata libraryMeta = rootMeta;
         DateTime libraryModifiedAt = rootMeta.modifiedAt;
-        final deltaMeta =
-            await syncService.downloadDeltaMetadataOnly(rootMeta.id);
+        NotebookMetadata? deltaMeta = await deltaFut;
+        // If the filename didn't embed a UUID we couldn't start the delta
+        // fetch in parallel — run it now with the real ID from metadata.
+        if (deltaMeta == null && uuidMatch == null) {
+          deltaMeta =
+              await syncService.downloadDeltaMetadataOnly(rootMeta.id);
+        }
+        // Safety: a UUID-from-filename mismatch (user renamed file?) would
+        // make the parallel fetch return the wrong metadata.  Trust the root
+        // ZIP's ID — if the two diverge, fall back to a fresh fetch by the
+        // real ID.
+        if (deltaMeta != null &&
+            uuidMatch != null &&
+            deltaMeta.id != rootMeta.id) {
+          deltaMeta = await syncService.downloadDeltaMetadataOnly(rootMeta.id);
+        }
         if (deltaMeta != null) {
           libraryMeta = deltaMeta;
           libraryModifiedAt = deltaMeta.modifiedAt;

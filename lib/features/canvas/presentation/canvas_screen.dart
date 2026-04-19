@@ -220,11 +220,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
-      // App is being backgrounded or screen locked — flush unsaved work.
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      // App is being backgrounded / screen locked / process about to die.
       // Skip if we're already tearing down (via _onWillPop → closeNotebook)
       // to avoid two concurrent save paths fighting over the .ncnote.
       if (_closing) return;
+
+      // Flush any in-flight pull-save / remote-sync so pages downloaded
+      // by the pull timer actually land on disk before the OS kills us.
+      // Without this, closing the PC/iPad app right after a pull would
+      // lose all the downloaded pages — next launch would re-run the
+      // same pull from scratch ("chiudo riapro e la sync ricomincia").
+      unawaited(ref.read(canvasProvider.notifier).flushPendingWork());
+
       final canvas = ref.read(canvasProvider);
       if (canvas != null && canvas.isDirty && !_isSaving) {
         _save(silent: true);

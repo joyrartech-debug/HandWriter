@@ -431,28 +431,58 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
   }
 
+  /// SharedPreferences key for a notebook's last-observed delta metadata
+  /// ETag.  Persisting this across app launches lets the first pull on
+  /// re-open short-circuit when nothing changed server-side, eliminating
+  /// the redundant "download all ETags + diff them" round-trip that made
+  /// re-opening feel like a fresh sync ("chiudo riapro e la sync
+  /// ricomincia").
+  static String _deltaMetaEtagPrefsKey(String notebookId) =>
+      'delta_meta_etag_$notebookId';
+
   /// Fetch current page ETags from the server and cache them so the first
   /// pull cycle has a baseline to diff against.
   ///
-  /// IMPORTANT: we intentionally do NOT set _remoteMetaEtag here.
-  /// Setting it would suppress the very first _pullRemoteChanges() call
-  /// (which fires immediately on open), because that call gates on
-  ///   changeState.metaEtag != _remoteMetaEtag
-  /// If _initPageEtags races ahead and sets _remoteMetaEtag to the current
-  /// remote value, the pull sees a match and exits early — the user is left
-  /// with the (potentially stale) local .ncnote instead of the fresh server
-  /// state.  Let _pullRemoteChanges own _remoteMetaEtag exclusively.
+  /// Also primes [_remoteMetaEtag] from SharedPreferences (not from the
+  /// live server ETag — see the note below).  This lets the immediate
+  /// `_pullRemoteChanges` on open compare the cached meta ETag against
+  /// the fresh one and skip the whole pull when they match.
   Future<void> _initPageEtags(String notebookId) async {
     try {
+      // Load last-saved meta ETag so first-pull can skip cheaply when
+      // server state hasn't moved.  Only use it if we don't already have
+      // one in memory (e.g. same notebook re-opened without notebook-switch).
+      if (_remoteMetaEtag == null) {
+        try {
+          final prefs = await SharedPreferences.getInstance();
+          final persisted =
+              prefs.getString(_deltaMetaEtagPrefsKey(notebookId));
+          if (persisted != null && persisted.isNotEmpty) {
+            _remoteMetaEtag = persisted;
+          }
+        } catch (_) {}
+      }
+
       final syncService = _ref.read(syncServiceProvider);
       if (syncService == null) return;
       final changeState = await syncService.getRemoteChangeState(notebookId);
       _lastPageEtags = Map.of(changeState.pageEtags);
-      // _remoteMetaEtag intentionally NOT set here — see doc comment above.
-      debugPrint('[Canvas] Initialized ${_lastPageEtags.length} page ETags');
+      debugPrint('[Canvas] Initialized ${_lastPageEtags.length} page ETags '
+          '(persisted meta etag: ${_remoteMetaEtag != null})');
     } catch (e) {
       debugPrint('[Canvas] Could not init page ETags: $e');
     }
+  }
+
+  /// Persist the current [_remoteMetaEtag] so next app launch can skip the
+  /// redundant first pull when nothing changed on the server.
+  Future<void> _persistRemoteMetaEtag(String notebookId) async {
+    final etag = _remoteMetaEtag;
+    if (etag == null || etag.isEmpty) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_deltaMetaEtagPrefsKey(notebookId), etag);
+    } catch (_) {}
   }
 
   /// Drain every in-flight pull / pulled-save / remote-save so the .ncnote +
@@ -4850,6 +4880,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     await fileService.markNotebookSynced(updatedMeta.id, result.metaEtag);
+    unawaited(_persistRemoteMetaEtag(updatedMeta.id));
     print('[Canvas] Delta synced: ${dirtyPages.length} pages → server '
         '(${result.pageEtags.length} etags captured)');
   }
@@ -4916,7 +4947,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final syncService = _ref.read(syncServiceProvider);
       if (syncService == null) return;
 
-      // Fetch metadata ETag + page ETags in parallel
+      // ── Fast path: cheap HEAD on metadata.json only ──
+      //
+      // The common case on every 4-second poll (and most notebook opens)
+      // is "nothing changed".  A full getRemoteChangeState does PROPFIND
+      // on metadata.json AND a directory listing on pages/, so two HTTP
+      // round-trips per poll even when there's nothing to do.  Doing a
+      // HEAD first lets the no-change path exit with a single request,
+      // which matters on high-latency networks (mobile data, VPN).
+      //
+      // If the meta ETag matches we skip the pages/ listing entirely.
+      // If it differs we still do the full fetch so the diff logic has
+      // fresh page ETags to work with.
+      final fastMetaEtag = await syncService.getDeltaMetaEtag(pullNotebookId);
+      if (state == null || state!.metadata.id != pullNotebookId) {
+        print('[Canvas] Pull aborted — notebook switched during PROPFIND '
+            '(expected $pullNotebookId, got ${state?.metadata.id})');
+        return;
+      }
+      if (fastMetaEtag != null &&
+          _remoteMetaEtag != null &&
+          fastMetaEtag == _remoteMetaEtag) {
+        // Server unchanged since last known etag — no pull needed.  This
+        // is the hot path that makes re-open of a fully-hydrated notebook
+        // effectively free.
+        return;
+      }
+
+      // Fetch metadata ETag + page ETags in parallel (only on change path)
       final changeState = await syncService.getRemoteChangeState(pullNotebookId);
 
       // Guard: did the user switch notebooks while we were awaiting the
@@ -4949,6 +5007,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             state!.metadata.id == pullNotebookId &&
             !_pullHadFailures) {
           _remoteMetaEtag = changeState.metaEtag;
+          // Persist so next cold-start's first pull can skip immediately.
+          unawaited(_persistRemoteMetaEtag(pullNotebookId));
         } else if (_pullHadFailures) {
           print('[Canvas] Pull had failures — leaving _remoteMetaEtag stale '
               'so next sync retries missing content');
