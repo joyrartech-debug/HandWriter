@@ -619,7 +619,7 @@ class SyncService {
   }
 
   /// Delta upload: sends only the changed pages + metadata + document.
-  /// Returns the ETag from the metadata upload (used as sync token).
+  /// Returns metadata.json ETag + the per-page ETags we actually wrote.
   ///
   /// Upload order ensures consistency:
   ///  1. Assets + pages in parallel (data files)
@@ -632,7 +632,13 @@ class SyncService {
   ///
   /// If any data upload fails, metadata is NOT updated → other devices
   /// see the old consistent state rather than a partial one.
-  Future<String?> syncDelta({
+  ///
+  /// The returned `pageEtags` map contains ETags from THIS upload only.
+  /// Callers should merge these into their cached ETag table rather than
+  /// replace it — replacing would swallow concurrent uploads from other
+  /// devices (the next pull would treat those pages as unchanged and
+  /// silently miss remote edits).
+  Future<({String? metaEtag, Map<String, String> pageEtags})> syncDelta({
     required String notebookId,
     required NotebookMetadata metadata,
     required DocumentStructure document,
@@ -649,28 +655,38 @@ class SyncService {
     if (deletedPageFileNames != null && deletedPageFileNames.isNotEmpty) {
       for (final fileName in deletedPageFileNames) {
         deleteFutures.add(
-          _webdav.delete('${dir}pages/$fileName').catchError((_) {}),
+          _webdav.delete('${dir}pages/$fileName').catchError((Object e) {
+            // Swallow 404 (already gone) but surface real failures in logs so
+            // they don't disappear silently — the upstream Future.wait doesn't
+            // propagate them either because of this catchError.
+            if (e is WebDavException && e.statusCode == 404) return;
+            debugPrint('[Sync] Delete of pages/$fileName failed: $e');
+          }),
         );
       }
     }
 
     // ── Phase 1: Upload data files (pages + assets + symbols) in parallel ──
-    final dataFutures = <Future<String?>>[];
     const dt = AppConfig.webdavDeltaTimeoutSeconds;
+    final pageUploads = <String, Future<String?>>{};
+    final otherUploads = <Future<String?>>[];
 
-    // Dirty pages
+    // Dirty pages — track the future per-page so we can harvest per-page
+    // ETags from PUT responses (Nextcloud returns one in the ETag header),
+    // avoiding an extra PROPFIND roundtrip afterwards that can mask
+    // concurrent uploads from other devices.
     for (final e in dirtyPages.entries) {
       final bytes = Uint8List.fromList(
         utf8.encode(jsonEncode(e.value.toJson())),
       );
-      dataFutures.add(_webdav.uploadFile('${dir}pages/${e.key}', bytes,
-          timeoutSeconds: dt));
+      pageUploads[e.key] = _webdav.uploadFile(
+          '${dir}pages/${e.key}', bytes, timeoutSeconds: dt);
     }
 
     // Dirty assets (may be larger — use default timeout)
     if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
       for (final e in dirtyAssets.entries) {
-        dataFutures.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
+        otherUploads.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
       }
     }
 
@@ -679,7 +695,7 @@ class SyncService {
       final symBytes = Uint8List.fromList(
         utf8.encode(jsonEncode(symbolLibraries)),
       );
-      dataFutures.add(_webdav.uploadFile('${dir}symbols.json', symBytes,
+      otherUploads.add(_webdav.uploadFile('${dir}symbols.json', symBytes,
           timeoutSeconds: dt));
     }
 
@@ -689,10 +705,17 @@ class SyncService {
     final docBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(document.toJson())),
     );
-    dataFutures.add(_webdav.uploadFile('${dir}document.json', docBytes,
+    otherUploads.add(_webdav.uploadFile('${dir}document.json', docBytes,
         timeoutSeconds: dt));
 
-    await Future.wait([...dataFutures, ...deleteFutures]);
+    // Await every data + delete future BEFORE writing the commit marker.
+    // If any page upload fails, its future throws here → metadata.json is
+    // NOT written → the server stays in the previous consistent state.
+    await Future.wait([
+      ...pageUploads.values,
+      ...otherUploads,
+      ...deleteFutures,
+    ]);
 
     // ── Phase 2: Upload metadata.json LAST (commit marker) ──
     final metaBytes = Uint8List.fromList(
@@ -701,10 +724,23 @@ class SyncService {
     final metaEtag = await _webdav.uploadFile('${dir}metadata.json', metaBytes,
         timeoutSeconds: dt);
 
+    // Harvest per-page ETags from successful PUT responses.
+    final pageEtags = <String, String>{};
+    for (final entry in pageUploads.entries) {
+      try {
+        final etag = await entry.value;
+        if (etag != null && etag.isNotEmpty) {
+          pageEtags[entry.key] = etag.replaceAll('"', '');
+        }
+      } catch (_) {
+        // Already surfaced via Future.wait above; ignore here.
+      }
+    }
+
     debugPrint('[Sync] Delta sync: ${dirtyPages.length} pages, '
         '${dirtyAssets?.length ?? 0} assets → $dir');
 
-    return metaEtag;
+    return (metaEtag: metaEtag, pageEtags: pageEtags);
   }
 
   /// Gets ETags for all pages in the exploded folder.

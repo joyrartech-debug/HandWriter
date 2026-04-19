@@ -4704,7 +4704,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     List<String>? deletedPages,
   }) async {
     debugPrint('[Canvas] Starting delta sync: ${dirtyPages.length} pages');
-    final etag = await syncService.syncDelta(
+    final result = await syncService.syncDelta(
       notebookId: updatedMeta.id,
       metadata: updatedMeta,
       document: document,
@@ -4714,13 +4714,29 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       deletedPageFileNames: deletedPages,
     );
 
-    _remoteMetaEtag = etag;
-    // Snapshot page ETags to avoid re-pulling our own save. Still awaited
-    // because it runs under the sync lock on the background path — pulls
-    // are gated on this lock, so we don't need to race the UI for it.
-    _lastPageEtags = await syncService.getRemotePageEtags(updatedMeta.id);
-    await fileService.markNotebookSynced(updatedMeta.id, etag);
-    print('[Canvas] Delta synced: ${dirtyPages.length} pages → server');
+    _remoteMetaEtag = result.metaEtag;
+    // MERGE (not replace) the per-page ETags we just uploaded into the cache.
+    //
+    // Using a full PROPFIND here — the old behaviour — is racy: between our
+    // syncDelta completing and the PROPFIND returning, another device can
+    // upload a different page; its ETag would land in our cache and the next
+    // pull would diff its already-up-to-date ETag against itself, concluding
+    // "no change" → we'd silently miss that remote edit.
+    //
+    // Merging only the pages WE wrote leaves all other entries untouched, so
+    // the next pull still detects any concurrent uploads from other devices.
+    for (final entry in result.pageEtags.entries) {
+      _lastPageEtags[entry.key] = entry.value;
+    }
+    // Purge deleted pages so the pull diff doesn't resurrect them.
+    if (deletedPages != null) {
+      for (final fn in deletedPages) {
+        _lastPageEtags.remove(fn);
+      }
+    }
+    await fileService.markNotebookSynced(updatedMeta.id, result.metaEtag);
+    print('[Canvas] Delta synced: ${dirtyPages.length} pages → server '
+        '(${result.pageEtags.length} etags captured)');
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -5422,10 +5438,50 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           'have no data — skipping disk persist; next pull will retry');
       return;
     }
-    _pendingPulledLocalSave = _savePulledChangesLocally(
-      mergedMeta, repaired.document,
-      repaired.pages, mergedAssets,
-    );
+    // Two callers reach this point:
+    //   a) auto-accept from inside _pullFromDeltaDownload (sync lock ALREADY
+    //      held by the enclosing _pullRemoteChanges call), and
+    //   b) user tap on the "accept" button in the remote-changes banner
+    //      (no lock held — pull already released it long ago).
+    //
+    // Only (b) can race a concurrent save(): the in-memory state has just
+    // been replaced with `repaired.pages`, but the rebuilt ZIP hasn't hit
+    // disk yet.  If save() fires first it writes the CORRECT state, then
+    // _savePulledChangesLocally lands later with an older snapshot and
+    // silently truncates the user's latest edits ("accepted, drew, exited,
+    // on re-open stroke is gone").
+    //
+    // The sync lock already serialises save() / pull correctly for case (a),
+    // so all we need in (b) is to hold the lock while this pulled-save
+    // actually writes.  `_isPulling` tells us which case we're in.
+    if (_isPulling) {
+      _pendingPulledLocalSave = _savePulledChangesLocally(
+        mergedMeta, repaired.document, repaired.pages, mergedAssets,
+      );
+    } else {
+      _pendingPulledLocalSave = _runPulledSaveLocked(
+        mergedMeta, repaired.document, repaired.pages, mergedAssets,
+      );
+    }
+  }
+
+  /// Runs [_savePulledChangesLocally] while holding the sync lock so a
+  /// concurrent `save()` can't land a newer ZIP on disk before the pulled
+  /// state has been persisted (or vice-versa — either ordering loses data
+  /// when they run in parallel).
+  Future<void> _runPulledSaveLocked(
+    NotebookMetadata metadata,
+    DocumentStructure document,
+    Map<String, PageData> pages,
+    Map<String, Uint8List> assets,
+  ) async {
+    final locked = await _acquireSyncLock();
+    if (!locked) return;
+    try {
+      await _savePulledChangesLocally(metadata, document, pages, assets);
+    } finally {
+      _releaseSyncLock();
+    }
   }
 
   /// User dismissed the incoming remote changes — keep local state.

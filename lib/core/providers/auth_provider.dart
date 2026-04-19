@@ -71,12 +71,18 @@ class CredentialsNotifier extends StateNotifier<NextcloudCredentials?> {
 }
 
 /// Provider per il servizio WebDAV, dipende dalle credenziali.
+///
+/// On logout/credentials change the underlying `http.Client` must be closed
+/// explicitly, otherwise the socket + connection pool leak for the lifetime
+/// of the app (noticeable after repeated login/logout cycles on iPad).
 final webdavServiceProvider = Provider<WebDavService?>((ref) {
   final creds = ref.watch(credentialsProvider);
   if (creds == null) return null;
-  return WebDavService(
+  final service = WebDavService(
     serverUrl: creds.serverUrl,
     username: creds.username,
     password: creds.password,
   );
+  ref.onDispose(service.dispose);
+  return service;
 });

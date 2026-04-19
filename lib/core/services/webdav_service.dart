@@ -340,67 +340,98 @@ class WebDavService {
   }
 
   /// Parsa la risposta XML Multi-Status di PROPFIND.
+  ///
+  /// Robusto contro risposte malformate (server buggati, proxy che alterano
+  /// il namespace, propstat con status != 200): ogni entry che non espone i
+  /// campi attesi viene semplicemente saltata invece di far esplodere
+  /// l'intera listing con un NoSuchElementError.
   List<WebDavItem> _parseMultiStatus(String xml, String requestPath) {
     final document = XmlDocument.parse(xml);
     final responses = document.findAllElements('d:response');
     final items = <WebDavItem>[];
 
     for (final response in responses) {
-      final href = response.findElements('d:href').first.innerText;
-      final decodedHref = Uri.decodeFull(href);
+      try {
+        final hrefEls = response.findElements('d:href');
+        if (hrefEls.isEmpty) continue;
+        final href = hrefEls.first.innerText;
+        final decodedHref = Uri.decodeFull(href);
 
-      // Salta l'entry della directory stessa
-      final normalizedRequest = requestPath.endsWith('/')
-          ? requestPath
-          : '$requestPath/';
-      if (decodedHref.endsWith(normalizedRequest) ||
-          decodedHref == _davUrl + normalizedRequest) {
-        continue;
+        // Salta l'entry della directory stessa
+        final normalizedRequest = requestPath.endsWith('/')
+            ? requestPath
+            : '$requestPath/';
+        if (decodedHref.endsWith(normalizedRequest) ||
+            decodedHref == _davUrl + normalizedRequest) {
+          continue;
+        }
+
+        // Preferisci il propstat con status 200 (alcuni server restituiscono
+        // più propstat: uno con i successi, uno con le prop not-found).
+        final propstats = response.findElements('d:propstat').toList();
+        if (propstats.isEmpty) continue;
+        XmlElement? propstat;
+        for (final ps in propstats) {
+          final statusEls = ps.findElements('d:status');
+          if (statusEls.isEmpty) continue;
+          if (statusEls.first.innerText.contains('200')) {
+            propstat = ps;
+            break;
+          }
+        }
+        propstat ??= propstats.first;
+
+        final propEls = propstat.findElements('d:prop');
+        if (propEls.isEmpty) continue;
+        final prop = propEls.first;
+
+        final rtEls = prop.findElements('d:resourcetype');
+        final isDir = rtEls.isNotEmpty &&
+            rtEls.first.findElements('d:collection').isNotEmpty;
+
+        final segments =
+            decodedHref.split('/').where((s) => s.isNotEmpty).toList();
+        if (segments.isEmpty) continue;
+        final name = Uri.decodeFull(segments.last);
+
+        String? etag;
+        final etagEl = prop.findElements('d:getetag');
+        if (etagEl.isNotEmpty) {
+          etag = etagEl.first.innerText.replaceAll('"', '');
+        }
+
+        int? contentLength;
+        final clEl = prop.findElements('d:getcontentlength');
+        if (clEl.isNotEmpty && clEl.first.innerText.isNotEmpty) {
+          contentLength = int.tryParse(clEl.first.innerText);
+        }
+
+        DateTime? lastModified;
+        final lmEl = prop.findElements('d:getlastmodified');
+        if (lmEl.isNotEmpty && lmEl.first.innerText.isNotEmpty) {
+          lastModified = _parseHttpDate(lmEl.first.innerText);
+        }
+
+        String? contentType;
+        final ctEl = prop.findElements('d:getcontenttype');
+        if (ctEl.isNotEmpty) {
+          contentType = ctEl.first.innerText;
+        }
+
+        items.add(WebDavItem(
+          path: decodedHref,
+          name: name,
+          isDirectory: isDir,
+          contentLength: contentLength,
+          etag: etag,
+          lastModified: lastModified,
+          contentType: contentType,
+        ));
+      } catch (e) {
+        // Singola entry malformata non deve invalidare tutta la listing.
+        // ignore: avoid_print
+        print('[WebDAV] Skipping malformed PROPFIND entry: $e');
       }
-
-      final propstat = response.findElements('d:propstat').first;
-      final prop = propstat.findElements('d:prop').first;
-
-      final resourceType = prop.findElements('d:resourcetype').first;
-      final isDir = resourceType.findElements('d:collection').isNotEmpty;
-
-      final name = Uri.decodeFull(
-        decodedHref.split('/').where((s) => s.isNotEmpty).last,
-      );
-
-      String? etag;
-      final etagEl = prop.findElements('d:getetag');
-      if (etagEl.isNotEmpty) {
-        etag = etagEl.first.innerText.replaceAll('"', '');
-      }
-
-      int? contentLength;
-      final clEl = prop.findElements('d:getcontentlength');
-      if (clEl.isNotEmpty && clEl.first.innerText.isNotEmpty) {
-        contentLength = int.tryParse(clEl.first.innerText);
-      }
-
-      DateTime? lastModified;
-      final lmEl = prop.findElements('d:getlastmodified');
-      if (lmEl.isNotEmpty && lmEl.first.innerText.isNotEmpty) {
-        lastModified = _parseHttpDate(lmEl.first.innerText);
-      }
-
-      String? contentType;
-      final ctEl = prop.findElements('d:getcontenttype');
-      if (ctEl.isNotEmpty) {
-        contentType = ctEl.first.innerText;
-      }
-
-      items.add(WebDavItem(
-        path: decodedHref,
-        name: name,
-        isDirectory: isDir,
-        contentLength: contentLength,
-        etag: etag,
-        lastModified: lastModified,
-        contentType: contentType,
-      ));
     }
 
     return items;

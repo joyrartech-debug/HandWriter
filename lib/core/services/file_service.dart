@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
@@ -33,6 +35,17 @@ class FileService {
 
   bool _initialized = false;
   bool get isInitialized => _initialized;
+
+  /// Per-notebook save serialisation. Two concurrent writers (e.g. save()
+  /// and _savePulledChangesLocally()) must not race on the same .ncnote
+  /// path or the later rename can truncate the earlier ZIP mid-flush.
+  final Map<String, Future<void>> _saveLocks = {};
+
+  /// Counter used to guarantee a unique tmp filename per-invocation so two
+  /// concurrent writers on the same notebook never stomp each other's tmp
+  /// file (each then rename-atomically into the real path, serialised via
+  /// [_saveLocks]).
+  int _tmpCounter = 0;
 
   // ── Initialization ──
 
@@ -104,6 +117,27 @@ class FileService {
   /// Before overwriting the existing file, snapshots the previous version
   /// to `snapshots/<id>/<timestamp>.ncnote` keeping only the latest [_maxSnapshots].
   Future<void> saveNotebookFile(String notebookId, Uint8List data) async {
+    // Serialise concurrent writes to the same notebook so the later rename
+    // never overwrites an in-flight tmp file and so the two producers don't
+    // each leave a truncated .ncnote behind (the "save() vs _savePulledChanges
+    // Locally() race" path).
+    final prev = _saveLocks[notebookId];
+    final completer = Completer<void>();
+    _saveLocks[notebookId] = completer.future;
+    try {
+      if (prev != null) {
+        try { await prev; } catch (_) {}
+      }
+      await _writeNotebookAtomic(notebookId, data);
+    } finally {
+      completer.complete();
+      if (identical(_saveLocks[notebookId], completer.future)) {
+        _saveLocks.remove(notebookId);
+      }
+    }
+  }
+
+  Future<void> _writeNotebookAtomic(String notebookId, Uint8List data) async {
     final path = localPath(notebookId);
 
     // Roll a snapshot of the previous version (best-effort, never blocks save).
@@ -116,12 +150,23 @@ class FileService {
       debugPrint('[FileService] Snapshot rotation failed for $notebookId: $e');
     }
 
-    final tmpPath = '$path.tmp';
-    // Atomic write: write to temp file, then rename
+    // Unique tmp path per call — belt-and-braces alongside _saveLocks so a
+    // crash mid-save never leaves a stale "$path.tmp" that a subsequent save
+    // would silently overwrite.
+    final ts = DateTime.now().microsecondsSinceEpoch;
+    final seq = (++_tmpCounter).toRadixString(36);
+    final rand = math.Random().nextInt(1 << 31).toRadixString(36);
+    final tmpPath = '$path.$ts-$seq-$rand.tmp';
     final tmpFile = File(tmpPath);
-    await tmpFile.writeAsBytes(data, flush: true);
-    await tmpFile.rename(path);
-    debugPrint('[FileService] Saved $notebookId (${data.length} bytes)');
+    try {
+      await tmpFile.writeAsBytes(data, flush: true);
+      await tmpFile.rename(path);
+      debugPrint('[FileService] Saved $notebookId (${data.length} bytes)');
+    } catch (e) {
+      // Clean the tmp file on any failure so we don't leak scratch files.
+      try { if (await tmpFile.exists()) await tmpFile.delete(); } catch (_) {}
+      rethrow;
+    }
   }
 
   /// Copies the current .ncnote into the snapshot folder and prunes older ones.
@@ -129,7 +174,12 @@ class FileService {
     final dir = Directory(p.join(_snapshotsDir, notebookId));
     await dir.create(recursive: true);
 
-    final stamp = DateTime.now().millisecondsSinceEpoch.toString();
+    // Microsecond + counter stamp so two rotations landing on the same
+    // millisecond don't collide (older snapshot would otherwise be
+    // silently overwritten on the second `copy`).
+    final micro = DateTime.now().microsecondsSinceEpoch;
+    final seq = (++_tmpCounter).toRadixString(36);
+    final stamp = '${micro}_$seq';
     final dest = File(p.join(dir.path, '$stamp${AppConfig.fileExtension}'));
     await source.copy(dest.path);
 
@@ -153,8 +203,14 @@ class FileService {
     await for (final entry in dir.list()) {
       if (entry is! File || !entry.path.endsWith(AppConfig.fileExtension)) continue;
       final name = p.basenameWithoutExtension(entry.path);
-      final ms = int.tryParse(name);
-      if (ms == null) continue;
+      // Accept both legacy "1700000000000" (ms) and new "1700000000000000_3q"
+      // (µs + counter) naming so existing snapshots remain listable.
+      final stampPart = name.split('_').first;
+      final stampInt = int.tryParse(stampPart);
+      if (stampInt == null) continue;
+      final ms = stampInt > 100000000000000 // µs if beyond year ~5138 in ms
+          ? stampInt ~/ 1000
+          : stampInt;
       out.add((DateTime.fromMillisecondsSinceEpoch(ms), entry.path));
     }
     out.sort((a, b) => b.$1.compareTo(a.$1));
