@@ -41,6 +41,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   Completer<void>? _syncLock;
   bool _disposed = false;
 
+  /// Incremented every time [openNotebook] runs. A deferred [closeNotebook]
+  /// compares its starting generation against this — if the user re-opens
+  /// a notebook before the previous close's teardown lands, the newer open
+  /// would otherwise see its freshly-set state immediately nulled out,
+  /// producing a stuck "Nessun notebook aperto" canvas.
+  int _openGeneration = 0;
+
    /// Tracks the in-flight remote save (launched fire-and-forget by save())
   /// so [closeNotebook] can await it — otherwise we may null out state while
   /// syncDelta is still mid-upload, abandoning the upload (PUT on the page
@@ -251,6 +258,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, Uint8List>? assets,
     List<SymbolLibrary>? symbolLibraries,
   }) async {
+    // Bump the generation so any deferred teardown from a previous close
+    // bails out instead of nulling the state we're about to populate.
+    _openGeneration++;
     // Await so that state is set before the caller pushes CanvasScreen.
     // Without this, CanvasScreen briefly shows "Nessun notebook aperto"
     // (the null-state fallback) while SharedPreferences loads.
@@ -445,19 +455,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
   }
 
-  Future<void> closeNotebook() async {
-    // Stop the timer so it doesn't fire a fresh pull after this point.
+  /// Drain every in-flight pull / pulled-save / remote-save so the .ncnote +
+  /// SQLite metadata are up to date on disk.  Keeps `state` alive so the UI
+  /// doesn't flash the "Nessun notebook aperto" fallback while the caller is
+  /// still animating a pop.
+  ///
+  /// **Call this BEFORE `Navigator.pop()`** if the caller relies on reloading
+  /// library metadata after the pop — otherwise the library's `.then()` fires
+  /// as soon as the pop begins and reads a stale SQLite row (the bug where a
+  /// notebook syncs 31 pages on open but the library card stays at "1 pagina"
+  /// after exit because the pulled-save hadn't reached SQLite yet).
+  Future<void> flushPendingWork() async {
     _pullTimer?.cancel();
     _pullTimer = null;
     _saveLastPosition();
 
-    // Critical ordering — DO NOT null state yet. We need to:
-    //   1. Let any in-flight pull finish (so it can apply + persist
-    //      pulled pages), and
-    //   2. Let the resulting local-save future land on disk,
-    // BEFORE dropping state. Otherwise exiting right after the pull
-    // populates the canvas causes the pulled pages to "disappear"
-    // on re-open — the user's "ci rientro ed e' scomparso tutto" bug.
     final pendingPull = _pendingPullFuture;
     if (pendingPull != null) {
       try { await pendingPull; } catch (_) {}
@@ -479,6 +491,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       try { await pendingRemoteSave; } catch (_) {}
     }
     _pendingRemoteSave = null;
+  }
+
+  Future<void> closeNotebook() async {
+    // Snapshot the generation: if another openNotebook() fires while we're
+    // draining, the new open bumps [_openGeneration], and the teardown
+    // below is skipped — otherwise we'd null out the freshly-populated
+    // state and the canvas would be stuck on "Nessun notebook aperto".
+    final myGen = _openGeneration;
+
+    // Drain first so pulled pages + metadata actually land on disk before
+    // the notifier tears down (the "ci rientro ed è scomparso tutto" bug).
+    await flushPendingWork();
+
+    if (_openGeneration != myGen) {
+      // A newer open superseded us — the new generation owns `state` now.
+      // Do not touch disposal flags or null the state.
+      return;
+    }
 
     // Only now tear down — everything that needed state has finished.
     _disposed = true;
@@ -5430,12 +5460,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         .length;
     if (repaired.pages.isEmpty && repaired.document.pages.isNotEmpty) {
       print('[Canvas] acceptRemoteChanges: merged pages empty — '
-          'skipping disk persist but state updated; next pull will retry');
+          'skipping .ncnote persist but refreshing DB metadata');
+      // Still refresh the library-visible metadata so the card reflects the
+      // (partial) pull — otherwise after a failed pull the notebook is stuck
+      // showing the install-time pageCount (e.g. "1 pagina") until the user
+      // opens it again and a retry succeeds.
+      _pendingPulledLocalSave = _persistPulledMetaOnly(mergedMeta);
       return;
     }
     if (missingCount > 0) {
       print('[Canvas] acceptRemoteChanges: $missingCount merged page entries '
-          'have no data — skipping disk persist; next pull will retry');
+          'have no data — skipping .ncnote persist but refreshing DB metadata');
+      _pendingPulledLocalSave = _persistPulledMetaOnly(mergedMeta);
       return;
     }
     // Two callers reach this point:
@@ -5462,6 +5498,41 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       _pendingPulledLocalSave = _runPulledSaveLocked(
         mergedMeta, repaired.document, repaired.pages, mergedAssets,
       );
+    }
+  }
+
+  /// Refresh just the SQLite metadata row for a notebook whose pulled
+  /// content couldn't be fully materialised on disk (partial pull, missing
+  /// page data). Keeps the library card in sync with what the user sees
+  /// in memory even when the .ncnote rewrite has to be deferred to a
+  /// retry, so a notebook doesn't stay pinned at "1 pagina" after a flaky
+  /// first-sync.
+  Future<void> _persistPulledMetaOnly(NotebookMetadata metadata) async {
+    try {
+      final fileService = _ref.read(fileServiceProvider);
+      final s = state;
+      final existingSize = s == null
+          ? 0
+          : (await fileService.readNotebookFile(metadata.id))?.length ?? 0;
+      await fileService.upsertNotebookMeta(
+        id: metadata.id,
+        title: metadata.title,
+        remotePath: s?.remotePath ?? '',
+        // Leave syncStatus as 'modified' so the next sync cycle will retry
+        // the missing pages (synced would mask the incomplete state).
+        etag: _remoteMetaEtag,
+        localModifiedAt: metadata.modifiedAt,
+        syncStatus: 'modified',
+        fileSize: existingSize,
+        coverColor: metadata.coverColor,
+        paperType: metadata.paperType,
+        pageCount: metadata.pageCount,
+        createdAt: metadata.createdAt,
+      );
+      print('[Canvas] Refreshed DB meta for partial pull '
+          '(pageCount=${metadata.pageCount})');
+    } catch (e) {
+      print('[Canvas] Could not refresh DB meta after partial pull: $e');
     }
   }
 

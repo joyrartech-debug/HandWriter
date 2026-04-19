@@ -413,14 +413,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       }
       if (result == 'save') await _save();
     }
-    // Pop FIRST to eliminate the black-screen flash. closeNotebook awaits
-    // in-flight pulls/saves — if we wait for it before popping, state goes
-    // null while the screen is still in the tree and the user sees a blank
-    // Scaffold for the whole pop-animation duration.
-    // We capture the notifier before pop because ref may be invalid after.
+    // IMPORTANT ordering:
+    //  1) flushPendingWork() — drains pending pulls + pulled-saves +
+    //     remote-syncs so the SQLite row + .ncnote on disk reflect the
+    //     final state. Must happen BEFORE pop so the library's `.then()`
+    //     callback (fired when the route pops) sees the updated DB
+    //     metadata — otherwise a notebook that syncs e.g. 31 pages on
+    //     open still shows "1 pagina" on the library card after exit.
+    //  2) Navigator.pop() — kick off the pop animation.
+    //  3) closeNotebook() (non-awaited) — final teardown (null state,
+    //     release lock). Fire-and-forget so we don't block the pop.
     final notifier = ref.read(canvasProvider.notifier);
+    await notifier.flushPendingWork();
     if (mounted) Navigator.of(context).pop();
-    await notifier.closeNotebook();
+    unawaited(notifier.closeNotebook());
     return false; // already popped above — don't pop again
   }
 

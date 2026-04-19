@@ -292,6 +292,19 @@ class NotebookListNotifier
 
   /// Download a single notebook, parse metadata off main thread, and cache it.
   /// Returns true on success, false on failure.
+  ///
+  /// IMPORTANT: the `<name>.ncnote` file at the server root is NOT updated
+  /// by other devices doing delta-sync — they write pages directly to the
+  /// `.sync/<id>/` folder and never re-pack the monolithic ZIP.  Downloading
+  /// the root `.ncnote` therefore yields a stale snapshot (often just the
+  /// single page the notebook was created with), which the library then
+  /// shows as "1 pagina" until the user opens the notebook and the canvas
+  /// pull timer merges the actual content.
+  ///
+  /// Fix: after reading metadata from the root `.ncnote`, check whether a
+  /// delta folder exists on the server; if so, pull the authoritative
+  /// exploded state, rebuild the `.ncnote`, and cache that instead.  The
+  /// library card then shows the real page count immediately.
   Future<bool> _downloadAndCache(
     dynamic webdav,
     SyncService syncService,
@@ -308,38 +321,88 @@ class NotebookListNotifier
         SyncService.validateNcnoteArchive(
             fullData, context: 'downloadAndCache $remotePath');
 
-        // Parse metadata off the main thread
+        // Parse metadata off the main thread (cheap, single-file decode)
         final metadata = await SyncService.parseNcnoteMetadataIsolate(fullData);
 
-        // Verify that the ZIP actually contains all the pages it promises.
-        // A stale/truncated download may have fewer pages than metadata.pageCount,
-        // which would silently save an incomplete notebook.
-        if (metadata.pageCount > 0) {
-          final actualPages = syncService.extractAllPages(fullData);
-          if (actualPages.length < metadata.pageCount) {
-            throw CorruptedArchiveException(
-              'Page count mismatch for $remotePath: '
-              'metadata says ${metadata.pageCount} pages, '
-              'archive contains ${actualPages.length}',
+        // ── Prefer exploded delta folder when present (authoritative) ──
+        //
+        // Other devices write new pages to `.sync/<id>/pages/*.json` and
+        // touch `.sync/<id>/metadata.json` as the commit marker, but they
+        // never re-pack the monolithic `.ncnote` at the server root — so
+        // the root ZIP is stale the moment a second device edits the
+        // notebook.  On first-install we want the real state, not the
+        // leftover single-page snapshot.
+        Uint8List cacheBytes = fullData;
+        int cachePageCount = metadata.pageCount;
+        NotebookMetadata cacheMeta = metadata;
+        DateTime cacheModifiedAt = metadata.modifiedAt;
+
+        bool deltaExists = false;
+        try {
+          deltaExists = await syncService.deltaFolderExists(metadata.id);
+        } catch (_) {
+          deltaExists = false;
+        }
+
+        if (deltaExists) {
+          try {
+            final exploded =
+                await syncService.downloadExplodedFull(metadata.id);
+            // Rebuild a fresh .ncnote from the exploded content so the local
+            // cache reflects the true current state.
+            cacheBytes = SyncService.buildPackageBytes(
+              metadata: exploded.metadata,
+              document: exploded.document,
+              pages: exploded.pages,
+              assets: exploded.assets,
+              symbolLibraries: exploded.symbolLibraries,
             );
+            SyncService.validateNcnoteArchive(cacheBytes,
+                context: 'downloadAndCache exploded ${metadata.id}');
+            cachePageCount = exploded.document.pages.isNotEmpty
+                ? exploded.document.pages.length
+                : exploded.metadata.pageCount;
+            cacheMeta = exploded.metadata;
+            cacheModifiedAt = exploded.metadata.modifiedAt;
+            debugPrint('[Library] Hydrated ${metadata.title} from delta '
+                'folder ($cachePageCount pages, ${cacheBytes.length} bytes)');
+          } catch (e) {
+            // Exploded download failed — fall back to the (possibly stale)
+            // root .ncnote so the user at least has something offline.
+            debugPrint('[Library] Delta hydrate failed for '
+                '${metadata.title}, using stale root .ncnote: $e');
+          }
+        } else {
+          // No delta folder — legacy notebook, root .ncnote is authoritative.
+          // Still run the old integrity check so a truncated download fails
+          // loudly rather than caching partial data.
+          if (metadata.pageCount > 0) {
+            final actualPages = syncService.extractAllPages(fullData);
+            if (actualPages.length < metadata.pageCount) {
+              throw CorruptedArchiveException(
+                'Page count mismatch for $remotePath: '
+                'metadata says ${metadata.pageCount} pages, '
+                'archive contains ${actualPages.length}',
+              );
+            }
           }
         }
 
         // Save file + DB entry
-        await fileService.saveNotebookFile(metadata.id, fullData);
+        await fileService.saveNotebookFile(cacheMeta.id, cacheBytes);
         await fileService.upsertNotebookMeta(
-          id: metadata.id,
-          title: metadata.title,
+          id: cacheMeta.id,
+          title: cacheMeta.title,
           remotePath: remotePath,
           etag: file.etag,
-          localModifiedAt: metadata.modifiedAt,
+          localModifiedAt: cacheModifiedAt,
           remoteModifiedAt: file.lastModified,
           syncStatus: 'synced',
-          fileSize: fullData.length,
-          coverColor: metadata.coverColor,
-          paperType: metadata.paperType,
-          pageCount: metadata.pageCount,
-          createdAt: metadata.createdAt,
+          fileSize: cacheBytes.length,
+          coverColor: cacheMeta.coverColor,
+          paperType: cacheMeta.paperType,
+          pageCount: cachePageCount,
+          createdAt: cacheMeta.createdAt,
         );
         return true;
       } catch (e) {
