@@ -120,19 +120,51 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
 
         if (missingPageNames.isNotEmpty) {
           debugPrint('[BgSync] Downloading ${missingPageNames.length} missing pages for ${entry.metadata.title}');
-          final pageResults = await Future.wait(
-            missingPageNames.map((fn) async {
+
+          // Helper: download a single page with retries
+          Future<PageData?> fetchPage(String fn) async {
+            const maxRetries = 3;
+            for (var attempt = 0; attempt < maxRetries; attempt++) {
               try {
-                final page = await syncService.downloadDeltaPage(id, fn);
-                return (fn, page, null as Object?);
+                return await syncService.downloadDeltaPage(id, fn);
               } catch (e) {
-                return (fn, null as PageData?, e);
+                if (attempt == maxRetries - 1) {
+                  debugPrint('[BgSync] FAILED page $fn for ${entry.metadata.title} after $maxRetries attempts: $e');
+                  return null;
+                }
+                await Future.delayed(Duration(milliseconds: 300 * (attempt + 1)));
               }
-            }),
+            }
+            return null;
+          }
+
+          final pageResults = await Future.wait(
+            missingPageNames.map((fn) async => (fn, await fetchPage(fn))),
           );
-          for (final (fn, page, _) in pageResults) {
+          for (final (fn, page) in pageResults) {
             if (page != null) mergedPages[fn] = page;
           }
+        }
+
+        // If any pages that document.json references still have no data,
+        // trim the document to only the pages we actually have.  This prevents
+        // saving a malformed .ncnote (document lists pages that aren't in the
+        // ZIP), which would otherwise corrupt the notebook.  The next background
+        // sync cycle will retry the missing pages.
+        final stillMissing = remoteMeta.document.pages
+            .where((p) => p.fileName.isNotEmpty && !mergedPages.containsKey(p.fileName))
+            .toList();
+        final effectiveDocument = stillMissing.isEmpty
+            ? remoteMeta.document
+            : remoteMeta.document.copyWith(
+                pages: remoteMeta.document.pages
+                    .where((p) => mergedPages.containsKey(p.fileName))
+                    .toList(),
+              );
+        if (stillMissing.isNotEmpty) {
+          debugPrint('[BgSync] ${entry.metadata.title}: saving partial notebook '
+              '(${effectiveDocument.pages.length}/${remoteMeta.document.pages.length} pages). '
+              'Missing: ${stillMissing.map((p) => p.fileName).join(', ')}');
         }
 
         // Download missing assets
@@ -167,10 +199,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           }
         }
 
-        // 4. Build and save updated .ncnote (off the UI thread)
+        // 4. Build and save updated .ncnote (off the UI thread).
+        // Use effectiveDocument (trimmed to pages we have data for) so the ZIP
+        // is always self-consistent.
+        final effectiveMetadata = stillMissing.isEmpty
+            ? remoteMeta.metadata
+            : remoteMeta.metadata.copyWith(
+                pageCount: effectiveDocument.pages.length);
         final bytes = await SyncService.buildPackageBytesIsolated(
-          metadata: remoteMeta.metadata,
-          document: remoteMeta.document,
+          metadata: effectiveMetadata,
+          document: effectiveDocument,
           pages: mergedPages,
           assets: mergedAssets,
           symbolLibraries: symbols,
@@ -180,20 +218,25 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         // 5. Update DB
         await fileService.upsertNotebookMeta(
           id: id,
-          title: remoteMeta.metadata.title,
+          title: effectiveMetadata.title,
           remotePath: entry.remotePath,
-          localModifiedAt: remoteMeta.metadata.modifiedAt,
-          syncStatus: 'synced',
+          localModifiedAt: effectiveMetadata.modifiedAt,
+          // If we only saved a partial notebook, don't advance the ETag — force
+          // the next sync cycle to retry and finish the download.
+          syncStatus: stillMissing.isEmpty ? 'synced' : 'pending',
           fileSize: bytes.length,
-          coverColor: remoteMeta.metadata.coverColor,
-          paperType: remoteMeta.metadata.paperType,
-          pageCount: remoteMeta.metadata.pageCount,
-          createdAt: remoteMeta.metadata.createdAt,
-          etag: changeState.metaEtag,
+          coverColor: effectiveMetadata.coverColor,
+          paperType: effectiveMetadata.paperType,
+          pageCount: effectiveMetadata.pageCount,
+          createdAt: effectiveMetadata.createdAt,
+          etag: stillMissing.isEmpty ? changeState.metaEtag : null,
         );
 
         anyUpdated = true;
-        debugPrint('[BgSync] ${entry.metadata.title} synced (${missingPageNames.length} new pages)');
+        debugPrint('[BgSync] ${entry.metadata.title} synced '
+            '(${effectiveDocument.pages.length} pages saved'
+            '${stillMissing.isNotEmpty ? ", ${stillMissing.length} still missing — will retry" : ""}'
+            ')');
       } catch (e) {
         debugPrint('[BgSync] Failed to sync ${entry.metadata.title}: $e');
       }
@@ -320,8 +363,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             debugPrint('[Library] Migration complete for $id');
           } else {
             final parsed = syncService.parseNcnoteMetadata(localData);
-            final pages = syncService.extractAllPages(localData);
-            final assets = syncService.extractAllAssets(localData);
+            // Offload to isolates — reconnect-sync runs on the UI thread and
+            // large notebooks would otherwise freeze the app.
+            final pages = await syncService.extractAllPagesIsolated(localData);
+            final assets = await syncService.extractAllAssetsIsolated(localData);
             final symbols = syncService.extractSymbolLibraries(localData);
             await syncService.syncDelta(
               notebookId: id,
@@ -553,16 +598,22 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       if (localData != null && syncService != null) {
         SyncService.validateNcnoteArchive(localData, context: 'open local ${entry.metadata.title}');
         final result = syncService.parseNcnoteMetadata(localData);
-        // Page extraction on the main isolate can jank for large notebooks.
-        // Offload to a worker for anything beyond a conservative threshold.
+        // Page + asset extraction on the main isolate blocks the UI and can
+        // trigger the iOS watchdog for large notebooks.  Offload both to a
+        // background worker beyond a conservative threshold.
         const kLazyThresholdBytes = 512 * 1024; // 512 KB
         const kLazyThresholdPages = 15;
-        final Map<String, PageData> pages =
-            (localData.lengthInBytes > kLazyThresholdBytes ||
-                    result.document.pages.length > kLazyThresholdPages)
-                ? await syncService.extractAllPagesIsolated(localData)
-                : syncService.extractAllPages(localData);
-        final assets = syncService.extractAllAssets(localData);
+        final bool isLarge = localData.lengthInBytes > kLazyThresholdBytes ||
+            result.document.pages.length > kLazyThresholdPages;
+
+        final Map<String, PageData> pages = isLarge
+            ? await syncService.extractAllPagesIsolated(localData)
+            : syncService.extractAllPages(localData);
+        // Assets (embedded images) can be tens of MB for notebooks with photos —
+        // always offload to an isolate for large files to avoid OOM-killing on iPad.
+        final Map<String, Uint8List> assets = isLarge
+            ? await syncService.extractAllAssetsIsolated(localData)
+            : syncService.extractAllAssets(localData);
         final symbols = syncService.extractSymbolLibraries(localData);
 
         // Corruption guard: if the local .ncnote has document entries but the

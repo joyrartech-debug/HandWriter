@@ -867,11 +867,62 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       _ref.read(crossNotebookClipboardProvider.notifier).state = null;
     }
 
-    // Decode all asset images into the render cache
-    if (assets != null) {
-      for (final entry in assets.entries) {
-        _decodeAndCacheImage(entry.key, entry.value);
+    // Decode asset images into the render cache.
+    //
+    // IMPORTANT: do NOT launch all decodes concurrently.  On iPad, firing
+    // ui.instantiateImageCodec() for every image in one microtask burst can
+    // cause the process to be OOM-killed before a single frame is drawn.
+    //
+    // Strategy:
+    //   Phase 1 – current page assets: start immediately (usually 0-2 images).
+    //   Phase 2 – all remaining assets: decoded sequentially, one per ~16 ms
+    //             frame, in a background async loop.
+    if (assets != null && assets.isNotEmpty) {
+      final initialRefs = _assetRefsForPage(startPageIndex, repaired.document, repaired.pages);
+      // Phase 1: kick off decodes for the initial page (fire-and-forget is fine
+      // here — there are typically very few and they finish quickly).
+      for (final assetId in initialRefs) {
+        final bytes = assets[assetId];
+        if (bytes != null) unawaited(_decodeAndCacheImage(assetId, bytes));
       }
+      // Phase 2: remaining assets — sequential, throttled
+      _decodeAssetsThrottled(assets, skip: initialRefs);
+    }
+  }
+
+  /// Returns the set of asset keys referenced by a single page.
+  Set<String> _assetRefsForPage(
+      int pageIdx, DocumentStructure doc, Map<String, PageData> pages) {
+    if (pageIdx < 0 || pageIdx >= doc.pages.length) return {};
+    final entry = doc.pages[pageIdx];
+    final page = pages[entry.fileName];
+    if (page == null) return {};
+    final refs = <String>{...page.assetReferences};
+    for (final el in page.layers.content) {
+      el.map(
+        stroke: (_) {},
+        text:   (_) {},
+        shape:  (_) {},
+        image:  (img) {
+          if (img.data.assetPath.isNotEmpty) refs.add(img.data.assetPath);
+        },
+      );
+    }
+    return refs;
+  }
+
+  /// Sequentially decodes [assets] that are NOT in [skip], waiting for each
+  /// to finish and yielding a ~16 ms frame gap between them so the UI stays
+  /// responsive and memory pressure stays bounded.
+  Future<void> _decodeAssetsThrottled(
+      Map<String, Uint8List> assets, {required Set<String> skip}) async {
+    for (final entry in assets.entries) {
+      if (_disposed) return;
+      if (skip.contains(entry.key)) continue;
+      await _decodeAndCacheImage(entry.key, entry.value);
+      // Yield one frame between images so we don't spike memory or block
+      // the raster thread for longer than a single vsync interval.
+      await Future.delayed(const Duration(milliseconds: 16));
     }
   }
 

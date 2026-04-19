@@ -304,8 +304,26 @@ class NotebookListNotifier
       try {
         final Uint8List fullData = await webdav.downloadFile(remotePath);
 
+        // Validate ZIP integrity before touching anything else
+        SyncService.validateNcnoteArchive(
+            fullData, context: 'downloadAndCache $remotePath');
+
         // Parse metadata off the main thread
         final metadata = await SyncService.parseNcnoteMetadataIsolate(fullData);
+
+        // Verify that the ZIP actually contains all the pages it promises.
+        // A stale/truncated download may have fewer pages than metadata.pageCount,
+        // which would silently save an incomplete notebook.
+        if (metadata.pageCount > 0) {
+          final actualPages = syncService.extractAllPages(fullData);
+          if (actualPages.length < metadata.pageCount) {
+            throw CorruptedArchiveException(
+              'Page count mismatch for $remotePath: '
+              'metadata says ${metadata.pageCount} pages, '
+              'archive contains ${actualPages.length}',
+            );
+          }
+        }
 
         // Save file + DB entry
         await fileService.saveNotebookFile(metadata.id, fullData);

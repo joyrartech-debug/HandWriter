@@ -870,21 +870,58 @@ class SyncService {
 
     final meta = await downloadDeltaMeta(notebookId);
 
-    // Download all pages
+    // Download all pages with per-page retry
     final pageItems = await _webdav.listDirectory('${dir}pages/');
     final pages = <String, PageData>{};
+
+    Future<void> downloadPage(String fileName) async {
+      const maxPageRetries = 3;
+      for (var attempt = 0; attempt < maxPageRetries; attempt++) {
+        try {
+          final data = await _webdav.downloadFile('${dir}pages/$fileName');
+          final json = jsonDecode(utf8.decode(data));
+          pages[fileName] = PageData.fromJson(json as Map<String, dynamic>);
+          return;
+        } catch (e) {
+          if (attempt == maxPageRetries - 1) {
+            debugPrint('[Sync] FAILED to download page $fileName '
+                'for $notebookId after $maxPageRetries attempts: $e');
+            rethrow;
+          }
+          await Future.delayed(
+              Duration(milliseconds: 200 * (attempt + 1)));
+        }
+      }
+    }
+
     final pageFutures = <Future<void>>[];
     for (final item in pageItems) {
       if (!item.isDirectory && item.name.endsWith('.json')) {
-        pageFutures.add(
-          _webdav.downloadFile('${dir}pages/${item.name}').then((data) {
-            final json = jsonDecode(utf8.decode(data));
-            pages[item.name] = PageData.fromJson(json as Map<String, dynamic>);
-          }),
-        );
+        pageFutures.add(downloadPage(item.name));
       }
     }
-    await Future.wait(pageFutures);
+    // eagerError:false so all pages attempt even if some fail
+    await Future.wait(pageFutures, eagerError: false);
+
+    // Verify we got every page listed in document.pages
+    final expectedFileNames = meta.document.pages
+        .map((e) => e.fileName)
+        .where((f) => f.isNotEmpty)
+        .toSet();
+    final missingPages = expectedFileNames.difference(pages.keys.toSet());
+    if (missingPages.isNotEmpty) {
+      debugPrint('[Sync] Retrying ${missingPages.length} missing pages '
+          'for $notebookId: $missingPages');
+      // Sequential retry for the stragglers
+      for (final fileName in missingPages) {
+        try {
+          await downloadPage(fileName);
+        } catch (e) {
+          debugPrint('[Sync] Page $fileName still missing after retry: $e');
+          // Continue — caller will detect the mismatch
+        }
+      }
+    }
 
     // Download assets
     final assets = <String, Uint8List>{};
