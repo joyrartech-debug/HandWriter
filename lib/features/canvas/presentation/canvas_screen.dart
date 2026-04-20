@@ -25,6 +25,7 @@ import 'package:handwriter/features/canvas/presentation/conflict_resolution_scre
 import 'package:handwriter/features/canvas/presentation/symbol_library_panel.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:super_clipboard/super_clipboard.dart';
+import 'package:handwriter/core/services/crash_logger.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_painter_notifiers.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_crop_dialog.dart';
@@ -1270,6 +1271,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   // ── Clipboard paste (system image or internal) ──
 
+  /// Formats we accept from the system clipboard, in priority order.
+  /// PNG/JPEG first because they're already universally decodable. iOS
+  /// screenshots land as HEIC or TIFF on the clipboard — those fell
+  /// through the old PNG-or-JPEG-only check and the paste silently did
+  /// nothing on iPad. For exotic formats we transcode to PNG before
+  /// storing so the asset is readable on every platform (Flutter on
+  /// Windows/Linux can't decode HEIC natively).
+  static const _clipboardImageFormats = <(SimpleFileFormat, String)>[
+    (Formats.png, 'png'),
+    (Formats.jpeg, 'jpg'),
+    (Formats.heic, 'heic'),
+    (Formats.heif, 'heif'),
+    (Formats.tiff, 'tiff'),
+    (Formats.webp, 'webp'),
+    (Formats.gif, 'gif'),
+    (Formats.bmp, 'bmp'),
+  ];
+
   Future<void> _pasteFromClipboard() async {
     // If the internal clipboard has content, prefer it
     final cs = ref.read(canvasProvider);
@@ -1278,7 +1297,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       return;
     }
 
-    // Try to read an image from the system clipboard (works on iOS, macOS, Windows, Linux, Android)
     try {
       final clipboard = SystemClipboard.instance;
       if (clipboard == null) {
@@ -1286,45 +1304,93 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         return;
       }
       final reader = await clipboard.read();
-      // Check for PNG first, then JPEG, then any image format
-      Uint8List? imageBytes;
-      String fileName = 'clipboard_image.png';
 
-      if (reader.canProvide(Formats.png)) {
-        final completer = Completer<Uint8List?>();
-        reader.getFile(Formats.png, (file) async {
-          final bytes = await file.readAll();
-          completer.complete(bytes);
-        }, onError: (_) => completer.complete(null));
-        imageBytes = await completer.future;
-      } else if (reader.canProvide(Formats.jpeg)) {
-        final completer = Completer<Uint8List?>();
-        reader.getFile(Formats.jpeg, (file) async {
-          final bytes = await file.readAll();
-          completer.complete(bytes);
-        }, onError: (_) => completer.complete(null));
-        imageBytes = await completer.future;
-        if (imageBytes != null) fileName = 'clipboard_image.jpg';
-      }
+      for (final entry in _clipboardImageFormats) {
+        final fmt = entry.$1;
+        final ext = entry.$2;
+        if (!reader.canProvide(fmt)) continue;
 
-      if (imageBytes != null && imageBytes.isNotEmpty) {
+        final completer = Completer<Uint8List?>();
+        reader.getFile(fmt, (file) async {
+          try {
+            completer.complete(await file.readAll());
+          } catch (_) {
+            completer.complete(null);
+          }
+        }, onError: (_) => completer.complete(null));
+        final raw = await completer.future;
+        if (raw == null || raw.isEmpty) continue;
+
+        // Non-PNG/JPEG formats (especially HEIC from iPad screenshots) are
+        // not universally decodable by Flutter on other platforms, so
+        // transcode them to PNG via the platform image codec before we
+        // hand them to the asset store.
+        Uint8List bytes = raw;
+        String fileName = 'clipboard_image.$ext';
+        if (ext != 'png' && ext != 'jpg') {
+          final transcoded = await _transcodeToPng(raw);
+          if (transcoded != null) {
+            bytes = transcoded;
+            fileName = 'clipboard_image.png';
+          } else {
+            // Couldn't decode — skip and fall through to the next format.
+            CrashLogger.append(
+              '[Paste] failed to transcode $ext from clipboard '
+              '(${raw.length} bytes)',
+            );
+            continue;
+          }
+        }
+
         final s = ref.read(canvasProvider);
         if (s == null) return;
         if (!mounted) return;
-        final viewSize = (context.findRenderObject() as RenderBox?)?.size ?? const Size(400, 600);
+        final viewSize = (context.findRenderObject() as RenderBox?)?.size
+            ?? const Size(400, 600);
         final center = Offset(
           (-s.panOffset.dx + viewSize.width / 2) / s.zoom,
           (-s.panOffset.dy + viewSize.height / 2) / s.zoom,
         );
-        _insertImage(imageBytes, fileName, center);
+        _insertImage(bytes, fileName, center);
         return;
       }
-    } catch (_) {
-      // Clipboard read failed — fall through
+
+      // No supported image format on the clipboard. Log which formats WERE
+      // offered so we know what to add next time (iOS sometimes advertises
+      // vendor-specific UTIs the plugin doesn't map cleanly).
+      final offered = _clipboardImageFormats
+          .where((e) => reader.canProvide(e.$1))
+          .map((e) => e.$2)
+          .toList();
+      CrashLogger.append(
+        '[Paste] no matching image format on clipboard '
+        '(offered image formats: $offered)',
+      );
+    } catch (e, st) {
+      CrashLogger.append('[Paste] clipboard read failed: $e\n$st');
     }
 
     // Final fallback: try internal paste anyway (handles pendingPaste, etc.)
     ref.read(canvasProvider.notifier).paste();
+  }
+
+  /// Decode [bytes] with the platform image codec and re-encode as PNG,
+  /// so exotic formats (HEIC/HEIF/TIFF/WEBP/...) become portable. Returns
+  /// null if the platform can't decode this format.
+  Future<Uint8List?> _transcodeToPng(Uint8List bytes) async {
+    ui.Image? image;
+    try {
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      image = frame.image;
+      final pngData = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (pngData == null) return null;
+      return pngData.buffer.asUint8List();
+    } catch (_) {
+      return null;
+    } finally {
+      image?.dispose();
+    }
   }
 
   // ── Image / PDF insertion ──
