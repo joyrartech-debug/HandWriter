@@ -318,6 +318,20 @@ class FileService {
     );
   }
 
+  /// Invalidates the cached ETag on every notebook so the next sync cycle
+  /// must re-fetch metadata + pages from the server. Used by the
+  /// "Pulisci cache sync" recovery path when the local state is stuck
+  /// (e.g. a partial pull left state.pages with fewer entries than
+  /// document, and the fast-path HEAD keeps saying "nothing changed").
+  /// Doesn't touch the .ncnote files themselves — only the sync bookkeeping.
+  Future<int> invalidateAllEtags() async {
+    return _db.update(
+      'notebooks',
+      {'etag': null},
+      where: '1 = 1',
+    );
+  }
+
   /// Returns all notebook IDs that need syncing.
   Future<List<Map<String, dynamic>>> getDirtyNotebooks() async {
     return _db.query(

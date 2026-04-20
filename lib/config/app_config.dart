@@ -11,7 +11,7 @@ class AppConfig {
   // work. The build number after "+" is the absolute counter — never
   // resets when the semver bumps.
   static const String appVersion = '0.32.0';
-  static const int appBuildNumber = 7;
+  static const int appBuildNumber = 8;
   static String get fullVersion => '$appVersion+$appBuildNumber';
 
   // ── WebDAV / Nextcloud ──

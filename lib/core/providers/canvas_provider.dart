@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/core/services/crash_logger.dart';
 import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
@@ -5103,10 +5104,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final syncService = _ref.read(syncServiceProvider);
       if (syncService == null) return;
       final pullNotebookId = state!.metadata.id;
+      final s0 = state!;
+      unawaited(CrashLogger.append(
+        '[Pull] start nb=${pullNotebookId.substring(0, 8)} '
+        'state.pages=${s0.pages.length}/doc=${s0.document.pages.length} '
+        'cachedMetaEtag=${_remoteMetaEtag ?? "null"} '
+        'lastPageEtags=${_lastPageEtags.length}',
+      ));
       final fastMetaEtag = await syncService.getDeltaMetaEtag(pullNotebookId);
       if (state == null || state!.metadata.id != pullNotebookId) {
         print('[Canvas] Pull aborted — notebook switched during HEAD '
             '(expected $pullNotebookId, got ${state?.metadata.id})');
+        unawaited(CrashLogger.append('[Pull] abort: nb switched during HEAD'));
         return;
       }
       if (fastMetaEtag != null &&
@@ -5114,8 +5123,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           fastMetaEtag == _remoteMetaEtag) {
         // Server unchanged since last known etag — return without ever
         // acquiring the lock.
+        unawaited(CrashLogger.append(
+          '[Pull] skip: meta ETag unchanged (fast=$fastMetaEtag)',
+        ));
         return;
       }
+      unawaited(CrashLogger.append(
+        '[Pull] proceed: fastEtag=${fastMetaEtag ?? "null"} '
+        'cached=${_remoteMetaEtag ?? "null"} → acquire lock + full fetch',
+      ));
 
       // ── Slow path: remote changed, acquire lock ──
       final locked = await _acquireSyncLock();
@@ -5137,6 +5153,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           return;
         }
 
+        unawaited(CrashLogger.append(
+          '[Pull] changeState: metaEtag=${changeState.metaEtag ?? "null"} '
+          'remotePages=${changeState.pageEtags.length}',
+        ));
         if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
           print('[Canvas] Delta metadata changed, pulling delta...');
           // The pill is NOT flipped here — metadata ETag changes even when

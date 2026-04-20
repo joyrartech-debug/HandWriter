@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/services/crash_logger.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
@@ -1188,6 +1189,56 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     );
   }
 
+  Future<void> _forceResync() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Forza sync'),
+        content: const Text(
+          'Invalida le cache ETag locali di tutti i notebook. Al prossimo '
+          'open, ogni notebook viene ri-confrontato con il server e le '
+          'pagine mancanti vengono ri-scaricate.\n\n'
+          'I dati locali non vengono toccati — solo i metadata di '
+          'sincronizzazione vengono reset per forzare un full pull.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Annulla'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Pulisci cache'),
+          ),
+        ],
+      ),
+    );
+    if (confirm != true || !mounted) return;
+
+    final fileService = ref.read(fileServiceProvider);
+    final prefs = await SharedPreferences.getInstance();
+
+    final metaKeys = prefs.getKeys()
+        .where((k) => k.startsWith('delta_meta_etag_'))
+        .toList();
+    for (final k in metaKeys) {
+      await prefs.remove(k);
+    }
+    final dbCount = await fileService.invalidateAllEtags();
+
+    await ref.read(notebookListProvider.notifier).refresh();
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Cache pulite — ${metaKeys.length} meta ETag, '
+          '$dbCount DB row(s). Apri un notebook per re-sincronizzare.',
+        ),
+      ),
+    );
+  }
+
   Future<void> _showTrash() async {
     final notifier = ref.read(notebookListProvider.notifier);
     final List<TrashEntry> entries = await notifier.listTrash();
@@ -1583,6 +1634,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                 case 'crashlog':
                   _showCrashLog();
                   break;
+                case 'forceresync':
+                  _forceResync();
+                  break;
               }
             },
             itemBuilder: (_) => [
@@ -1611,6 +1665,14 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                   Icon(Icons.bug_report_outlined, size: 18),
                   SizedBox(width: 8),
                   Text('Log crash'),
+                ]),
+              ),
+              const PopupMenuItem(
+                value: 'forceresync',
+                child: Row(children: [
+                  Icon(Icons.cloud_sync_outlined, size: 18),
+                  SizedBox(width: 8),
+                  Text('Forza sync'),
                 ]),
               ),
               const PopupMenuDivider(),
