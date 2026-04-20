@@ -666,15 +666,23 @@ class SyncService {
       }
     }
 
-    // ── Phase 1: Upload data files (pages + assets + symbols) in parallel ──
+    // ── Phase 1: Upload raw data (pages + assets + symbols) in parallel ──
+    //
+    // Previously document.json was uploaded alongside pages in this phase.
+    // That was a silent data-loss bug on flaky networks: if one page upload
+    // failed, Future.wait threw and metadata.json stayed old — but
+    // document.json had ALREADY uploaded successfully. The server was left
+    // in a state where document.json referenced the new pages but some of
+    // those page files were still the old version. Remote clients pulled
+    // metadata's old ETag, skipped the sync, and silently dropped the
+    // strokes that lived on the failed pages.
+    //
+    // Fix: ordered commit — pages/assets first, document.json only if they
+    // all succeeded, then metadata.json as the final commit marker.
     const dt = AppConfig.webdavDeltaTimeoutSeconds;
     final pageUploads = <String, Future<String?>>{};
-    final otherUploads = <Future<String?>>[];
+    final dataUploads = <Future<String?>>[];
 
-    // Dirty pages — track the future per-page so we can harvest per-page
-    // ETags from PUT responses (Nextcloud returns one in the ETag header),
-    // avoiding an extra PROPFIND roundtrip afterwards that can mask
-    // concurrent uploads from other devices.
     for (final e in dirtyPages.entries) {
       final bytes = Uint8List.fromList(
         utf8.encode(jsonEncode(e.value.toJson())),
@@ -683,39 +691,34 @@ class SyncService {
           '${dir}pages/${e.key}', bytes, timeoutSeconds: dt);
     }
 
-    // Dirty assets (may be larger — use default timeout)
     if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
       for (final e in dirtyAssets.entries) {
-        otherUploads.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
+        dataUploads.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
       }
     }
 
-    // Symbols
     if (symbolLibraries != null && symbolLibraries.isNotEmpty) {
       final symBytes = Uint8List.fromList(
         utf8.encode(jsonEncode(symbolLibraries)),
       );
-      otherUploads.add(_webdav.uploadFile('${dir}symbols.json', symBytes,
+      dataUploads.add(_webdav.uploadFile('${dir}symbols.json', symBytes,
           timeoutSeconds: dt));
     }
 
-    // Phase 1 (data) + document.json run in parallel. Only metadata.json
-    // needs to go strictly last — it is the "commit marker" other devices
-    // watch via ETag.
+    // Wait for every data file. If any throws, we exit here and document.json
+    // / metadata.json are NOT written — the server stays in its previous
+    // consistent state.
+    await Future.wait([
+      ...pageUploads.values,
+      ...dataUploads,
+      ...deleteFutures,
+    ]);
+
+    // ── Phase 1.5: document.json (only after every page/asset succeeded) ──
     final docBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(document.toJson())),
     );
-    otherUploads.add(_webdav.uploadFile('${dir}document.json', docBytes,
-        timeoutSeconds: dt));
-
-    // Await every data + delete future BEFORE writing the commit marker.
-    // If any page upload fails, its future throws here → metadata.json is
-    // NOT written → the server stays in the previous consistent state.
-    await Future.wait([
-      ...pageUploads.values,
-      ...otherUploads,
-      ...deleteFutures,
-    ]);
+    await _webdav.uploadFile('${dir}document.json', docBytes, timeoutSeconds: dt);
 
     // ── Phase 2: Upload metadata.json LAST (commit marker) ──
     final metaBytes = Uint8List.fromList(
