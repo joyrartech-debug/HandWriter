@@ -5298,12 +5298,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     if (pagesToPull.isEmpty && deletedRemotelyByEtag.isEmpty) {
       print('[Canvas] Delta pull: no page ETags changed, no deletions');
+      unawaited(CrashLogger.append(
+        '[Pull] diff: noop (remote=${remotePageEtags.length} '
+        'cached=${_lastPageEtags.length} state=${s.pages.length})',
+      ));
       _lastPageEtags = Map.of(remotePageEtags);
       return false;
     }
 
     print('[Canvas] Delta pull: ${pagesToPull.length} pages changed, '
         '${deletedRemotelyByEtag.length} pages deleted remotely');
+    unawaited(CrashLogger.append(
+      '[Pull] diff: pull=${pagesToPull.length} '
+      '(${pagesToPull.take(3).join(",")}${pagesToPull.length > 3 ? "..." : ""}) '
+      'del=${deletedRemotelyByEtag.length} '
+      '(${deletedRemotelyByEtag.take(3).join(",")}${deletedRemotelyByEtag.length > 3 ? "..." : ""})',
+    ));
 
     // Real download starting — show the "Sincronizzazione…" pill. Flipped
     // here (not in the outer PROPFIND-only cycle) so the indicator only
@@ -5393,6 +5403,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       print('[Canvas] Pulled ${completed.length}/${pagesToPull.length} pages '
           '(${failedPages.length} failed)');
     }
+    unawaited(CrashLogger.append(
+      '[Pull] download done: ok=${completed.length}/${pagesToPull.length} '
+      'failed=${failedPages.length}'
+      '${failedPages.isEmpty ? "" : " (${failedPages.take(3).join(",")})"}',
+    ));
     // Evict per-page ETags for any download that failed so the next pull
     // re-attempts them; we must NOT advance _lastPageEtags for pages we
     // didn't actually receive.
