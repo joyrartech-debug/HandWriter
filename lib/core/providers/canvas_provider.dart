@@ -5469,17 +5469,80 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final localOnlyEntries = s.document.pages
           .where((p) => !remoteFileNames.contains(p.fileName))
           .toList();
-      final mergedDocument = localOnlyEntries.isEmpty
+
+      // ── Self-heal corrupted server document.json ──
+      //
+      // Observed on a production Nextcloud: every notebook's server-side
+      // `_delta/<id>/document.json` contained only **one** PageEntry, while
+      // `_delta/<id>/pages/` held dozens or hundreds of actual page files.
+      // An earlier buggy client had overwritten the remote document with a
+      // stale 1-entry local state.  Because the pull-then-save cycle now
+      // propagates that 1-entry document back to disk, the bug was
+      // self-perpetuating — every sync re-cemented the broken state.
+      //
+      // Detect the mismatch and rebuild PageEntries from the actual page
+      // data we just downloaded: each PageData carries `pageId` and
+      // `pageNumber`, which is all we need for a valid entry.  The
+      // orphans inherit no chapter (chapterId = null) — the user can
+      // re-assign them via the page manager if wanted.  The next
+      // `save()` uploads the repaired document.json back to the server
+      // and breaks the cycle permanently.
+      final allLocalFileNames = {
+        ...remoteFileNames,
+        ...localOnlyEntries.map((e) => e.fileName),
+      };
+      final orphanSynthEntries = <PageEntry>[];
+      for (final entry in updatedPages.entries) {
+        if (allLocalFileNames.contains(entry.key)) continue;
+        orphanSynthEntries.add(PageEntry(
+          pageId: entry.value.pageId,
+          pageNumber: entry.value.pageNumber,
+          fileName: entry.key,
+          lastModified: entry.value.modifiedAt,
+          chapterId: null,
+        ));
+      }
+      if (orphanSynthEntries.isNotEmpty) {
+        print('[Canvas] HEAL: remote document.json references '
+            '${remoteMeta.document.pages.length} pages but pages/ folder '
+            'has ${updatedPages.length} — synthesising '
+            '${orphanSynthEntries.length} PageEntries from downloaded data. '
+            'The next save() will push the repaired document to the server.');
+      }
+
+      // Assemble merged document: remote entries first (preserves chapter
+      // assignments), then local-only, then orphaned-and-healed.  Sort by
+      // pageNumber so navigation order matches the user's expectation.
+      final combinedEntries = [
+        ...remoteMeta.document.pages,
+        ...localOnlyEntries,
+        ...orphanSynthEntries,
+      ];
+      combinedEntries.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+      // Renumber to guarantee sequential, unique pageNumbers after the heal.
+      for (var i = 0; i < combinedEntries.length; i++) {
+        combinedEntries[i] = combinedEntries[i].copyWith(pageNumber: i + 1);
+      }
+      final mergedDocument = (localOnlyEntries.isEmpty &&
+              orphanSynthEntries.isEmpty)
           ? remoteMeta.document
           : DocumentStructure(
               notebookId: remoteMeta.document.notebookId,
               formatVersion: remoteMeta.document.formatVersion,
-              pages: [...remoteMeta.document.pages, ...localOnlyEntries],
+              pages: combinedEntries,
             );
 
-      // Show conflicts if any, plus non-conflicting changes banner
-      if (conflicts.isNotEmpty || details.isNotEmpty || safeDeleteCount > 0) {
-        final pending = (details.isNotEmpty || safeDeleteCount > 0)
+      // Show conflicts if any, plus non-conflicting changes banner.
+      // Also trigger the pending/accept flow when the server document was
+      // healed from orphan pages — even if no "user-visible" changes were
+      // detected, the in-memory state still needs to pick up the repaired
+      // document so the subsequent save() uploads it back to the server.
+      final needsHeal = orphanSynthEntries.isNotEmpty;
+      if (conflicts.isNotEmpty ||
+          details.isNotEmpty ||
+          safeDeleteCount > 0 ||
+          needsHeal) {
+        final pending = (details.isNotEmpty || safeDeleteCount > 0 || needsHeal)
             ? PendingRemoteChanges(
                 metadata: remoteMeta.metadata,
                 document: mergedDocument,
@@ -5497,13 +5560,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         // Only show UI when there are true per-page conflicts
         // (both local and remote edited the same page).
         if (conflicts.isEmpty && pending != null) {
-          print('[Canvas] Auto-accepting ${pending.totalChanges} remote changes '
-              '($newCount new, $modCount modified)');
+          print('[Canvas] Auto-accepting ${pending.totalChanges} remote '
+              'changes ($newCount new, $modCount modified'
+              '${needsHeal ? ", ${orphanSynthEntries.length} healed orphans" : ""})');
           state = state!.copyWith(
             pendingRemoteChanges: pending,
             clearPendingConflicts: true,
           );
           acceptRemoteChanges();
+          // If we only reached this branch because of orphan-heal (no user
+          // changes to surface), mark the notebook dirty so save() uploads
+          // the repaired document back to the server and breaks the
+          // corruption cycle permanently.
+          if (needsHeal && details.isEmpty && safeDeleteCount == 0 &&
+              state != null) {
+            state = state!.copyWith(isDirty: true);
+          }
         } else {
           state = state!.copyWith(
             pendingRemoteChanges: pending,
