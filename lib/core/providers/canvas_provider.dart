@@ -362,6 +362,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       _lastPageEtags = {};
       _etagNotebookId = metadata.id;
     }
+
+    // ── Heal local document if it has fewer entries than pages map ──
+    //
+    // Triggered when a previous sync cycle cemented a corrupted
+    // `state.document` with N fewer entries than `state.pages` has actual
+    // page data (the "server document.json has 1 entry but pages/ has
+    // 109" scenario where the pull-save-pull cycle self-perpetuates the
+    // corruption).  Must run SYNCHRONOUSLY before the pull timer so the
+    // open renders with the full page list, not just the corrupt subset.
+    _healOrphanedPagesInState();
+
     // Pre-populate page ETags so the first pull doesn't see every page as
     // "changed" (empty cache vs all remote ETags → false positives).
     _initPageEtags(metadata.id);
@@ -446,6 +457,58 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// ricomincia").
   static String _deltaMetaEtagPrefsKey(String notebookId) =>
       'delta_meta_etag_$notebookId';
+
+  /// Repair the current `state.document` when it references fewer pages
+  /// than `state.pages` holds data for.  This is the in-memory mirror of
+  /// the server-side heal in `_pullFromDeltaDownload`: it catches the case
+  /// where a previous buggy session wrote a stale 1-entry document.json
+  /// locally, so on open the user would see only that one entry in the
+  /// navigator even though dozens of page files are sitting in the local
+  /// ZIP, unreachable.
+  ///
+  /// Synthesises PageEntries for any page data whose fileName isn't
+  /// referenced by the document, sorts by pageNumber, renumbers
+  /// sequentially, and marks the notebook dirty so `save()` uploads the
+  /// repaired structure to the server — breaking the corruption cycle
+  /// permanently.
+  void _healOrphanedPagesInState() {
+    final s = state;
+    if (s == null) return;
+    final docFileNames = s.document.pages.map((p) => p.fileName).toSet();
+    final orphans = <PageEntry>[];
+    for (final entry in s.pages.entries) {
+      if (docFileNames.contains(entry.key)) continue;
+      orphans.add(PageEntry(
+        pageId: entry.value.pageId,
+        pageNumber: entry.value.pageNumber,
+        fileName: entry.key,
+        lastModified: entry.value.modifiedAt,
+        chapterId: null,
+      ));
+    }
+    if (orphans.isEmpty) return;
+
+    print('[Canvas] HEAL (in-state): document has ${s.document.pages.length} '
+        'entries, pages map has ${s.pages.length} — synthesising '
+        '${orphans.length} PageEntries from orphan data. '
+        'Notebook marked dirty so save() pushes the repaired document.');
+
+    final combined = [...s.document.pages, ...orphans];
+    combined.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    for (var i = 0; i < combined.length; i++) {
+      combined[i] = combined[i].copyWith(pageNumber: i + 1);
+    }
+    final repairedDoc = DocumentStructure(
+      notebookId: s.document.notebookId,
+      formatVersion: s.document.formatVersion,
+      pages: combined,
+    );
+    state = s.copyWith(
+      document: repairedDoc,
+      metadata: s.metadata.copyWith(pageCount: combined.length),
+      isDirty: true,
+    );
+  }
 
   /// Fetch current page ETags from the server and cache them so the first
   /// pull cycle has a baseline to diff against.
