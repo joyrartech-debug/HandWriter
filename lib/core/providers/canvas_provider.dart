@@ -64,10 +64,29 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   /// Acquire exclusive sync lock. Returns when lock available.
   /// Returns false if notifier was disposed while waiting.
-  Future<bool> _acquireSyncLock() async {
+  ///
+  /// Has a [timeout] (default 30s) to break deadlocks: if something awaited
+  /// inside the previous holder's critical section hangs (e.g. `compute()`
+  /// stuck, WebDAV socket frozen), we'd otherwise block every future save
+  /// and pull forever. On timeout we force-release the stale lock and grab
+  /// it ourselves so the notifier recovers instead of wedging the UI.
+  Future<bool> _acquireSyncLock({
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final deadline = DateTime.now().add(timeout);
     while (_syncLock != null && !_disposed) {
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) {
+        print('[Canvas] _acquireSyncLock TIMEOUT after ${timeout.inSeconds}s '
+            '— force-releasing stuck lock to avoid UI deadlock');
+        _forceReleaseSyncLock();
+        break;
+      }
       try {
-        await _syncLock!.future;
+        await _syncLock!.future.timeout(remaining);
+      } on TimeoutException {
+        // Loop: next iteration re-checks the deadline and force-releases.
+        continue;
       } catch (_) {
         break;
       }
@@ -4823,7 +4842,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // 1. Encode pages on the main thread with a per-page cache (so unchanged
     //    pages skip JSON encoding), then build the ZIP in a background isolate.
-    final encodedPages = _encodePagesWithCache(s.pages);
+    final encodedPages = await _encodePagesWithCache(s.pages);
     final package = await compute(_buildPackageInIsolate, _PackageParams(
       metadata: updatedMeta,
       document: s.document,
@@ -5016,7 +5035,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     await fileService.markNotebookSynced(updatedMeta.id, result.metaEtag);
-    unawaited(_persistRemoteMetaEtag(updatedMeta.id));
+    await _persistRemoteMetaEtag(updatedMeta.id);
     print('[Canvas] Delta synced: ${dirtyPages.length} pages → server '
         '(${result.pageEtags.length} etags captured)');
   }
@@ -5067,87 +5086,112 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _pullHadFailures = false;
     // NOTE: isPullingFromRemote is NOT flipped here. The pill should only
     // appear when we're actually *downloading* new remote content — not
-    // during every 30-second PROPFIND poll, which is silent and quick.
+    // during every 4-second PROPFIND poll, which is silent and quick.
     // We set it true below only if the metadata ETag indicates real
     // changes to fetch.
 
-    final locked = await _acquireSyncLock();
-    if (!locked) {
-      _isPulling = false;
-      return;
-    }
     try {
-      if (state == null) return;
-      final s = state!;
-      final pullNotebookId = s.metadata.id;
-      final syncService = _ref.read(syncServiceProvider);
-      if (syncService == null) return;
-
-      // ── Fast path: cheap HEAD on metadata.json only ──
+      // ── Fast path: cheap HEAD on metadata.json only — NO LOCK ──
       //
       // The common case on every 4-second poll (and most notebook opens)
-      // is "nothing changed".  A full getRemoteChangeState does PROPFIND
-      // on metadata.json AND a directory listing on pages/, so two HTTP
-      // round-trips per poll even when there's nothing to do.  Doing a
-      // HEAD first lets the no-change path exit with a single request,
-      // which matters on high-latency networks (mobile data, VPN).
-      //
-      // If the meta ETag matches we skip the pages/ listing entirely.
-      // If it differs we still do the full fetch so the diff logic has
-      // fresh page ETags to work with.
+      // is "nothing changed". Running the HEAD inside `_syncLock` blocked
+      // any concurrent save() for 100-200ms on every idle poll; with the
+      // HEAD outside the lock, idle polling has zero contention with user
+      // saves. Only the slow path (getRemoteChangeState + page downloads)
+      // needs the lock, and save() doesn't touch `_remoteMetaEtag`, so
+      // reading it without the lock is safe.
+      final syncService = _ref.read(syncServiceProvider);
+      if (syncService == null) return;
+      final pullNotebookId = state!.metadata.id;
       final fastMetaEtag = await syncService.getDeltaMetaEtag(pullNotebookId);
       if (state == null || state!.metadata.id != pullNotebookId) {
-        print('[Canvas] Pull aborted — notebook switched during PROPFIND '
+        print('[Canvas] Pull aborted — notebook switched during HEAD '
             '(expected $pullNotebookId, got ${state?.metadata.id})');
         return;
       }
       if (fastMetaEtag != null &&
           _remoteMetaEtag != null &&
           fastMetaEtag == _remoteMetaEtag) {
-        // Server unchanged since last known etag — no pull needed.  This
-        // is the hot path that makes re-open of a fully-hydrated notebook
-        // effectively free.
+        // Server unchanged since last known etag — return without ever
+        // acquiring the lock.
         return;
       }
 
-      // Fetch metadata ETag + page ETags in parallel (only on change path)
-      final changeState = await syncService.getRemoteChangeState(pullNotebookId);
+      // ── Slow path: remote changed, acquire lock ──
+      final locked = await _acquireSyncLock();
+      if (!locked) return;
+      try {
+        if (state == null || state!.metadata.id != pullNotebookId) return;
+        final s = state!;
 
-      // Guard: did the user switch notebooks while we were awaiting the
-      // network? If so this pull belongs to the OLD notebook — dropping
-      // its data into the new one would swap the user's current notebook
-      // out from under them (the "Automotive turned into AICD" bug).
-      if (state == null || state!.metadata.id != pullNotebookId) {
-        print('[Canvas] Pull aborted — notebook switched during PROPFIND '
-            '(expected $pullNotebookId, got ${state?.metadata.id})');
-        return;
-      }
+        // Fetch metadata ETag + page ETags in parallel (only on change path)
+        final changeState = await syncService.getRemoteChangeState(pullNotebookId);
 
-      if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
-        print('[Canvas] Delta metadata changed, pulling delta...');
-        // The pill is NOT flipped here — metadata ETag changes even when
-        // nothing of substance was downloaded (e.g. same content re-uploaded
-        // from this device, weak/strong ETag reformatting by the server).
-        // Showing it every 4s during normal polling is distracting.
-        // _pullFromDeltaInner flips it only when real pages/assets will
-        // actually be fetched.
-        await _pullFromDeltaFast(
-          s, syncService, changeState.pageEtags,
-        );
-        // Only advance _remoteMetaEtag if the notebook is STILL open and
-        // still the same one we started the pull for. If the user closed or
-        // switched mid-pull, the merge aborted and the pulled pages never
-        // reached local disk — advancing the ETag here would tell the next
-        // session "you're already in sync" and permanently lose those pages.
-        if (state != null &&
-            state!.metadata.id == pullNotebookId &&
-            !_pullHadFailures) {
-          _remoteMetaEtag = changeState.metaEtag;
-          // Persist so next cold-start's first pull can skip immediately.
-          unawaited(_persistRemoteMetaEtag(pullNotebookId));
-        } else if (_pullHadFailures) {
-          print('[Canvas] Pull had failures — leaving _remoteMetaEtag stale '
-              'so next sync retries missing content');
+        // Guard: did the user switch notebooks while we were awaiting the
+        // network? If so this pull belongs to the OLD notebook — dropping
+        // its data into the new one would swap the user's current notebook
+        // out from under them (the "Automotive turned into AICD" bug).
+        if (state == null || state!.metadata.id != pullNotebookId) {
+          print('[Canvas] Pull aborted — notebook switched during PROPFIND '
+              '(expected $pullNotebookId, got ${state?.metadata.id})');
+          return;
+        }
+
+        if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
+          print('[Canvas] Delta metadata changed, pulling delta...');
+          // The pill is NOT flipped here — metadata ETag changes even when
+          // nothing of substance was downloaded (e.g. same content re-uploaded
+          // from this device, weak/strong ETag reformatting by the server).
+          // Showing it every 4s during normal polling is distracting.
+          // _pullFromDeltaInner flips it only when real pages/assets will
+          // actually be fetched.
+          await _pullFromDeltaFast(
+            s, syncService, changeState.pageEtags,
+          );
+          // Only advance _remoteMetaEtag if the notebook is STILL open and
+          // still the same one we started the pull for. If the user closed
+          // or switched mid-pull, the merge aborted and the pulled pages
+          // never reached local disk — advancing the ETag here would tell
+          // the next session "you're already in sync" and permanently lose
+          // those pages.
+          if (state != null &&
+              state!.metadata.id == pullNotebookId &&
+              !_pullHadFailures) {
+            _remoteMetaEtag = changeState.metaEtag;
+            // Persist so next cold-start's first pull can skip immediately.
+            // Awaited: SharedPreferences.setString is a few ms, and we need
+            // it on disk before the caller assumes the ETag survived a crash.
+            await _persistRemoteMetaEtag(pullNotebookId);
+          } else if (_pullHadFailures) {
+            print('[Canvas] Pull had failures — leaving _remoteMetaEtag stale '
+                'so next sync retries missing content');
+          }
+        }
+      } finally {
+        // Hand the lock to a background task that awaits any local-save
+        // spawned by acceptRemoteChanges() before releasing. Without this
+        // the next save() / pull can race the pulled ZIP rewrite on disk:
+        //   • save() would overwrite the on-disk file before the pulled
+        //     pages are persisted → pulled edits lost on next open
+        //   • the _pageJsonCache would be re-populated out of order
+        final pendingSave = _pendingPulledLocalSave;
+        if (pendingSave == null) {
+          _releaseSyncLock();
+        } else {
+          () async {
+            try {
+              await pendingSave;
+            } catch (e) {
+              print('[Canvas] Pending pulled-save failed: $e');
+            } finally {
+              // Clear only if still the same future (a later pull may have
+              // replaced it).
+              if (identical(_pendingPulledLocalSave, pendingSave)) {
+                _pendingPulledLocalSave = null;
+              }
+              _releaseSyncLock();
+            }
+          }();
         }
       }
     } catch (e) {
@@ -5155,31 +5199,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     } finally {
       _isPulling = false;
       isPullingFromRemote.value = false;
-      // Hand the lock to a background task that awaits any local-save
-      // spawned by acceptRemoteChanges() before releasing. Without this
-      // the next save() / pull can race the pulled ZIP rewrite on disk:
-      //   • save() would overwrite the on-disk file before the pulled
-      //     pages are persisted → pulled edits lost on next open
-      //   • the _pageJsonCache would be re-populated out of order
-      final pendingSave = _pendingPulledLocalSave;
-      if (pendingSave == null) {
-        _releaseSyncLock();
-      } else {
-        () async {
-          try {
-            await pendingSave;
-          } catch (e) {
-            print('[Canvas] Pending pulled-save failed: $e');
-          } finally {
-            // Clear only if still the same future (a later pull may have
-            // replaced it).
-            if (identical(_pendingPulledLocalSave, pendingSave)) {
-              _pendingPulledLocalSave = null;
-            }
-            _releaseSyncLock();
-          }
-        }();
-      }
     }
   }
 
@@ -6129,7 +6148,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           .toList();
       // Pulled pages are all new to us, so the cache will miss for each of
       // them and re-encode. This is fine — happens once after a remote pull.
-      final encodedPages = _encodePagesWithCache(pages);
+      final encodedPages = await _encodePagesWithCache(pages);
       final package = await compute(_buildPackageInIsolate, _PackageParams(
         metadata: persistedMeta,
         document: persistedDoc,
@@ -6168,9 +6187,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   ///
   /// Returns a fresh Map safe to ship to a background isolate. Stale cache
   /// entries (for pages that were deleted) are evicted.
-  Map<String, Uint8List> _encodePagesWithCache(Map<String, PageData> pages) {
+  ///
+  /// Yields to the event loop every [_encodeYieldBatch] pages so first-save
+  /// on a large notebook (e.g. 140 pages) doesn't block the UI thread for
+  /// hundreds of ms on low-end hardware (Linux laptops, iPads, phones).
+  /// Cache hits are free — the yield only fires during actual re-encoding.
+  Future<Map<String, Uint8List>> _encodePagesWithCache(
+    Map<String, PageData> pages,
+  ) async {
     final result = <String, Uint8List>{};
     final seen = <String>{};
+    var encodedSinceYield = 0;
     for (final entry in pages.entries) {
       seen.add(entry.key);
       final cached = _pageJsonCache[entry.key];
@@ -6181,11 +6208,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final bytes = Uint8List.fromList(utf8.encode(jsonEncode(entry.value.toJson())));
       _pageJsonCache[entry.key] = _CachedPageJson(entry.value, bytes);
       result[entry.key] = bytes;
+      encodedSinceYield++;
+      if (encodedSinceYield >= _encodeYieldBatch) {
+        encodedSinceYield = 0;
+        await Future<void>.delayed(Duration.zero);
+      }
     }
     // Evict deleted pages from the cache.
     _pageJsonCache.removeWhere((k, _) => !seen.contains(k));
     return result;
   }
+
+  static const int _encodeYieldBatch = 25;
 }
 
 /// Parameters for the isolate packaging function.
