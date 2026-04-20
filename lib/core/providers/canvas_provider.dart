@@ -458,6 +458,30 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   static String _deltaMetaEtagPrefsKey(String notebookId) =>
       'delta_meta_etag_$notebookId';
 
+  /// Extract the numeric suffix from a `page_NNN.json` filename so we can
+  /// sort pages by creation order — much more reliable than the
+  /// `pageNumber` field stored inside each PageData JSON, which past bugs
+  /// have been observed to leave duplicated or out-of-range.
+  static int _filenameNum(String fn) {
+    final m = RegExp(r'page_(\d+)\.json').firstMatch(fn);
+    return m != null ? (int.tryParse(m.group(1)!) ?? 99999) : 99999;
+  }
+
+  /// Build a `pageId → chapterId` map from the canonical chapter list in
+  /// metadata.  This is what lets the heal pass restore the user's
+  /// chapter assignments instead of dropping every orphan into "no
+  /// chapter" (the bug that caused the navigator to show "- / -" on
+  /// 100+ pages after a botched repair).
+  static Map<String, String> _chapterByPageId(NotebookMetadata meta) {
+    final out = <String, String>{};
+    for (final ch in meta.chapters) {
+      for (final pid in ch.pageIds) {
+        out[pid] = ch.id;
+      }
+    }
+    return out;
+  }
+
   /// Repair the current `state.document` when it references fewer pages
   /// than `state.pages` holds data for.  This is the in-memory mirror of
   /// the server-side heal in `_pullFromDeltaDownload`: it catches the case
@@ -466,35 +490,52 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// navigator even though dozens of page files are sitting in the local
   /// ZIP, unreachable.
   ///
-  /// Synthesises PageEntries for any page data whose fileName isn't
-  /// referenced by the document, sorts by pageNumber, renumbers
-  /// sequentially, and marks the notebook dirty so `save()` uploads the
-  /// repaired structure to the server — breaking the corruption cycle
-  /// permanently.
+  /// Reconstructs the missing PageEntries:
+  ///   • chapterId is recovered from `metadata.chapters[i].pageIds` so
+  ///     orphan pages keep their chapter membership instead of being
+  ///     dropped into "no chapter" — that bug is what corrupted every
+  ///     notebook on the server during the previous heal cycle.
+  ///   • Sort key is the numeric suffix of the filename (page_001 …
+  ///     page_NNN), not the `pageNumber` field, which has been observed
+  ///     duplicated/corrupt and produced random navigation order.
+  ///   • Marks dirty so `save()` pushes the repaired document back to
+  ///     the server, breaking the corruption cycle permanently.
   void _healOrphanedPagesInState() {
     final s = state;
     if (s == null) return;
     final docFileNames = s.document.pages.map((p) => p.fileName).toSet();
+    final pageIdToChapter = _chapterByPageId(s.metadata);
+
     final orphans = <PageEntry>[];
+    int recoveredChapter = 0;
+    int unmappedChapter = 0;
     for (final entry in s.pages.entries) {
       if (docFileNames.contains(entry.key)) continue;
+      final pid = entry.value.pageId;
+      final ch = pageIdToChapter[pid];
+      if (ch != null) {
+        recoveredChapter++;
+      } else {
+        unmappedChapter++;
+      }
       orphans.add(PageEntry(
-        pageId: entry.value.pageId,
+        pageId: pid,
         pageNumber: entry.value.pageNumber,
         fileName: entry.key,
         lastModified: entry.value.modifiedAt,
-        chapterId: null,
+        chapterId: ch,
       ));
     }
     if (orphans.isEmpty) return;
 
     print('[Canvas] HEAL (in-state): document has ${s.document.pages.length} '
         'entries, pages map has ${s.pages.length} — synthesising '
-        '${orphans.length} PageEntries from orphan data. '
+        '${orphans.length} PageEntries '
+        '(chapter recovered: $recoveredChapter, unmapped: $unmappedChapter). '
         'Notebook marked dirty so save() pushes the repaired document.');
 
     final combined = [...s.document.pages, ...orphans];
-    combined.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+    combined.sort((a, b) => _filenameNum(a.fileName).compareTo(_filenameNum(b.fileName)));
     for (var i = 0; i < combined.length; i++) {
       combined[i] = combined[i].copyWith(pageNumber: i + 1);
     }
@@ -5544,44 +5585,61 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // self-perpetuating — every sync re-cemented the broken state.
       //
       // Detect the mismatch and rebuild PageEntries from the actual page
-      // data we just downloaded: each PageData carries `pageId` and
-      // `pageNumber`, which is all we need for a valid entry.  The
-      // orphans inherit no chapter (chapterId = null) — the user can
-      // re-assign them via the page manager if wanted.  The next
-      // `save()` uploads the repaired document.json back to the server
-      // and breaks the cycle permanently.
+      // data we just downloaded.  chapterId is reconstructed from
+      // `metadata.chapters[].pageIds` — the canonical chapter membership
+      // list — so orphan pages keep their original chapter instead of
+      // landing in "no chapter" (the bug that nuked chapter info on every
+      // notebook during the previous heal cycle).  Sort uses the filename
+      // numeric suffix (page_001 .. page_NNN) which is stable; the
+      // `pageNumber` field inside PageData JSON has been observed
+      // duplicated/corrupt so it can't be trusted.
       final allLocalFileNames = {
         ...remoteFileNames,
         ...localOnlyEntries.map((e) => e.fileName),
       };
+      final orphanPageIdToChapter = _chapterByPageId(remoteMeta.metadata);
       final orphanSynthEntries = <PageEntry>[];
+      int orphanChRecovered = 0;
+      int orphanChUnmapped = 0;
       for (final entry in updatedPages.entries) {
         if (allLocalFileNames.contains(entry.key)) continue;
+        final pid = entry.value.pageId;
+        final ch = orphanPageIdToChapter[pid];
+        if (ch != null) {
+          orphanChRecovered++;
+        } else {
+          orphanChUnmapped++;
+        }
         orphanSynthEntries.add(PageEntry(
-          pageId: entry.value.pageId,
+          pageId: pid,
           pageNumber: entry.value.pageNumber,
           fileName: entry.key,
           lastModified: entry.value.modifiedAt,
-          chapterId: null,
+          chapterId: ch,
         ));
       }
       if (orphanSynthEntries.isNotEmpty) {
         print('[Canvas] HEAL: remote document.json references '
             '${remoteMeta.document.pages.length} pages but pages/ folder '
             'has ${updatedPages.length} — synthesising '
-            '${orphanSynthEntries.length} PageEntries from downloaded data. '
+            '${orphanSynthEntries.length} PageEntries '
+            '(chapter recovered: $orphanChRecovered, '
+            'unmapped: $orphanChUnmapped). '
             'The next save() will push the repaired document to the server.');
       }
 
       // Assemble merged document: remote entries first (preserves chapter
       // assignments), then local-only, then orphaned-and-healed.  Sort by
-      // pageNumber so navigation order matches the user's expectation.
+      // filename numeric suffix (page_001 .. page_NNN) which is the only
+      // stable ordering key — pageNumber inside PageData has been seen
+      // corrupted so we never trust it for sorting.
       final combinedEntries = [
         ...remoteMeta.document.pages,
         ...localOnlyEntries,
         ...orphanSynthEntries,
       ];
-      combinedEntries.sort((a, b) => a.pageNumber.compareTo(b.pageNumber));
+      combinedEntries.sort((a, b) =>
+          _filenameNum(a.fileName).compareTo(_filenameNum(b.fileName)));
       // Renumber to guarantee sequential, unique pageNumbers after the heal.
       for (var i = 0; i < combinedEntries.length; i++) {
         combinedEntries[i] = combinedEntries[i].copyWith(pageNumber: i + 1);
