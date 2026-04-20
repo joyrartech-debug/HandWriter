@@ -1,10 +1,11 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
+import 'package:handwriter/core/services/crash_logger.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
@@ -1130,6 +1131,62 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     );
   }
 
+  Future<void> _showCrashLog() async {
+    final log = await CrashLogger.read();
+    final path = CrashLogger.path ?? '(unknown)';
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Log crash'),
+        content: SizedBox(
+          width: 600,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(path, style: TextStyle(fontSize: 10, color: Colors.grey.shade600)),
+              const SizedBox(height: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 400),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    log.isEmpty ? '(log vuoto — nessun errore registrato)' : log,
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () async {
+              await CrashLogger.clear();
+              if (ctx.mounted) Navigator.pop(ctx);
+            },
+            child: const Text('Svuota'),
+          ),
+          TextButton(
+            onPressed: () async {
+              await Clipboard.setData(ClipboardData(text: log));
+              if (ctx.mounted) {
+                ScaffoldMessenger.of(ctx).showSnackBar(
+                  const SnackBar(content: Text('Log copiato negli appunti')),
+                );
+              }
+            },
+            child: const Text('Copia'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Chiudi'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showTrash() async {
     final notifier = ref.read(notebookListProvider.notifier);
     final List<TrashEntry> entries = await notifier.listTrash();
@@ -1522,6 +1579,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                 case 'trash':
                   _showTrash();
                   break;
+                case 'crashlog':
+                  _showCrashLog();
+                  break;
               }
             },
             itemBuilder: (_) => [
@@ -1542,6 +1602,14 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                   Icon(Icons.delete_outline_rounded, size: 18),
                   SizedBox(width: 8),
                   Text('Cestino'),
+                ]),
+              ),
+              const PopupMenuItem(
+                value: 'crashlog',
+                child: Row(children: [
+                  Icon(Icons.bug_report_outlined, size: 18),
+                  SizedBox(width: 8),
+                  Text('Log crash'),
                 ]),
               ),
               const PopupMenuDivider(),
