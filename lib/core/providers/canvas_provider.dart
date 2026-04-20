@@ -5409,17 +5409,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     if (missingAssets.isNotEmpty) {
-      // ── Batched download (max 4 concurrent) ─────────────────────────────
+      // ── Batched download (platform-aware concurrency) ───────────────────
       // Downloading all assets simultaneously spikes RAM with raw bytes
-      // (JPEG buffers) before any have been decoded.  On iPad this alone can
-      // trigger the watchdog.  Process in small batches instead.
-      const _kMaxAssetConcurrency = 4;
+      // (JPEG buffers) before any have been decoded. Mobile devices (iPad,
+      // phones) have much less headroom than the desktop before iOS jetsam
+      // or Android lowmemkiller starts killing the process, so halve the
+      // concurrency there.
+      final maxAssetConcurrency = (defaultTargetPlatform == TargetPlatform.iOS ||
+              defaultTargetPlatform == TargetPlatform.android)
+          ? 2
+          : 4;
       final missingList = missingAssets.toList();
       final newlyDownloaded = <String, Uint8List>{};
       int downloadedCount = 0;
-      for (var i = 0; i < missingList.length; i += _kMaxAssetConcurrency) {
+      for (var i = 0; i < missingList.length; i += maxAssetConcurrency) {
         if (_disposed) break;
-        final batch = missingList.skip(i).take(_kMaxAssetConcurrency);
+        final batch = missingList.skip(i).take(maxAssetConcurrency);
         final batchResults = await Future.wait(
           batch.map((ref) async {
             try {
@@ -5442,7 +5447,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           }
         }
       }
-      print('[Canvas] Pulled $downloadedCount assets (batched, max $_kMaxAssetConcurrency concurrent)');
+      print('[Canvas] Pulled $downloadedCount assets (batched, max $maxAssetConcurrency concurrent)');
 
       // ── Throttled decode — current-page assets first ─────────────────────
       // Decoding all images concurrently (ui.instantiateImageCodec) spikes

@@ -618,14 +618,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
 
     if (_activePointers >= 2) {
-      // Cancel any active stroke when multi-touch starts (pinch-to-zoom)
+      // Palm rejection: if a stylus is already drawing and the incoming
+      // second pointer is a touch (the user's wrist landing on the screen
+      // while writing), DO NOT treat this as a pinch-to-zoom. Previously
+      // we cancelled the active stroke here the moment the palm touched
+      // down, which wiped the first few strokes the user had just drawn.
+      // Instead, ignore the palm touch entirely — the Listener keeps
+      // feeding stylus moves to _onPointerMove, and the scale handlers
+      // below also early-return while _stylusDown is true.
+      if (_stylusDown && event.kind == PointerDeviceKind.touch) {
+        _cancelLongPressTimer();
+        return;
+      }
+      // True multi-touch (two fingers, no stylus): pinch-to-zoom gesture.
       if (_activeStrokeNotifier.isActive) {
         _activeStrokeNotifier.clear();
         ref.read(canvasProvider.notifier).cancelStroke();
       }
-      // Stop touch-panning so the scale handler takes over exclusively
       _isTouchPanning = false;
-      // Cancel long-press timer so context menu doesn't fire during pinch
       _cancelLongPressTimer();
       return;
     }
@@ -1191,6 +1201,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // ── Pinch-to-zoom ──
 
   void _onScaleStart(ScaleStartDetails details) {
+    // Palm rejection: if the stylus is currently drawing, the scale gesture
+    // was triggered by the user's wrist landing on the screen — ignore it
+    // so the canvas doesn't zoom mid-stroke.
+    if (_stylusDown) return;
     final state = ref.read(canvasProvider);
     if (state == null) return;
     _baseZoom = state.zoom;
@@ -1198,9 +1212,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onScaleUpdate(ScaleUpdateDetails details) {
+    // Same palm guard as _onScaleStart. Even if onScaleStart was already
+    // rejected, Flutter still calls onScaleUpdate during the gesture — we
+    // must gate it too, otherwise a palm landing mid-stroke can still move
+    // the zoom level via the accumulated scale delta.
+    if (_stylusDown) return;
     // Accept scale gesture if either: 2+ pointers (multi-touch), or scale != 1 (trackpad pinch)
     if (details.pointerCount < 2 && (details.scale - 1).abs() < 0.001) return;
-    
+
     final notifier = ref.read(canvasProvider.notifier);
     final state = ref.read(canvasProvider);
     if (state == null) return;
