@@ -61,7 +61,7 @@ Map<String, dynamic> _$$NotebookMetadataImplToJson(
       'paperColor': instance.paperColor,
       'pageCount': instance.pageCount,
       'tags': instance.tags,
-      'chapters': instance.chapters,
+      'chapters': instance.chapters.map((e) => e.toJson()).toList(),
       'author': instance.author,
       'description': instance.description,
     };
@@ -81,7 +81,7 @@ Map<String, dynamic> _$$DocumentStructureImplToJson(
     <String, dynamic>{
       'notebookId': instance.notebookId,
       'formatVersion': instance.formatVersion,
-      'pages': instance.pages,
+      'pages': instance.pages.map((e) => e.toJson()).toList(),
     };
 
 _$PageEntryImpl _$$PageEntryImplFromJson(Map<String, dynamic> json) =>
@@ -135,7 +135,7 @@ Map<String, dynamic> _$$PageDataImplToJson(_$PageDataImpl instance) =>
       'pageNumber': instance.pageNumber,
       'width': instance.width,
       'height': instance.height,
-      'layers': instance.layers,
+      'layers': instance.layers.toJson(),
       'assetReferences': instance.assetReferences,
       'createdAt': instance.createdAt?.toIso8601String(),
       'modifiedAt': instance.modifiedAt?.toIso8601String(),
@@ -157,8 +157,8 @@ _$RenderingLayersImpl _$$RenderingLayersImplFromJson(
 Map<String, dynamic> _$$RenderingLayersImplToJson(
         _$RenderingLayersImpl instance) =>
     <String, dynamic>{
-      'background': instance.background,
-      'content': instance.content,
+      'background': instance.background.toJson(),
+      'content': instance.content.map((e) => e.toJson()).toList(),
     };
 
 _$BackgroundLayerImpl _$$BackgroundLayerImplFromJson(
@@ -195,7 +195,7 @@ Map<String, dynamic> _$$StrokeElementImplToJson(_$StrokeElementImpl instance) =>
     <String, dynamic>{
       'id': instance.id,
       'zIndex': instance.zIndex,
-      'data': instance.data,
+      'data': instance.data.toJson(),
       'type': instance.$type,
     };
 
@@ -211,7 +211,7 @@ Map<String, dynamic> _$$TextElementImplToJson(_$TextElementImpl instance) =>
     <String, dynamic>{
       'id': instance.id,
       'zIndex': instance.zIndex,
-      'data': instance.data,
+      'data': instance.data.toJson(),
       'type': instance.$type,
     };
 
@@ -227,7 +227,7 @@ Map<String, dynamic> _$$ImageElementImplToJson(_$ImageElementImpl instance) =>
     <String, dynamic>{
       'id': instance.id,
       'zIndex': instance.zIndex,
-      'data': instance.data,
+      'data': instance.data.toJson(),
       'type': instance.$type,
     };
 
@@ -243,7 +243,7 @@ Map<String, dynamic> _$$ShapeElementImplToJson(_$ShapeElementImpl instance) =>
     <String, dynamic>{
       'id': instance.id,
       'zIndex': instance.zIndex,
-      'data': instance.data,
+      'data': instance.data.toJson(),
       'type': instance.$type,
     };
 
@@ -264,7 +264,7 @@ _$StrokeDataImpl _$$StrokeDataImplFromJson(Map<String, dynamic> json) =>
 
 Map<String, dynamic> _$$StrokeDataImplToJson(_$StrokeDataImpl instance) =>
     <String, dynamic>{
-      'points': instance.points,
+      'points': instance.points.map((e) => e.toJson()).toList(),
       'toolType': instance.toolType,
       'color': instance.color,
       'baseWidth': instance.baseWidth,

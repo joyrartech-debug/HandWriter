@@ -9,6 +9,12 @@ class AppConfig {
   static const int webdavTimeoutSeconds = 120;
   /// Shorter timeout for lightweight delta operations (page JSON, metadata).
   static const int webdavDeltaTimeoutSeconds = 30;
+  /// Longer timeout for downloading the root .ncnote ZIP — these can be
+  /// 60+ MB on a heavy notebook (e.g. Automotive with ~200 PDF page assets)
+  /// and a 120 s overall deadline kills the request before the body is
+  /// fully streamed in over a Tailscale link.  10 minutes covers the worst
+  /// realistic case (≈100 KB/s sustained).
+  static const int webdavLargeDownloadTimeoutSeconds = 600;
   static const int maxRetries = 3;
 
   // ── Sync ──

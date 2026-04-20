@@ -396,7 +396,14 @@ class NotebookListNotifier
             ? syncService.downloadDeltaMetadataOnly(uuidMatch.group(1)!)
             : Future.value(null);
 
-        final Uint8List fullData = await webdav.downloadFile(remotePath);
+        // Use the long timeout for the root .ncnote — these can be 60+ MB
+        // for heavy notebooks and the default 120 s deadline killed the
+        // request mid-stream (Automotive notebook download timing out
+        // after 2 minutes on Tailscale).
+        final Uint8List fullData = await webdav.downloadFile(
+          remotePath,
+          timeoutSeconds: AppConfig.webdavLargeDownloadTimeoutSeconds,
+        );
 
         // Validate ZIP integrity before touching anything else
         SyncService.validateNcnoteArchive(

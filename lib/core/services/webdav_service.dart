@@ -193,11 +193,19 @@ class WebDavService {
   }
 
   /// Scarica un file dal server.
-  Future<Uint8List> downloadFile(String remotePath) async {
-    final response = await _client.get(
-      Uri.parse(_fullUrl(remotePath)),
-      headers: _authHeaders,
-    ).timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
+  ///
+  /// [timeoutSeconds] overrides the default; pass a larger value for known-
+  /// big files (root .ncnote ZIPs in particular).  Default `null` falls
+  /// back to the general WebDAV timeout — fine for most page/asset GETs.
+  Future<Uint8List> downloadFile(String remotePath,
+      {int? timeoutSeconds}) async {
+    final response = await _client
+        .get(
+          Uri.parse(_fullUrl(remotePath)),
+          headers: _authHeaders,
+        )
+        .timeout(Duration(
+            seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
 
     if (response.statusCode != 200) {
       throw WebDavException(
