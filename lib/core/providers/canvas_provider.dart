@@ -4749,6 +4749,31 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// caller must release the lock itself (nothing scheduled).
   Future<bool> _saveInner() async {
     if (state == null || !state!.isDirty) return false;
+
+    // ── Pre-flight integrity guard ──
+    //
+    // If `state.pages` holds page data for a fileName that
+    // `state.document` doesn't reference, uploading the document as-is
+    // would propagate the inconsistency to the server and cause every
+    // other device pulling next to lose those pages from the navigator.
+    // Repair in-state FIRST (heal preserves chapterId via
+    // metadata.chapters[].pageIds), then save the consistent state.
+    //
+    // This is the brake that breaks the corruption cycle even when an
+    // older client version is still running on another machine — the
+    // save path on THIS device refuses to publish a document that is
+    // demonstrably less complete than the local pages map.
+    {
+      final cur = state!;
+      final docFns = cur.document.pages.map((p) => p.fileName).toSet();
+      final missing = cur.pages.keys.where((fn) => !docFns.contains(fn)).toList();
+      if (missing.isNotEmpty) {
+        print('[Canvas] PRE-SAVE GUARD: state.pages has ${missing.length} '
+            'fileNames not in state.document — running heal before upload');
+        _healOrphanedPagesInState();
+      }
+    }
+
     final s = state!;
     final syncService = _ref.read(syncServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
