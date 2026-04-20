@@ -4794,6 +4794,35 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // ── Pre-save integrity guard #2 ──
+    //
+    // Reject the save if the document references pages whose data isn't in
+    // memory (state.pages). A previous partial pull can leave us with
+    // `document.pages.length > state.pages.length`; if save() ships that
+    // state, syncDelta writes a document.json listing pages whose bytes
+    // we'd upload with old content (or not at all), silently corrupting
+    // every other device's view. Abort and let the next pull re-hydrate
+    // instead.
+    {
+      final cur = state!;
+      final missingData = cur.document.pages
+          .where((e) => !cur.pages.containsKey(e.fileName))
+          .toList();
+      if (missingData.isNotEmpty) {
+        final sample = missingData.take(3).map((e) => e.fileName).join(', ');
+        print('[Canvas] PRE-SAVE GUARD #2: aborting — document has '
+            '${missingData.length} entries without page data '
+            '($sample${missingData.length > 3 ? "..." : ""}). '
+            'Triggering pull to re-hydrate first.');
+        unawaited(CrashLogger.append(
+          '[Save] aborted: doc=${cur.document.pages.length} > '
+          'pages=${cur.pages.length} (missing: $sample)',
+        ));
+        unawaited(_pullRemoteChanges());
+        return false;
+      }
+    }
+
     final s = state!;
     final syncService = _ref.read(syncServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
@@ -5121,12 +5150,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       if (fastMetaEtag != null &&
           _remoteMetaEtag != null &&
           fastMetaEtag == _remoteMetaEtag) {
-        // Server unchanged since last known etag — return without ever
-        // acquiring the lock.
+        // Server unchanged since last known etag — but only skip the
+        // pull if our local state is internally consistent. If a previous
+        // pull left `document.pages > pages`, we still have missing data
+        // to fetch regardless of what the server says. Skipping here
+        // wedges the notebook until the user triggers "Forza sync"
+        // manually, which is exactly the bug we're here to kill.
+        if (s0.pages.length >= s0.document.pages.length) {
+          unawaited(CrashLogger.append(
+            '[Pull] skip: meta ETag unchanged (fast=$fastMetaEtag) '
+            'and state is consistent (pages=${s0.pages.length}=doc=${s0.document.pages.length})',
+          ));
+          return;
+        }
         unawaited(CrashLogger.append(
-          '[Pull] skip: meta ETag unchanged (fast=$fastMetaEtag)',
+          '[Pull] force slow-path despite matching ETag: state inconsistent '
+          '(pages=${s0.pages.length} < doc=${s0.document.pages.length}) — '
+          're-fetching to hydrate missing pages',
         ));
-        return;
       }
       unawaited(CrashLogger.append(
         '[Pull] proceed: fastEtag=${fastMetaEtag ?? "null"} '
@@ -5174,17 +5215,41 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           // never reached local disk — advancing the ETag here would tell
           // the next session "you're already in sync" and permanently lose
           // those pages.
-          if (state != null &&
-              state!.metadata.id == pullNotebookId &&
-              !_pullHadFailures) {
+          // Advance the cached meta ETag only when the pull fully hydrated
+          // us — same notebook still open, no per-page failures, AND the
+          // resulting state is internally consistent (every document entry
+          // has page data in memory). Persisting an ETag that matches a
+          // truncated local state is the wedge we spent this afternoon
+          // chasing: next pull would fast-path skip, leaving missing pages
+          // unreachable until manual "Forza sync".
+          final stillOpen = state != null && state!.metadata.id == pullNotebookId;
+          final sNow = stillOpen ? state! : null;
+          final stateConsistent = sNow == null
+              ? false
+              : sNow.pages.length >= sNow.document.pages.length;
+          if (stillOpen && !_pullHadFailures && stateConsistent) {
             _remoteMetaEtag = changeState.metaEtag;
             // Persist so next cold-start's first pull can skip immediately.
             // Awaited: SharedPreferences.setString is a few ms, and we need
             // it on disk before the caller assumes the ETag survived a crash.
             await _persistRemoteMetaEtag(pullNotebookId);
+            unawaited(CrashLogger.append(
+              '[Pull] ETag advanced: ${changeState.metaEtag}',
+            ));
           } else if (_pullHadFailures) {
             print('[Canvas] Pull had failures — leaving _remoteMetaEtag stale '
                 'so next sync retries missing content');
+            unawaited(CrashLogger.append(
+              '[Pull] ETag not advanced: pull had page failures',
+            ));
+          } else if (stillOpen && !stateConsistent) {
+            print('[Canvas] Pull done but state still inconsistent '
+                '(pages=${sNow!.pages.length} < doc=${sNow.document.pages.length}) '
+                '— leaving _remoteMetaEtag stale so next pull retries');
+            unawaited(CrashLogger.append(
+              '[Pull] ETag not advanced: state still mismatch '
+              '(pages=${sNow.pages.length} < doc=${sNow.document.pages.length})',
+            ));
           }
         }
       } finally {
