@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/services/crash_logger.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
@@ -1138,7 +1139,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     await showDialog<void>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Log crash'),
+        title: Text('Log crash  —  v${AppConfig.fullVersion}'),
         content: SizedBox(
           width: 600,
           child: Column(

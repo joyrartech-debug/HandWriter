@@ -5246,30 +5246,33 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         .toSet();
 
     // ── Structure-based deletion detection ──
-    // ETag-based deletion detection (_lastPageEtags diff) can miss remote
-    // deletions when _initPageEtags pre-populated the cache from the
-    // already-updated remote state (after another device deleted a page):
-    //   • remote deleted page X → remote no longer has page X
-    //   • _initPageEtags fetches remote ETags → _lastPageEtags has no page X
-    //   • deletedRemotelyByEtag = {} (page X was never in the cache we built)
-    //   • early-return fires → deletion never applied → user stuck with dead page
+    // ETag-based deletion detection (_lastPageEtags diff above) already
+    // catches remote deletions when we had an ETag for the page; the loop
+    // below is the backstop for the "cache was fetched AFTER the delete"
+    // path.
     //
-    // Fix: also mark a page as deleted remotely if:
-    //   - it's in the local document AND local pages map
-    //   - it's absent from the remote folder (remotePageEtags)
-    //   - it was previously synced (_lastSyncedPages has its data) ← was on server
+    // IMPORTANT: we gate on `_lastPageEtags.containsKey(fn)`, NOT
+    // `_lastSyncedPages`. `_lastSyncedPages` is re-populated from the
+    // local .ncnote on every open — which means it also contains pages
+    // the user added offline and that have NEVER been uploaded. Using
+    // that signal would classify brand-new local pages as "deleted
+    // remotely" and silently drop them the first time the canvas pulls
+    // ("ho aggiunto pagina 2 offline, chiuso e riaperto, è sparita").
+    //
+    // `_lastPageEtags` only contains pages the server has acknowledged,
+    // so it cleanly distinguishes "was on server, now gone" (true remote
+    // delete) from "never been on server, still pending upload" (local-
+    // only page to preserve and upload on the next save).
     for (final pageEntry in s.document.pages) {
       final fn = pageEntry.fileName;
       if (remotePageEtags.containsKey(fn)) continue; // still exists on remote
       if (deletedRemotelyByEtag.contains(fn)) continue; // already detected
       if (s.pages[fn] == null) continue; // no local data (nothing to delete)
-      // Was this page previously synced (i.e. was on server at some point)?
-      // _lastSyncedPages is initialised from the local .ncnote on open, so a
-      // page that was uploaded in a past session will be in it.  A truly
-      // local-only page (added this session but never uploaded) would NOT be
-      // in _lastSyncedPages from a previous session.
-      if (_lastSyncedPages.containsKey(fn)) {
+      if (_lastPageEtags.containsKey(fn)) {
         deletedRemotelyByEtag.add(fn);
+      } else {
+        print('[Canvas] Pull: page $fn exists locally but not on server — '
+            'treating as pending upload (never synced), NOT a remote delete');
       }
     }
 

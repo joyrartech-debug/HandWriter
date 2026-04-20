@@ -1,8 +1,18 @@
 /// Configurazione centralizzata dell'app HandWriter.
 class AppConfig {
   // ── App Version ──
-  // Bump this version for each prompt-driven modification.
-  static const String appVersion = '0.31.0';
+  //
+  // Must be kept in sync with the `version:` line in pubspec.yaml and
+  // bumped on every commit that ships (including iPad via Codemagic +
+  // Sideloadly) so the in-app crash log and about dialog always show
+  // which build is actually running on the device.
+  //
+  // Patch every commit that only fixes bugs; minor for visible feature
+  // work. The build number after "+" is the absolute counter — never
+  // resets when the semver bumps.
+  static const String appVersion = '0.32.0';
+  static const int appBuildNumber = 7;
+  static String get fullVersion => '$appVersion+$appBuildNumber';
 
   // ── WebDAV / Nextcloud ──
   static const String defaultRemotePath = '/HandWriter/';

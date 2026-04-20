@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:handwriter/config/app_config.dart';
 import 'package:path_provider/path_provider.dart';
 
 /// File-backed crash / error logger for environments where a native crash
@@ -34,6 +35,7 @@ class CrashLogger {
       await append(
         '--- app start '
         '${DateTime.now().toIso8601String()} '
+        'v${AppConfig.fullVersion} '
         '(${defaultTargetPlatform.name}) ---',
       );
     } catch (e) {
