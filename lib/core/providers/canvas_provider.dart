@@ -705,38 +705,91 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
-  /// Fetch current page ETags from the server and cache them so the first
-  /// pull cycle has a baseline to diff against.
+  /// SharedPreferences key for the per-page ETag map of a notebook.
+  static String _pageEtagsPrefsKey(String notebookId) =>
+      'page_etags_$notebookId';
+
+  /// Restore [_lastPageEtags] from disk. This MUST reflect the ETags of the
+  /// page content we actually have locally — i.e. only ETags that were
+  /// successfully downloaded or uploaded. Never pre-populate from live
+  /// server state on open: the server may have moved while we were closed,
+  /// and pre-filling with current server ETags would silently make the
+  /// first pull think 'nothing changed' even though our local .ncnote is
+  /// stale (the 'iPad wrote page_164 while PC was offline → PC opens but
+  /// pull is no-op → local stays stale forever' bug).
   ///
-  /// Also primes [_remoteMetaEtag] from SharedPreferences (not from the
-  /// live server ETag — see the note below).  This lets the immediate
-  /// `_pullRemoteChanges` on open compare the cached meta ETag against
-  /// the fresh one and skip the whole pull when they match.
+  /// Also primes [_remoteMetaEtag] from SharedPreferences.
   Future<void> _initPageEtags(String notebookId) async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+
       // Load last-saved meta ETag so first-pull can skip cheaply when
-      // server state hasn't moved.  Only use it if we don't already have
+      // server state hasn't moved. Only use it if we don't already have
       // one in memory (e.g. same notebook re-opened without notebook-switch).
       if (_remoteMetaEtag == null) {
-        try {
-          final prefs = await SharedPreferences.getInstance();
-          final persisted =
-              prefs.getString(_deltaMetaEtagPrefsKey(notebookId));
-          if (persisted != null && persisted.isNotEmpty) {
-            _remoteMetaEtag = persisted;
-          }
-        } catch (_) {}
+        final persisted = prefs.getString(_deltaMetaEtagPrefsKey(notebookId));
+        if (persisted != null && persisted.isNotEmpty) {
+          _remoteMetaEtag = persisted;
+        }
       }
 
-      final syncService = _ref.read(syncServiceProvider);
-      if (syncService == null) return;
-      final changeState = await syncService.getRemoteChangeState(notebookId);
-      _lastPageEtags = Map.of(changeState.pageEtags);
+      // Load the persisted per-page ETag cache written by previous save/
+      // pull cycles. Empty map on fresh install: the first pull will then
+      // treat every page as potentially changed and download it.
+      final persistedPageEtags = prefs.getString(_pageEtagsPrefsKey(notebookId));
+      if (persistedPageEtags != null && persistedPageEtags.isNotEmpty) {
+        try {
+          final decoded = jsonDecode(persistedPageEtags) as Map<String, dynamic>;
+          _lastPageEtags = decoded.map((k, v) => MapEntry(k, v as String));
+          debugPrint('[Canvas] Loaded ${_lastPageEtags.length} page ETags from disk');
+        } catch (_) {
+          _lastPageEtags = {};
+        }
+      } else {
+        _lastPageEtags = {};
+      }
+
+      // Upgrade migration: if we have no persisted page-etag cache (first
+      // run of 0.33.5+) BUT a cached meta ETag in memory/prefs, AND the
+      // server's current meta ETag matches ours, we can safely assume our
+      // local state is in sync with the server and snapshot the current
+      // server page ETags as our baseline. Without this, every pre-0.33.5
+      // install would re-download every page of every notebook on its
+      // first post-upgrade pull (50-200+ page notebooks × N = painful).
+      if (_lastPageEtags.isEmpty && _remoteMetaEtag != null) {
+        try {
+          final syncService = _ref.read(syncServiceProvider);
+          if (syncService != null) {
+            final serverMeta = await syncService.getDeltaMetaEtag(notebookId);
+            if (serverMeta != null && serverMeta == _remoteMetaEtag) {
+              final serverState = await syncService.getRemoteChangeState(notebookId);
+              _lastPageEtags = Map.of(serverState.pageEtags);
+              await _persistLastPageEtags(notebookId);
+              debugPrint('[Canvas] Migration: seeded ${_lastPageEtags.length} '
+                  'page ETags from server (meta ETag matches, local is in sync)');
+            }
+          }
+        } catch (e) {
+          debugPrint('[Canvas] Page-ETag migration seed failed: $e');
+        }
+      }
+
       debugPrint('[Canvas] Initialized ${_lastPageEtags.length} page ETags '
           '(persisted meta etag: ${_remoteMetaEtag != null})');
     } catch (e) {
       debugPrint('[Canvas] Could not init page ETags: $e');
     }
+  }
+
+  /// Persist [_lastPageEtags] to disk. Called after every pull/save cycle
+  /// that updates the map so a cold restart resumes with the ETag state
+  /// that matches our local .ncnote content.
+  Future<void> _persistLastPageEtags(String notebookId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+          _pageEtagsPrefsKey(notebookId), jsonEncode(_lastPageEtags));
+    } catch (_) {}
   }
 
   /// Persist the current [_remoteMetaEtag] so next app launch can skip the
@@ -5235,6 +5288,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
     await fileService.markNotebookSynced(updatedMeta.id, result.metaEtag);
     await _persistRemoteMetaEtag(updatedMeta.id);
+    // Persist per-page ETags so a cold restart doesn't silently mistake
+    // 'server has moved since we last pulled' for 'server matches our
+    // local state'.
+    await _persistLastPageEtags(updatedMeta.id);
     print('[Canvas] Delta synced: ${dirtyPages.length} pages → server '
         '(${result.pageEtags.length} etags captured)');
   }
@@ -5603,6 +5660,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         'cached=${_lastPageEtags.length} state=${s.pages.length})',
       ));
       _lastPageEtags = Map.of(remotePageEtags);
+      unawaited(_persistLastPageEtags(s.metadata.id));
       return false;
     }
 
@@ -6097,6 +6155,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     _lastPageEtags = Map.of(remotePageEtags);
+    unawaited(_persistLastPageEtags(s.metadata.id));
     return anyPageChanged;
   }
 
