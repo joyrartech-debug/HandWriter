@@ -538,10 +538,25 @@ class NotebookListNotifier
           }
         }
 
-        // Save file + DB entry (root .ncnote is what we cache locally;
-        // the canvas pull will overwrite it with the exploded state when
-        // the user opens the notebook for the first time).
-        await fileService.saveNotebookFile(rootMeta.id, fullData);
+        // Save file ONLY if a local copy doesn't already exist. An
+        // existing local .ncnote is always considered more authoritative
+        // than the server's root ZIP: the delta-sync path writes pages
+        // directly to .sync/<id>/* without updating the root ZIP, so the
+        // root is typically stale by minutes to hours. Overwriting local
+        // with the stale server ZIP would silently destroy pages the
+        // canvas just pulled (the 'AICD saved 43 MB of strokes, library
+        // refresh ran, now file is 33 MB and 10 MB of content is gone'
+        // bug). First-time cache of a never-before-seen notebook still
+        // works because then there is no local file.
+        final hasLocal = await fileService.hasLocalCopy(rootMeta.id);
+        if (!hasLocal) {
+          await fileService.saveNotebookFile(rootMeta.id, fullData);
+          debugPrint('[Library] First-time cache of ${rootMeta.id} '
+              '(${fullData.length} bytes from server root .ncnote)');
+        } else {
+          debugPrint('[Library] NOT overwriting local .ncnote for ${rootMeta.id} '
+              '(local is canvas-maintained, server root ZIP is stale)');
+        }
         await fileService.upsertNotebookMeta(
           id: rootMeta.id,
           title: libraryMeta.title,
@@ -550,7 +565,7 @@ class NotebookListNotifier
           localModifiedAt: libraryModifiedAt,
           remoteModifiedAt: file.lastModified,
           syncStatus: 'synced',
-          fileSize: fullData.length,
+          fileSize: hasLocal ? (await fileService.readNotebookFile(rootMeta.id))?.length ?? fullData.length : fullData.length,
           coverColor: libraryMeta.coverColor,
           paperType: libraryMeta.paperType,
           pageCount: libraryMeta.pageCount,
