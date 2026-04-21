@@ -59,8 +59,22 @@ class WebDavService {
 
   late final String _davUrl;
   late final Map<String, String> _authHeaders;
-  late final http.Client _client;
-  late final io.HttpClient _innerHttpClient;
+  late http.Client _client;
+  late io.HttpClient _innerHttpClient;
+
+  /// Counter of consecutive request failures (timeout, IO error, null
+  /// response where we expected content). When this exceeds
+  /// [_zombieClientThreshold] we rebuild the underlying HttpClient — on
+  /// iOS the NSURLSession backing dart:io can occasionally get into a
+  /// state where EVERY outbound call returns null/empty even though the
+  /// network itself is healthy (verified by Safari), and only a fresh
+  /// session fixes it. Resets on every successful request.
+  int _consecutiveFailures = 0;
+  static const int _zombieClientThreshold = 3;
+  DateTime _lastClientBuildAt = DateTime.now();
+  /// Minimum time between rebuilds so a legitimate server outage doesn't
+  /// spin us into a tight reconnect loop.
+  static const Duration _clientRebuildCooldown = Duration(seconds: 20);
 
   WebDavService({
     required this.serverUrl,
@@ -91,22 +105,64 @@ class WebDavService {
       'Accept-Encoding': 'gzip',
     };
 
-    // ── Custom IOClient with bumped connection pool ──
-    _innerHttpClient = io.HttpClient()
-      ..maxConnectionsPerHost = _maxConnectionsPerHost
-      ..idleTimeout = _idleTimeout
-      ..autoUncompress = true
-      // Permit self-signed certs over Tailscale / LAN if the user has
-      // TLS set up with a cert that isn't in the system trust store.
-      // Only fires if scheme == 'https' AND the host matches the
-      // configured server — we deliberately don't blanket-accept.
-      ..badCertificateCallback = _badCertificateCallback;
-    _client = http_io.IOClient(_innerHttpClient);
+    _buildClient();
 
     // Pre-warm the connection pool in the background so the very first
     // pull on app-start doesn't pay the TCP handshake / TLS ALPN cost
     // inside the user's "Apertura notebook..." dialog.  Fire-and-forget;
     // a failure here just means the first real request pays the cost.
+    // ignore: discarded_futures
+    _preWarm();
+  }
+
+  void _buildClient() {
+    // Tear down any previous HttpClient (on reconnect / zombie recovery).
+    try { _client.close(); } catch (_) {}
+    _innerHttpClient = io.HttpClient()
+      ..maxConnectionsPerHost = _maxConnectionsPerHost
+      ..idleTimeout = _idleTimeout
+      ..autoUncompress = true
+      ..badCertificateCallback = _badCertificateCallback;
+    _client = http_io.IOClient(_innerHttpClient);
+    _lastClientBuildAt = DateTime.now();
+    _consecutiveFailures = 0;
+  }
+
+  /// Record a request outcome. On repeated failure, rebuild the underlying
+  /// HttpClient to recover from an iOS NSURLSession that has silently
+  /// gone zombie (Safari works, dart:io returns null for every call).
+  void _recordSuccess() {
+    if (_consecutiveFailures > 0) {
+      // ignore: avoid_print
+      print('[WebDAV] Recovered after $_consecutiveFailures consecutive failures');
+    }
+    _consecutiveFailures = 0;
+  }
+
+  void _recordFailure(String op, Object error) {
+    _consecutiveFailures++;
+    final sinceBuild = DateTime.now().difference(_lastClientBuildAt);
+    if (_consecutiveFailures >= _zombieClientThreshold &&
+        sinceBuild > _clientRebuildCooldown) {
+      // ignore: avoid_print
+      print('[WebDAV] Rebuilding HttpClient after $_consecutiveFailures '
+          'consecutive failures on $op: $error');
+      _buildClient();
+      // fire-and-forget pre-warm on the fresh client
+      // ignore: discarded_futures
+      _preWarm();
+    }
+  }
+
+  /// Force-rebuild the HttpClient. Call this when connectivity is known
+  /// to have transitioned offline→online (iOS can leave NSURLSession
+  /// stranded after a Tailscale/WiFi handoff; Safari works but our
+  /// dart:io client keeps returning null). The rebuild cooldown is
+  /// bypassed because the caller has external evidence of a transition.
+  void wakeUp() {
+    // ignore: avoid_print
+    print('[WebDAV] wakeUp() — rebuilding HttpClient on external trigger');
+    _buildClient();
     // ignore: discarded_futures
     _preWarm();
   }
@@ -160,13 +216,14 @@ class WebDavService {
 
   /// Lista file e cartelle in un path remoto.
   Future<List<WebDavItem>> listDirectory(String remotePath) async {
-    final request = http.Request('PROPFIND', Uri.parse(_fullUrl(remotePath)));
-    request.headers.addAll({
-      ..._authHeaders,
-      'Depth': '1',
-      'Content-Type': 'application/xml; charset=utf-8',
-    });
-    request.body = '''<?xml version="1.0" encoding="UTF-8"?>
+    try {
+      final request = http.Request('PROPFIND', Uri.parse(_fullUrl(remotePath)));
+      request.headers.addAll({
+        ..._authHeaders,
+        'Depth': '1',
+        'Content-Type': 'application/xml; charset=utf-8',
+      });
+      request.body = '''<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:resourcetype/>
@@ -177,19 +234,31 @@ class WebDavService {
   </d:prop>
 </d:propfind>''';
 
-    final streamedResponse = await _client
-        .send(request)
-        .timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
+      final streamedResponse = await _client
+          .send(request)
+          .timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
 
-    if (streamedResponse.statusCode != 207) {
-      throw WebDavException(
-        'PROPFIND failed: ${streamedResponse.statusCode}',
-        streamedResponse.statusCode,
-      );
+      if (streamedResponse.statusCode == 404) {
+        _recordSuccess(); // genuine not-found, not a client health issue
+        throw WebDavException('PROPFIND 404', 404);
+      }
+      if (streamedResponse.statusCode != 207) {
+        _recordFailure('listDirectory', 'status ${streamedResponse.statusCode}');
+        throw WebDavException(
+          'PROPFIND failed: ${streamedResponse.statusCode}',
+          streamedResponse.statusCode,
+        );
+      }
+
+      final body = await streamedResponse.stream.bytesToString();
+      _recordSuccess();
+      return _parseMultiStatus(body, remotePath);
+    } on WebDavException {
+      rethrow;
+    } catch (e) {
+      _recordFailure('listDirectory', e);
+      rethrow;
     }
-
-    final body = await streamedResponse.stream.bytesToString();
-    return _parseMultiStatus(body, remotePath);
   }
 
   /// Scarica un file dal server.
@@ -199,22 +268,34 @@ class WebDavService {
   /// back to the general WebDAV timeout — fine for most page/asset GETs.
   Future<Uint8List> downloadFile(String remotePath,
       {int? timeoutSeconds}) async {
-    final response = await _client
-        .get(
-          Uri.parse(_fullUrl(remotePath)),
-          headers: _authHeaders,
-        )
-        .timeout(Duration(
-            seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
+    try {
+      final response = await _client
+          .get(
+            Uri.parse(_fullUrl(remotePath)),
+            headers: _authHeaders,
+          )
+          .timeout(Duration(
+              seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
 
-    if (response.statusCode != 200) {
-      throw WebDavException(
-        'GET failed: ${response.statusCode}',
-        response.statusCode,
-      );
+      if (response.statusCode == 404) {
+        _recordSuccess();
+        throw WebDavException('GET 404', 404);
+      }
+      if (response.statusCode != 200) {
+        _recordFailure('downloadFile', 'status ${response.statusCode}');
+        throw WebDavException(
+          'GET failed: ${response.statusCode}',
+          response.statusCode,
+        );
+      }
+      _recordSuccess();
+      return response.bodyBytes;
+    } on WebDavException {
+      rethrow;
+    } catch (e) {
+      _recordFailure('downloadFile', e);
+      rethrow;
     }
-
-    return response.bodyBytes;
   }
 
   /// Carica un file sul server. Crea o sovrascrive.
@@ -222,23 +303,31 @@ class WebDavService {
   /// [timeoutSeconds] overrides the default timeout for this call.
   Future<String?> uploadFile(String remotePath, Uint8List data,
       {int? timeoutSeconds}) async {
-    final response = await _client.put(
-      Uri.parse(_fullUrl(remotePath)),
-      headers: {
-        ..._authHeaders,
-        'Content-Type': 'application/octet-stream',
-      },
-      body: data,
-    ).timeout(Duration(seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
+    try {
+      final response = await _client.put(
+        Uri.parse(_fullUrl(remotePath)),
+        headers: {
+          ..._authHeaders,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: data,
+      ).timeout(Duration(seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
 
-    if (response.statusCode != 201 && response.statusCode != 204) {
-      throw WebDavException(
-        'PUT failed: ${response.statusCode}',
-        response.statusCode,
-      );
+      if (response.statusCode != 201 && response.statusCode != 204) {
+        _recordFailure('uploadFile', 'status ${response.statusCode}');
+        throw WebDavException(
+          'PUT failed: ${response.statusCode}',
+          response.statusCode,
+        );
+      }
+      _recordSuccess();
+      return response.headers['etag'];
+    } on WebDavException {
+      rethrow;
+    } catch (e) {
+      _recordFailure('uploadFile', e);
+      rethrow;
     }
-
-    return response.headers['etag'];
   }
 
   /// Crea una cartella remota.
@@ -340,30 +429,54 @@ class WebDavService {
 
   /// Ottieni l'ETag di un file remoto (per conflict detection).
   Future<String?> getEtag(String remotePath) async {
-    final request = http.Request('PROPFIND', Uri.parse(_fullUrl(remotePath)));
-    request.headers.addAll({
-      ..._authHeaders,
-      'Depth': '0',
-      'Content-Type': 'application/xml; charset=utf-8',
-    });
-    request.body = '''<?xml version="1.0" encoding="UTF-8"?>
+    try {
+      final request = http.Request('PROPFIND', Uri.parse(_fullUrl(remotePath)));
+      request.headers.addAll({
+        ..._authHeaders,
+        'Depth': '0',
+        'Content-Type': 'application/xml; charset=utf-8',
+      });
+      request.body = '''<?xml version="1.0" encoding="UTF-8"?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:getetag/>
   </d:prop>
 </d:propfind>''';
 
-    final streamedResponse = await _client
-        .send(request)
-        .timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
+      final streamedResponse = await _client
+          .send(request)
+          .timeout(const Duration(seconds: AppConfig.webdavTimeoutSeconds));
 
-    if (streamedResponse.statusCode != 207) return null;
+      if (streamedResponse.statusCode == 404) {
+        // A genuine 404 is NOT a client-health failure — the file just
+        // doesn't exist. Let callers distinguish via the thrown exception.
+        _recordSuccess();
+        throw WebDavException('PROPFIND 404', 404);
+      }
+      if (streamedResponse.statusCode != 207) {
+        _recordFailure('getEtag', 'status ${streamedResponse.statusCode}');
+        return null;
+      }
 
-    final body = await streamedResponse.stream.bytesToString();
-    final document = XmlDocument.parse(body);
-    final etagElements = document.findAllElements('d:getetag');
-    if (etagElements.isEmpty) return null;
-    return etagElements.first.innerText.replaceAll('"', '');
+      final body = await streamedResponse.stream.bytesToString();
+      final document = XmlDocument.parse(body);
+      final etagElements = document.findAllElements('d:getetag');
+      if (etagElements.isEmpty) {
+        _recordFailure('getEtag', 'empty response body');
+        return null;
+      }
+      _recordSuccess();
+      return etagElements.first.innerText.replaceAll('"', '');
+    } on WebDavException {
+      rethrow;
+    } catch (e) {
+      _recordFailure('getEtag', e);
+      // Rethrow so callers (e.g. deltaFolderExists) can distinguish
+      // 'network uncertainty' from 'definite 404'. The older 'return
+      // null on any error' swallowed network issues and caused the
+      // library to wipe local notebooks during Tailscale blips.
+      rethrow;
+    }
   }
 
   /// Assicura che la cartella base dell'app esista sul server.
@@ -402,6 +515,7 @@ class WebDavService {
 
   /// Fast ETag check via HEAD — single request, no XML parse.
   /// Falls back to null on any error (caller retries via PROPFIND).
+  /// Feeds the zombie-client detector: repeated nulls rebuild the client.
   Future<String?> getEtagFast(String remotePath) async {
     try {
       final response = await _client.head(
@@ -409,10 +523,21 @@ class WebDavService {
         headers: _authHeaders,
       ).timeout(const Duration(seconds: 8));
 
-      if (response.statusCode != 200) return null;
+      if (response.statusCode != 200) {
+        _recordFailure('getEtagFast', 'status ${response.statusCode}');
+        return null;
+      }
       final etag = response.headers['etag'];
-      return etag?.replaceAll('"', '');
-    } catch (_) {
+      if (etag == null) {
+        // HEAD succeeded status-wise but response missing headers is the
+        // classic 'zombie client' symptom on iOS NSURLSession.
+        _recordFailure('getEtagFast', 'missing etag header');
+        return null;
+      }
+      _recordSuccess();
+      return etag.replaceAll('"', '');
+    } catch (e) {
+      _recordFailure('getEtagFast', e);
       return null;
     }
   }

@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/core/providers/auth_provider.dart' show webdavServiceProvider;
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/pending_import_provider.dart';
@@ -264,9 +265,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Resume: if we're back in the foreground and a notebook is open but
     // the pull timer got killed by a previous teardown, restart it so
-    // cross-device updates arrive promptly again.
+    // cross-device updates arrive promptly again. Also wake up the
+    // WebDAV client — iOS backgrounds stranded NSURLSession handles after
+    // a screen lock or app-switch and subsequent calls return null even
+    // though the network itself is healthy.
     if (state == AppLifecycleState.resumed) {
       if (_closing) return;
+      try {
+        ref.read(webdavServiceProvider)?.wakeUp();
+      } catch (_) {}
       final canvas = ref.read(canvasProvider);
       if (canvas != null) {
         ref.read(canvasProvider.notifier).restartPullTimerIfNeeded();

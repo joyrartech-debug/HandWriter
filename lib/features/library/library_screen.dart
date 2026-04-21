@@ -353,6 +353,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     if (connectivity == null) return;
 
     connectivity.onReconnected = () async {
+      // First action on reconnect: wake up the WebDAV client. On iOS the
+      // dart:io NSURLSession can get stuck after a Tailscale/WiFi handoff
+      // — every call returns null even though Safari works. Forcing a
+      // fresh client here beats waiting for the zombie-detector inside
+      // WebDavService to trip on 3 consecutive failures.
+      try {
+        ref.read(webdavServiceProvider)?.wakeUp();
+      } catch (e) {
+        debugPrint('[Library] webdav wakeUp failed: $e');
+      }
       // Delta-based retry is fast (only uploads changed pages) so try it
       // first — if the notebook has a delta folder on the server it'll
       // complete in a few hundred ms. _syncDirtyNotebooks is the legacy
