@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
+import 'package:handwriter/core/providers/canvas_provider.dart' show canvasProvider;
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/crash_logger.dart';
 import 'package:handwriter/core/services/file_service.dart';
@@ -334,16 +335,42 @@ class NotebookListNotifier
     }
 
     // ── Detect remote deletions: remove notebooks no longer on server ──
+    //
+    // The PROPFIND only lists root-level `.ncnote` files. A notebook whose
+    // root `.ncnote` is missing may still be alive via its delta folder
+    // (another device may have deleted the legacy ZIP by accident, or a
+    // pre-delta sync cycle never uploaded one). Before wiping the local
+    // cache, verify the delta folder doesn't exist — without that check
+    // we were silently destroying notebooks that the user had JUST been
+    // editing on another device (the "AICD scompare dalla libreria" bug).
+    //
+    // Also: never touch a notebook that's currently open in the canvas.
+    // Deleting its files out from under the user mid-edit is catastrophic.
+    final openIdForRemoval = _ref.read(canvasProvider)?.metadata.id;
     for (final row in localRows) {
       final rp = row['remote_path'] as String? ?? '';
       final syncStatus = row['sync_status'] as String? ?? '';
-      // Only remove synced notebooks (keep local-only ones)
-      if (rp.isNotEmpty && syncStatus == 'synced' && !seenRemotePaths.contains(rp)) {
-        final id = row['id'] as String;
-        debugPrint('[Library] Notebook $id removed from server, cleaning local cache');
-        await fileService.deleteNotebook(id);
-        changed = true;
+      final id = row['id'] as String;
+      if (rp.isEmpty || syncStatus != 'synced') continue;
+      if (seenRemotePaths.contains(rp)) continue;
+      if (id == openIdForRemoval) {
+        debugPrint('[Library] Skipping remote-delete cleanup for $id — notebook is currently open');
+        continue;
       }
+      // Root .ncnote missing — check the delta folder. If it's still
+      // there, the notebook is alive; just the legacy ZIP is gone.
+      bool deltaAlive = false;
+      try {
+        deltaAlive = await syncService.deltaFolderExists(id);
+      } catch (_) {}
+      if (deltaAlive) {
+        debugPrint('[Library] Root .ncnote missing for $id but delta folder alive — '
+            'skipping cleanup (notebook still exists on server)');
+        continue;
+      }
+      debugPrint('[Library] Notebook $id removed from server, cleaning local cache');
+      await fileService.deleteNotebook(id);
+      changed = true;
     }
 
     if (skipped.isNotEmpty) {

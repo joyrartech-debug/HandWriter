@@ -5327,26 +5327,45 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         'cachedMetaEtag=${_remoteMetaEtag ?? "null"} '
         'lastPageEtags=${_lastPageEtags.length}',
       ));
-      final fastMetaEtag = await syncService.getDeltaMetaEtag(pullNotebookId);
+      // Fetch metadata ETag + per-page ETags in a single parallel round-trip.
+      // We used to skip the per-page PROPFIND on the idle fast-path to save a
+      // call, but that hid a dangerous case: when another device crashes
+      // mid-upload after writing pages + document.json but BEFORE committing
+      // metadata.json (ordered-commit bug window), the server sits with
+      // metadata.pageCount < pages/ folder count. The metadata ETag looks
+      // unchanged → fast-path skip → the orphan page_NNN.json is invisible
+      // to this device forever. By doing both checks here we detect the
+      // mismatch and fall through to the slow path which downloads
+      // document.json (which IS up-to-date) and hydrates the new pages.
+      final remoteState =
+          await syncService.getRemoteChangeState(pullNotebookId);
+      final fastMetaEtag = remoteState.metaEtag;
       if (state == null || state!.metadata.id != pullNotebookId) {
         print('[Canvas] Pull aborted — notebook switched during HEAD '
             '(expected $pullNotebookId, got ${state?.metadata.id})');
         unawaited(CrashLogger.append('[Pull] abort: nb switched during HEAD'));
         return;
       }
+      // Detect server-side metadata/pages inconsistency.
+      final remotePageCount = remoteState.pageEtags.length;
+      final serverInconsistent =
+          remotePageCount > s0.document.pages.length ||
+          (_lastPageEtags.isNotEmpty &&
+              remoteState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k)));
       if (fastMetaEtag != null &&
           _remoteMetaEtag != null &&
-          fastMetaEtag == _remoteMetaEtag) {
-        // Server unchanged since last known etag — but only skip the
-        // pull if our local state is internally consistent. If a previous
-        // pull left `document.pages > pages`, we still have missing data
-        // to fetch regardless of what the server says. Skipping here
-        // wedges the notebook until the user triggers "Forza sync"
-        // manually, which is exactly the bug we're here to kill.
+          fastMetaEtag == _remoteMetaEtag &&
+          !serverInconsistent) {
+        // Server unchanged since last known etag AND no sign of a half-
+        // committed upload from another device. Safe to skip the pull if
+        // local state is also self-consistent. If `document.pages > pages`,
+        // a previous partial pull left us with missing data and we need
+        // to fetch regardless of what the server says.
         if (s0.pages.length >= s0.document.pages.length) {
           unawaited(CrashLogger.append(
             '[Pull] skip: meta ETag unchanged (fast=$fastMetaEtag) '
-            'and state is consistent (pages=${s0.pages.length}=doc=${s0.document.pages.length})',
+            'and state is consistent (pages=${s0.pages.length}=doc=${s0.document.pages.length}, '
+            'remote pages=$remotePageCount)',
           ));
           return;
         }
@@ -5354,6 +5373,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           '[Pull] force slow-path despite matching ETag: state inconsistent '
           '(pages=${s0.pages.length} < doc=${s0.document.pages.length}) — '
           're-fetching to hydrate missing pages',
+        ));
+      } else if (serverInconsistent) {
+        unawaited(CrashLogger.append(
+          '[Pull] SERVER inconsistency detected: metaEtag unchanged but '
+          'pages/ folder has $remotePageCount files vs '
+          'local document.pages=${s0.document.pages.length}. '
+          'Forcing slow path to hydrate orphan pages (broken commit from '
+          'another device).',
         ));
       }
       unawaited(CrashLogger.append(
