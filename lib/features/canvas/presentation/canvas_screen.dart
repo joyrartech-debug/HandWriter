@@ -226,8 +226,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // `inactive` fires VERY frequently on desktop (every window focus change,
+    // dock click, alt-tab). Treating it like a pause killed the pull timer
+    // for the entire duration the user was looking at another window and
+    // never restarted it — strokes from the iPad became invisible on PC
+    // until the user re-opened the notebook. Only treat `paused` and
+    // `detached` as real teardown triggers; flush nothing on `inactive`.
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
       // App is being backgrounded / screen locked / process about to die.
       // Skip if we're already tearing down (via _onWillPop → closeNotebook)
@@ -244,6 +249,18 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final canvas = ref.read(canvasProvider);
       if (canvas != null && canvas.isDirty && !_isSaving) {
         _save(silent: true);
+      }
+      return;
+    }
+
+    // Resume: if we're back in the foreground and a notebook is open but
+    // the pull timer got killed by a previous teardown, restart it so
+    // cross-device updates arrive promptly again.
+    if (state == AppLifecycleState.resumed) {
+      if (_closing) return;
+      final canvas = ref.read(canvasProvider);
+      if (canvas != null) {
+        ref.read(canvasProvider.notifier).restartPullTimerIfNeeded();
       }
     }
   }

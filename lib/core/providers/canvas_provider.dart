@@ -5311,6 +5311,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _schedulePullTick();
   }
 
+  /// Restart the pull timer when coming back from a teardown that killed it
+  /// (e.g. previous `paused` lifecycle event). No-op if a timer is already
+  /// running. Called from the canvas screen on `AppLifecycleState.resumed`.
+  void restartPullTimerIfNeeded() {
+    if (_disposed) return;
+    if (state == null) return;
+    if (_pullTimer != null) return;
+    debugPrint('[Canvas] Resume: restarting pull timer');
+    _startPullTimer();
+  }
+
   /// Self-rescheduling pull tick. Adds random jitter per cycle so multiple
   /// devices don't hit the server in lockstep, and skips firing while a
   /// save() is still holding the sync lock (save releases the lock only
@@ -5660,7 +5671,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         'cached=${_lastPageEtags.length} state=${s.pages.length})',
       ));
       _lastPageEtags = Map.of(remotePageEtags);
-      unawaited(_persistLastPageEtags(s.metadata.id));
+      // Await the persist — the user can close the notebook during the
+      // 'noop' tick of the pull loop, and if the unawaited write hadn't
+      // landed yet the next open would reset _lastPageEtags to empty and
+      // force a full 183-page re-sync next time.
+      await _persistLastPageEtags(s.metadata.id);
       return false;
     }
 
@@ -6155,7 +6170,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     _lastPageEtags = Map.of(remotePageEtags);
-    unawaited(_persistLastPageEtags(s.metadata.id));
+    // Await — if we only 'unawait' this, a notebook close fires right
+    // after a successful pull race the SharedPreferences write and the
+    // next open wakes up with _lastPageEtags={} → forces a full N-page
+    // re-sync even though nothing on the server changed.
+    await _persistLastPageEtags(s.metadata.id);
     return anyPageChanged;
   }
 
