@@ -296,9 +296,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _saveInFlight = completer.future;
     try {
       await ref.read(canvasProvider.notifier).save();
+      // Only say 'Salvato!' if the save actually cleared the dirty flag.
+      // If state.isDirty is still true, _saveInner aborted silently (most
+      // often: pre-save guard #2 fired because document references pages
+      // whose data isn't in memory — a pull is now healing that). Tell
+      // the user the truth so they don't think their work was saved when
+      // it's still pending.
+      final stillDirty = ref.read(canvasProvider)?.isDirty ?? false;
       if (mounted && !silent) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Salvato!'), duration: Duration(seconds: 1)),
+          SnackBar(
+            content: Text(stillDirty
+                ? 'Sincronizzazione in corso…'
+                : 'Salvato!'),
+            duration: const Duration(seconds: 1),
+          ),
         );
       }
     } catch (e) {

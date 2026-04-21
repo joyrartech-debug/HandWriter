@@ -5692,6 +5692,39 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // ── Mass-delete sanity check ──
+    //
+    // If the server's pages/ listing came back with DRASTICALLY FEWER
+    // entries than what we have cached, this is almost certainly a
+    // network/PROPFIND issue (partial response, proxy error, server
+    // glitch) rather than a user genuinely deleting every page at once.
+    // A previous version interpreted the 0-count case as 'all 183 pages
+    // deleted' and auto-removed them from local state (then filled the
+    // gaps with blank placeholders on the next pull), wiping hours of
+    // work. Bail out of the pull completely when this pattern matches.
+    //
+    // Heuristic: server returned 0 AND we had >=5 cached, OR server
+    // returned <50% of what we had cached AND cached was >=20. Either
+    // case is implausible as a genuine operation and more plausible
+    // as a networking glitch.
+    if (_lastPageEtags.isNotEmpty) {
+      final cachedCount = _lastPageEtags.length;
+      final remoteCount = remotePageEtags.length;
+      final suspicious = (remoteCount == 0 && cachedCount >= 5) ||
+          (cachedCount >= 20 && remoteCount < cachedCount ~/ 2);
+      if (suspicious) {
+        print('[Canvas] Pull: ABORTING — server listing returned $remoteCount '
+            'pages vs $cachedCount cached; refusing to treat as mass-delete '
+            '(likely a transient PROPFIND failure). Next pull will retry.');
+        unawaited(CrashLogger.append(
+          '[Pull] abort: mass-delete-protection '
+          '(remote=$remoteCount, cached=$cachedCount)',
+        ));
+        _pullHadFailures = true; // force retry next cycle
+        return false;
+      }
+    }
+
     // Detect pages that were deleted remotely (in our ETag cache but gone
     // from the remote pages/ folder listing).
     final deletedRemotelyByEtag = _lastPageEtags.keys

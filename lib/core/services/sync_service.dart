@@ -748,20 +748,23 @@ class SyncService {
 
   /// Gets ETags for all pages in the exploded folder.
   /// Returns {pageFileName: etag}.
+  ///
+  /// Throws on network failure instead of returning an empty map. Returning
+  /// empty on failure was catastrophic: the pull diff interpreted the zero
+  /// result as 'every locally-cached page was deleted from the server' and
+  /// wiped the local state (observed in production: 183 pages auto-removed
+  /// then restored as BLANK placeholders after a Tailscale hiccup). Callers
+  /// that want a tolerant default can catch and interpret themselves.
   Future<Map<String, String>> getRemotePageEtags(String notebookId) async {
     final dir = _deltaDir(notebookId);
-    try {
-      final items = await _webdav.listDirectory('${dir}pages/');
-      return {
-        for (final item in items)
-          if (!item.isDirectory &&
-              item.name.endsWith('.json') &&
-              item.etag != null)
-            item.name: item.etag!,
-      };
-    } catch (_) {
-      return {};
-    }
+    final items = await _webdav.listDirectory('${dir}pages/');
+    return {
+      for (final item in items)
+        if (!item.isDirectory &&
+            item.name.endsWith('.json') &&
+            item.etag != null)
+          item.name: item.etag!,
+    };
   }
 
   /// Fetch metadata ETag + page ETags in one parallel call.
