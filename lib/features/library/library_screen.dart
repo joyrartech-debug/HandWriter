@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -159,17 +160,44 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           mergedAssets = {};
         }
 
-        // Download ALL pages listed in the remote document (new + modified).
+        // ── Per-page ETag diff: download ONLY pages whose ETag moved ──
+        //
+        // Previously this loop fetched every page listed in remote document
+        // even when local already had identical content, just because the
+        // notebook-level meta ETag had changed. On Tailscale that burned
+        // 30+ MB per cycle for a large notebook that had merely been
+        // re-saved elsewhere (140 pages x ~200 KB = 28 MB). Now we compare
+        // each page's WebDAV ETag against a persisted per-notebook cache
+        // and only download the real diff — typically 0-3 pages per cycle.
+        final etagKey = 'bgsync_page_etags_$id';
+        Map<String, String> cachedPageEtags = {};
+        try {
+          final raw = prefs.getString(etagKey);
+          if (raw != null && raw.isNotEmpty) {
+            cachedPageEtags = Map<String, String>.from(
+                jsonDecode(raw) as Map<String, dynamic>);
+          }
+        } catch (_) {}
+
+        final remotePageEtags = changeState.pageEtags;
         final allRemotePageNames = remoteMeta.document.pages
             .map((p) => p.fileName)
             .where((fn) => fn.isNotEmpty)
             .toList();
+        final pagesToFetch = <String>[];
+        for (final fn in allRemotePageNames) {
+          final remoteEtag = remotePageEtags[fn];
+          final cachedEtag = cachedPageEtags[fn];
+          final etagChanged = remoteEtag != null && remoteEtag != cachedEtag;
+          final missingLocally = !mergedPages.containsKey(fn);
+          if (etagChanged || missingLocally) pagesToFetch.add(fn);
+        }
 
-        if (allRemotePageNames.isNotEmpty) {
-          debugPrint('[BgSync] Downloading ${allRemotePageNames.length} pages '
+        if (pagesToFetch.isNotEmpty) {
+          debugPrint('[BgSync] Downloading ${pagesToFetch.length} pages '
               'for ${entry.metadata.title} '
-              '(${allRemotePageNames.where((fn) => !mergedPages.containsKey(fn)).length} new, '
-              '${allRemotePageNames.where((fn) => mergedPages.containsKey(fn)).length} refresh)');
+              '(${pagesToFetch.where((fn) => !mergedPages.containsKey(fn)).length} new, '
+              '${pagesToFetch.where((fn) => mergedPages.containsKey(fn)).length} refresh)');
 
           // Helper: download a single page with retries
           Future<PageData?> fetchPage(String fn) async {
@@ -189,12 +217,19 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           }
 
           final pageResults = await Future.wait(
-            allRemotePageNames.map((fn) async => (fn, await fetchPage(fn))),
+            pagesToFetch.map((fn) async => (fn, await fetchPage(fn))),
           );
           for (final (fn, page) in pageResults) {
             if (page != null) mergedPages[fn] = page;
           }
+        } else {
+          debugPrint('[BgSync] ${entry.metadata.title}: no per-page ETag changes, skipping page downloads');
         }
+
+        // Persist the updated per-page ETag cache for the next cycle.
+        try {
+          await prefs.setString(etagKey, jsonEncode(remotePageEtags));
+        } catch (_) {}
 
         // If any pages that document.json references still have no data,
         // trim the document to only the pages we actually have.  This prevents

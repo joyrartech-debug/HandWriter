@@ -5412,8 +5412,29 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           '[Pull] changeState: metaEtag=${changeState.metaEtag ?? "null"} '
           'remotePages=${changeState.pageEtags.length}',
         ));
-        if (changeState.metaEtag != null && changeState.metaEtag != _remoteMetaEtag) {
-          print('[Canvas] Delta metadata changed, pulling delta...');
+        // Re-evaluate server inconsistency here against the inside-lock
+        // change state (the outside serverInconsistent captured pre-lock
+        // values and doesn't carry through closures cleanly). We enter
+        // the download path if EITHER the meta ETag moved OR the pages/
+        // folder has files the local document doesn't yet know about.
+        final innerInconsistent = changeState.pageEtags.length > s.document.pages.length ||
+            (_lastPageEtags.isNotEmpty &&
+                changeState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k)));
+        if (changeState.metaEtag != null &&
+            (changeState.metaEtag != _remoteMetaEtag || innerInconsistent)) {
+          if (changeState.metaEtag == _remoteMetaEtag && innerInconsistent) {
+            print('[Canvas] Meta ETag unchanged but pages/ folder grew '
+                '(${changeState.pageEtags.length} remote vs '
+                '${s.document.pages.length} local document). '
+                'Hydrating orphan pages from server.');
+            unawaited(CrashLogger.append(
+              '[Pull] hydrating orphan pages despite matching meta ETag '
+              '(remote pages=${changeState.pageEtags.length}, '
+              'local doc=${s.document.pages.length})',
+            ));
+          } else {
+            print('[Canvas] Delta metadata changed, pulling delta...');
+          }
           // The pill is NOT flipped here — metadata ETag changes even when
           // nothing of substance was downloaded (e.g. same content re-uploaded
           // from this device, weak/strong ETag reformatting by the server).
