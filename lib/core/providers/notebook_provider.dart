@@ -979,6 +979,42 @@ class NotebookListNotifier
       final id = row['id'] as String?;
       final remotePath = row['remote_path'] as String?;
       if (id == null || remotePath == null || remotePath.isEmpty) continue;
+
+      // ── SAFETY: never retry-upload a notebook whose delta folder is
+      // alive on the server. Re-uploading ALL pages as 'dirty' would
+      // overwrite whatever another device (e.g. iPad) uploaded while this
+      // device was offline — and it usually DID, because the whole point
+      // of cross-device sync is that other devices make progress too.
+      //
+      // The canvas pull/save path handles per-page reconciliation with
+      // proper dirty-detection. If this notebook has any local-only
+      // changes, those will be uploaded when the user next opens it.
+      //
+      // This retry path is now only for legacy notebooks that were
+      // created offline and never made it to the delta folder at all —
+      // i.e. the original 'created local, immediate sync attempt failed'
+      // scenario this retry was added for.
+      try {
+        final deltaAlive = await syncService.deltaFolderExists(id);
+        if (deltaAlive) {
+          debugPrint('[Library] Skipping full-notebook retry for $id — '
+              'delta folder is alive on server, canvas pull/save handles '
+              'per-page reconciliation');
+          // Clear the dirty flag since the delta folder IS the committed
+          // state; the DB's 'modified' flag was a vestige from an earlier
+          // save path that never got cleared.
+          try {
+            await fileService.markNotebookSynced(id, row['etag'] as String?);
+          } catch (_) {}
+          continue;
+        }
+      } catch (_) {
+        // If we can't even check the delta folder, we have no business
+        // firing a heavy re-upload. Bail until next cycle.
+        debugPrint('[Library] Skipping retry for $id — cannot verify server state');
+        continue;
+      }
+
       try {
         final localData = await fileService.readNotebookFile(id);
         if (localData == null) continue;
@@ -987,9 +1023,8 @@ class NotebookListNotifier
         final allAssets = syncService.extractAllAssets(localData);
         final symbolLibraries = syncService.extractSymbolLibraries(localData);
 
-        // Prefer the delta exploded folder — it matches the canvas save path
-        // and doesn't force a concurrently-open notebook to re-download the
-        // whole ZIP to pick up the fix.
+        // Legacy path: no delta folder yet, do a full upload to bootstrap
+        // the notebook on the server.
         final res = await syncService.syncDelta(
           notebookId: id,
           metadata: result.metadata,
@@ -999,7 +1034,7 @@ class NotebookListNotifier
           symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
         );
         await fileService.markNotebookSynced(id, res.metaEtag);
-        debugPrint('[Library] Retried upload OK for $id');
+        debugPrint('[Library] Retried upload OK for $id (bootstrapped delta folder)');
       } catch (e) {
         debugPrint('[Library] Retry upload failed for $id: $e (will retry next cycle)');
       }
