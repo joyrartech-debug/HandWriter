@@ -741,6 +741,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   /// Persist the current [_remoteMetaEtag] so next app launch can skip the
   /// redundant first pull when nothing changed on the server.
+  ///
+  /// Also mirrors the ETag into the SQLite notebooks row. Without that, the
+  /// library's background sync (which reads the etag from the DB) sees a
+  /// stale value for any notebook that was pulled WITHOUT a save() cycle —
+  /// and then re-downloads every page of every notebook on the next BgSync
+  /// tick, burning Tailscale bandwidth and delaying the real sync of the
+  /// notebook the user currently has open ("0 new, 109 refresh" x every
+  /// notebook in the library).
   Future<void> _persistRemoteMetaEtag(String notebookId) async {
     final etag = _remoteMetaEtag;
     if (etag == null || etag.isEmpty) return;
@@ -748,6 +756,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString(_deltaMetaEtagPrefsKey(notebookId), etag);
     } catch (_) {}
+    // Mirror into the DB so BgSync's ETag comparison sees the current value.
+    try {
+      final fileService = _ref.read(fileServiceProvider);
+      await fileService.markNotebookSynced(notebookId, etag);
+    } catch (e) {
+      debugPrint('[Canvas] Could not mirror meta ETag to DB: $e');
+    }
   }
 
   /// Drain every in-flight pull / pulled-save / remote-save so the .ncnote +

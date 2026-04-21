@@ -76,23 +76,39 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     final fileService = ref.read(fileServiceProvider);
     if (syncService == null) return;
 
-    // Don't compete with the open notebook's own pull timer
+    // If the user has a notebook open, do NOT start a BgSync cycle at all.
+    // BgSync downloads every page of every notebook it thinks has changed;
+    // even if the open notebook itself is skipped, the parallel HTTP load
+    // on Tailscale starves the open canvas's 2 s pull timer and makes it
+    // feel like "I saved on iPad but PC still shows old content". The
+    // open notebook has its own per-page delta sync — let it run alone.
     final openId = ref.read(canvasProvider)?.metadata.id;
+    if (openId != null) {
+      debugPrint('[BgSync] Skipping cycle — notebook $openId is open');
+      return;
+    }
 
     final notebooks = ref.read(notebookListProvider).valueOrNull ?? const [];
     if (notebooks.isEmpty) return;
 
     bool anyUpdated = false;
 
+    // Pre-load SharedPreferences once so per-notebook lookups are cheap.
+    final prefs = await SharedPreferences.getInstance();
+
     for (final entry in notebooks) {
       final id = entry.metadata.id;
-      if (id == openId) continue; // the open notebook handles its own sync
 
       try {
         // 1. Check if anything changed remotely
         final changeState = await syncService.getRemoteChangeState(id);
         final storedMeta = await fileService.getNotebookMeta(id);
         final storedEtag = storedMeta?['etag'] as String?;
+        // Canvas's pull path persists the meta ETag to SharedPreferences
+        // (and the DB mirror was added in 0.33.1). For older installs the
+        // DB column can still be stale — fall back to prefs so BgSync
+        // doesn't re-download every page after a pure-pull-close cycle.
+        final prefsEtag = prefs.getString('delta_meta_etag_$id');
 
         // Skip notebooks with local unsaved changes — _syncDirtyNotebooks handles
         // them and has conflict-resolution logic.  'pending' is intentionally not
@@ -101,8 +117,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
         final bgSyncStatus = storedMeta?['sync_status'] as String?;
         if (bgSyncStatus == 'modified' || bgSyncStatus == 'new') continue;
 
-        if (changeState.metaEtag != null && changeState.metaEtag == storedEtag) {
-          continue; // nothing changed
+        if (changeState.metaEtag != null &&
+            (changeState.metaEtag == storedEtag ||
+             changeState.metaEtag == prefsEtag)) {
+          continue; // nothing changed on the server since we last synced
         }
 
         debugPrint('[BgSync] Syncing ${entry.metadata.title}...');
