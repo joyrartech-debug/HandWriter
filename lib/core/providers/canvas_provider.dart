@@ -4672,6 +4672,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final s = state!;
     final entry = s.document.pages[index];
     final fileName = entry.fileName;
+    final deletedPageId = entry.pageId;
 
     final newPages = List<PageEntry>.from(s.document.pages)..removeAt(index);
     // Renumber pages (preserve all fields including chapterId)
@@ -4683,6 +4684,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       notebookId: s.document.notebookId,
       formatVersion: s.document.formatVersion,
       pages: newPages,
+    );
+
+    // Purge the deleted page's pageId from every chapter.pageIds list so
+    // we don't leave dead references in metadata.chapters. These were
+    // never fatal (the document is authoritative for navigation) but
+    // accumulated over time as garbage and confused the heal path on
+    // other devices.
+    final cleanedChapters = s.metadata.chapters
+        .map((c) => c.copyWith(
+              pageIds: c.pageIds.where((pid) => pid != deletedPageId).toList(),
+            ))
+        .toList();
+    final cleanedMeta = s.metadata.copyWith(
+      chapters: cleanedChapters,
+      pageCount: newPages.length,
+      modifiedAt: DateTime.now(),
     );
 
     final updatedPages = Map<String, PageData>.from(s.pages)..remove(fileName);
@@ -4720,7 +4737,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       currentPageIndex: newIndex,
       activeChapterId: clearChapter ? null : newActiveChapterId,
       clearActiveChapter: clearChapter,
-      metadata: s.metadata.copyWith(pageCount: newPages.length, modifiedAt: DateTime.now()),
+      metadata: cleanedMeta,
       isDirty: true,
     );
   }
@@ -4746,6 +4763,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     final indicesToRemove = effective.toSet();
     final removedFileNames = indicesToRemove.map((i) => s.document.pages[i].fileName).toSet();
+    final removedPageIds = indicesToRemove.map((i) => s.document.pages[i].pageId).toSet();
 
     final newPages = <PageEntry>[];
     for (int i = 0; i < s.document.pages.length; i++) {
@@ -4781,6 +4799,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // Purge dead pageIds from every chapter (same reason as deletePage).
+    final cleanedChapters = s.metadata.chapters
+        .map((c) => c.copyWith(
+              pageIds: c.pageIds.where((pid) => !removedPageIds.contains(pid)).toList(),
+            ))
+        .toList();
+
     final clearChapter = newActiveChapterId == null && s.activeChapterId != null;
     state = s.copyWith(
       document: updatedDoc,
@@ -4788,7 +4813,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       currentPageIndex: newIndex,
       activeChapterId: clearChapter ? null : newActiveChapterId,
       clearActiveChapter: clearChapter,
-      metadata: s.metadata.copyWith(pageCount: newPages.length, modifiedAt: DateTime.now()),
+      metadata: s.metadata.copyWith(
+        pageCount: newPages.length,
+        modifiedAt: DateTime.now(),
+        chapters: cleanedChapters,
+      ),
       isDirty: true,
     );
   }
@@ -6128,8 +6157,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // pages; local-only entries keep their original chapterId.
       final remoteFileNames =
           remoteMeta.document.pages.map((p) => p.fileName).toSet();
+      // Exclude pages we just auto-deleted (server removed them) from the
+      // local-only preservation set. Without this filter, a page deleted
+      // on another device would be removed from `updatedPages` but its
+      // stale PageEntry would survive in `localOnlyEntries` → document
+      // ends up with N entries while pages map has N-1. The canvas then
+      // reports 'Nessuna pagina' for the ghost entry and every subsequent
+      // pull loops forever at 'pages=N-1 < doc=N, state still mismatch'.
       final localOnlyEntries = s.document.pages
-          .where((p) => !remoteFileNames.contains(p.fileName))
+          .where((p) => !remoteFileNames.contains(p.fileName) &&
+                         !deletedRemotelyByEtag.contains(p.fileName))
           .toList();
 
       // ── Self-heal corrupted server document.json ──
