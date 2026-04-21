@@ -749,30 +749,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         _lastPageEtags = {};
       }
 
-      // Upgrade migration: if we have no persisted page-etag cache (first
-      // run of 0.33.5+) BUT a cached meta ETag in memory/prefs, AND the
-      // server's current meta ETag matches ours, we can safely assume our
-      // local state is in sync with the server and snapshot the current
-      // server page ETags as our baseline. Without this, every pre-0.33.5
-      // install would re-download every page of every notebook on its
-      // first post-upgrade pull (50-200+ page notebooks × N = painful).
-      if (_lastPageEtags.isEmpty && _remoteMetaEtag != null) {
-        try {
-          final syncService = _ref.read(syncServiceProvider);
-          if (syncService != null) {
-            final serverMeta = await syncService.getDeltaMetaEtag(notebookId);
-            if (serverMeta != null && serverMeta == _remoteMetaEtag) {
-              final serverState = await syncService.getRemoteChangeState(notebookId);
-              _lastPageEtags = Map.of(serverState.pageEtags);
-              await _persistLastPageEtags(notebookId);
-              debugPrint('[Canvas] Migration: seeded ${_lastPageEtags.length} '
-                  'page ETags from server (meta ETag matches, local is in sync)');
-            }
-          }
-        } catch (e) {
-          debugPrint('[Canvas] Page-ETag migration seed failed: $e');
-        }
-      }
+      // NOTE: we intentionally do NOT seed _lastPageEtags from the server's
+      // current state when prefs is empty. Seeding from live server state
+      // is UNSAFE: if another device (iPad) has uploaded new page content
+      // but the ordered commit didn't finish (metadata.json still stale),
+      // the server's page ETags are newer than what our local .ncnote
+      // reflects — caching them as-is lies to the pull diff ('cached ==
+      // server, nothing to download') and the iPad edits stay invisible
+      // forever. Silent data loss.
+      //
+      // Acceptable cost: first post-upgrade open re-downloads every page
+      // once. After that, the persisted cache kicks in and cross-device
+      // sync works with 2 s latency. Correctness > bandwidth.
 
       debugPrint('[Canvas] Initialized ${_lastPageEtags.length} page ETags '
           '(persisted meta etag: ${_remoteMetaEtag != null})');
