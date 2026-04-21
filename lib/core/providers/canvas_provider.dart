@@ -884,6 +884,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     // Only now tear down — everything that needed state has finished.
+    // Dispose GPU textures BEFORE nulling state; otherwise the ui.Image
+    // references get dropped without image.dispose() being called, which
+    // on Linux leaks GPU handles until the renderer shuts down and
+    // segfaults at exit.
+    releaseImageCache();
     _disposed = true;
     _isPulling = false;
     isPullingFromRemote.value = false;
@@ -5320,6 +5325,41 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (_pullTimer != null) return;
     debugPrint('[Canvas] Resume: restarting pull timer');
     _startPullTimer();
+  }
+
+  /// Dispose every GPU-backed image texture held in state.imageCache.
+  /// Must be called before the Flutter engine shuts down, otherwise the
+  /// Linux build crashes with 'Segmentation fault (core dumped)' on close
+  /// because native ui.Image handles are still alive when the renderer
+  /// tears down its texture pool.
+  ///
+  /// Called from the canvas screen on AppLifecycleState.detached.
+  void releaseImageCache() {
+    final s = state;
+    if (s == null) return;
+    if (s.imageCache.isEmpty) return;
+    final count = s.imageCache.length;
+    for (final img in s.imageCache.values) {
+      try { img.dispose(); } catch (_) {}
+    }
+    _imageAccessTime.clear();
+    // Don't touch `state` — we're shutting down; the empty map means any
+    // half-rendered frame still in flight just gets a placeholder.
+    debugPrint('[Canvas] Released $count image textures on shutdown');
+  }
+
+  @override
+  void dispose() {
+    _pullTimer?.cancel();
+    _pullTimer = null;
+    _disposed = true;
+    // Release ui.Image textures before super.dispose() tears down the
+    // Riverpod state (which would otherwise drop references without
+    // calling image.dispose()).
+    try {
+      releaseImageCache();
+    } catch (_) {}
+    super.dispose();
   }
 
   /// Self-rescheduling pull tick. Adds random jitter per cycle so multiple

@@ -10,8 +10,8 @@ class AppConfig {
   // Patch every commit that only fixes bugs; minor for visible feature
   // work. The build number after "+" is the absolute counter — never
   // resets when the semver bumps.
-  static const String appVersion = '0.33.6';
-  static const int appBuildNumber = 17;
+  static const String appVersion = '0.33.7';
+  static const int appBuildNumber = 18;
   static String get fullVersion => '$appVersion+$appBuildNumber';
 
   // ── WebDAV / Nextcloud ──

@@ -250,6 +250,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       if (canvas != null && canvas.isDirty && !_isSaving) {
         _save(silent: true);
       }
+
+      // Detached = Flutter engine is shutting down. Release GPU textures
+      // NOW so the Linux desktop build doesn't segfault at exit while
+      // native ui.Image handles are still in the imageCache.
+      if (state == AppLifecycleState.detached) {
+        try {
+          ref.read(canvasProvider.notifier).releaseImageCache();
+        } catch (_) {}
+      }
       return;
     }
 

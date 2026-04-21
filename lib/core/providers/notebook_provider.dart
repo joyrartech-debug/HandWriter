@@ -477,6 +477,58 @@ class NotebookListNotifier
         final uuidRe = RegExp(
             r'([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\.ncnote$');
         final uuidMatch = uuidRe.firstMatch(file.name);
+
+        // ── Fast path: if we already have a local copy of this notebook AND
+        // the delta folder is alive on the server, skip the big root .ncnote
+        // download entirely. We only need the tiny `<id>/metadata.json`
+        // (~1 KB) to refresh the library card; the canvas pull takes care
+        // of pulling page content when the notebook is opened.
+        //
+        // Saves ~33 MB per library refresh for a heavy notebook whose root
+        // .ncnote is stale anyway (nobody rewrites it in the delta era).
+        if (uuidMatch != null) {
+          final candidateId = uuidMatch.group(1)!;
+          final hasLocal = await fileService.hasLocalCopy(candidateId);
+          if (hasLocal) {
+            try {
+              final deltaMeta =
+                  await syncService.downloadDeltaMetadataOnly(candidateId);
+              if (deltaMeta != null) {
+                final existing = await fileService.getNotebookMeta(candidateId);
+                await fileService.upsertNotebookMeta(
+                  id: candidateId,
+                  title: deltaMeta.title,
+                  remotePath: remotePath,
+                  // Preserve the canvas-maintained etag + localModifiedAt —
+                  // the library has no authority over those, they reflect
+                  // the live delta state maintained by the canvas pull/save.
+                  etag: existing?['etag'] as String?,
+                  localModifiedAt: existing?['local_modified_at'] != null
+                      ? DateTime.tryParse(
+                              existing!['local_modified_at'] as String) ??
+                          deltaMeta.modifiedAt
+                      : deltaMeta.modifiedAt,
+                  remoteModifiedAt: file.lastModified,
+                  syncStatus: (existing?['sync_status'] as String?) ?? 'synced',
+                  fileSize: existing?['file_size'] as int?,
+                  coverColor: deltaMeta.coverColor,
+                  paperType: deltaMeta.paperType,
+                  pageCount: deltaMeta.pageCount,
+                  createdAt: deltaMeta.createdAt,
+                );
+                debugPrint('[Library] Fast-path refresh for $candidateId '
+                    '(delta-meta only, root .ncnote NOT downloaded, '
+                    'pageCount=${deltaMeta.pageCount})');
+                return true;
+              }
+            } catch (e) {
+              debugPrint('[Library] Fast-path delta-meta fetch failed for '
+                  '$candidateId, falling back to root download: $e');
+              // Fall through to the slow path below.
+            }
+          }
+        }
+
         final Future<NotebookMetadata?> deltaFut = uuidMatch != null
             ? syncService.downloadDeltaMetadataOnly(uuidMatch.group(1)!)
             : Future.value(null);
