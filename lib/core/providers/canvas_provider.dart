@@ -5088,9 +5088,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
     _saveLastPosition();
 
-    // 2. Update the snapshot so future diffs are against this save.
-    _lastSyncedPages = Map.of(s.pages);
-    _dirtyAssetKeys.clear();
+    // Capture a snapshot of the dirty assets so we can clear them only if
+    // the remote commit succeeds. Doing this optimistically lost dirty
+    // state when the upload failed halfway through the ordered commit.
+    final snapshotDirtyAssetKeys = Set<String>.of(_dirtyAssetKeys);
 
     // 3. Fire remote delta sync RIGHT NOW — it only needs the in-memory
     //    objects (changedPages + document + metadata), does not need the
@@ -5184,8 +5185,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _pendingRemoteSave = () async {
       try {
         await remoteSyncFuture;
+        // Remote commit succeeded — NOW it's safe to advance the dirty
+        // snapshot. If we do this optimistically (before remote returns),
+        // a failed upload leaves _lastSyncedPages matching state.pages,
+        // so the NEXT save() considers those pages 'already synced' via
+        // identity check and never retries. That's how iPad drew strokes,
+        // hit a commit-phase failure, and the strokes stayed invisible
+        // to other devices even though iPad's local file had them.
+        _lastSyncedPages = Map.of(s.pages);
+        for (final k in snapshotDirtyAssetKeys) {
+          _dirtyAssetKeys.remove(k);
+        }
       } catch (e) {
         debugPrint('[Canvas] Remote sync deferred (offline?): $e');
+        // Leave _lastSyncedPages and _dirtyAssetKeys untouched so the
+        // failed pages are detected as dirty again on the next save.
         try {
           await fileService.markNotebookDirty(updatedMeta.id);
         } catch (_) {}
@@ -6200,12 +6214,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             clearPendingConflicts: true,
           );
           acceptRemoteChanges();
-          // If we only reached this branch because of orphan-heal (no user
-          // changes to surface), mark the notebook dirty so save() uploads
-          // the repaired document back to the server and breaks the
-          // corruption cycle permanently.
-          if (needsHeal && details.isEmpty && safeDeleteCount == 0 &&
-              state != null) {
+          // Any healed orphan means the server's document.json/metadata.json
+          // is inconsistent (page files exist in pages/ but aren't listed
+          // in document). Mark dirty so the next save() pushes the repaired
+          // document back to the server — regardless of whether we also
+          // received other pending changes in this cycle. Without this, a
+          // pull that both 'accepts' real new pages AND heals an orphan
+          // left the server broken forever (details.isNotEmpty gated the
+          // repair-upload out even though the repair is exactly what's
+          // needed to break the cycle).
+          if (needsHeal && state != null) {
             state = state!.copyWith(isDirty: true);
           }
         } else {
