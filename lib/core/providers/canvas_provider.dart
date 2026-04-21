@@ -5454,12 +5454,26 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         unawaited(CrashLogger.append('[Pull] abort: nb switched during HEAD'));
         return;
       }
-      // Detect server-side metadata/pages inconsistency.
+      // Detect server-side metadata/pages inconsistency. Three cases:
+      //   1. pages/ folder has MORE files than our local document (another
+      //      device added pages + page files but failed to commit metadata)
+      //   2. pages/ contains fileNames we've never seen locally (same as
+      //      #1 but count might match due to concurrent add+remove)
+      //   3. An EXISTING page's ETag has moved but our cache still has the
+      //      old one (another device saved a stroke and rewrote that page,
+      //      but crashed before writing metadata.json) — THIS is the case
+      //      the previous detector missed, causing iPad edits to existing
+      //      pages to be invisible on PC forever when the iPad's save hit
+      //      the ordered-commit race.
       final remotePageCount = remoteState.pageEtags.length;
       final serverInconsistent =
           remotePageCount > s0.document.pages.length ||
           (_lastPageEtags.isNotEmpty &&
-              remoteState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k)));
+              remoteState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k))) ||
+          (_lastPageEtags.isNotEmpty &&
+              remoteState.pageEtags.entries.any(
+                  (e) => _lastPageEtags[e.key] != null &&
+                         _lastPageEtags[e.key] != e.value));
       if (fastMetaEtag != null &&
           _remoteMetaEtag != null &&
           fastMetaEtag == _remoteMetaEtag &&
@@ -5521,13 +5535,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           'remotePages=${changeState.pageEtags.length}',
         ));
         // Re-evaluate server inconsistency here against the inside-lock
-        // change state (the outside serverInconsistent captured pre-lock
-        // values and doesn't carry through closures cleanly). We enter
-        // the download path if EITHER the meta ETag moved OR the pages/
-        // folder has files the local document doesn't yet know about.
+        // change state. We enter the download path if ANY of:
+        //   - meta ETag moved
+        //   - pages/ folder has more files than local document
+        //   - server has page fileNames we don't know about
+        //   - an EXISTING page's ETag moved (ordered-commit race: page
+        //     uploaded but metadata.json never committed, so meta ETag
+        //     looks unchanged). Without this check, strokes written on
+        //     another device and uploaded into an existing page are
+        //     invisible here until the meta ETag eventually moves.
         final innerInconsistent = changeState.pageEtags.length > s.document.pages.length ||
             (_lastPageEtags.isNotEmpty &&
-                changeState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k)));
+                changeState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k))) ||
+            (_lastPageEtags.isNotEmpty &&
+                changeState.pageEtags.entries.any(
+                    (e) => _lastPageEtags[e.key] != null &&
+                           _lastPageEtags[e.key] != e.value));
         if (changeState.metaEtag != null &&
             (changeState.metaEtag != _remoteMetaEtag || innerInconsistent)) {
           if (changeState.metaEtag == _remoteMetaEtag && innerInconsistent) {
