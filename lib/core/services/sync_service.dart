@@ -875,6 +875,13 @@ class SyncService {
   }
 
   /// Checks whether the exploded folder exists on the server.
+  ///
+  /// Returns true if the folder's metadata.json can be HEAD'd, false on a
+  /// definite 404 (folder absent). Any OTHER error (timeout, TLS, 5xx) is
+  /// RETHROWN so callers can distinguish "server says gone" from "I don't
+  /// know". The library's remote-deletion cleanup depends on this
+  /// distinction — treating a network blip as "gone" would permanently
+  /// wipe the local .ncnote of a notebook that's actually still alive.
   Future<bool> deltaFolderExists(String notebookId) async {
     // Fast path: already confirmed in this session
     if (_explodedDirsReady.contains(notebookId)) return true;
@@ -882,8 +889,9 @@ class SyncService {
       await _webdav.getEtag('${_deltaDir(notebookId)}metadata.json');
       _explodedDirsReady.add(notebookId);
       return true;
-    } catch (_) {
-      return false;
+    } on WebDavException catch (e) {
+      if (e.statusCode == 404) return false;
+      rethrow;
     }
   }
 

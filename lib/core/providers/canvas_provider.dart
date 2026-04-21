@@ -6282,7 +6282,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         // Leave syncStatus as 'modified' so the next sync cycle will retry
         // the missing pages (synced would mask the incomplete state).
         etag: _remoteMetaEtag,
-        localModifiedAt: metadata.modifiedAt,
+        // Use now() — see _savePulledChangesLocally for the rationale:
+        // the library's overwrite guard compares local_modified_at against
+        // the root .ncnote's server mtime. If we stamp a server timestamp
+        // here, the next library refresh sees "server newer" and trample
+        // our pulled state.
+        localModifiedAt: DateTime.now(),
         syncStatus: 'modified',
         fileSize: existingSize,
         coverColor: metadata.coverColor,
@@ -6506,12 +6511,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // without it upsertNotebookMeta (ConflictAlgorithm.replace) erases the
       // ETag, making _syncWithServer think the notebook changed and re-download
       // the stale server .ncnote on every library refresh.
+      //
+      // localModifiedAt MUST reflect when WE wrote the local file, not when
+      // the server's metadata.json claims the notebook was modified. The
+      // library uses localModifiedAt vs server.lastModified to decide
+      // whether to overwrite the local .ncnote — if we pass the server's
+      // (possibly stale) timestamp, the next library refresh will think
+      // the server is newer and trample our freshly-hydrated pages.
       await fileService.upsertNotebookMeta(
         id: metadata.id,
         title: metadata.title,
         remotePath: state?.remotePath ?? '',
         etag: _remoteMetaEtag,  // keep delta ETag across pull-saves
-        localModifiedAt: metadata.modifiedAt,
+        localModifiedAt: DateTime.now(),
         syncStatus: 'synced',
         fileSize: package.length,
         coverColor: metadata.coverColor,

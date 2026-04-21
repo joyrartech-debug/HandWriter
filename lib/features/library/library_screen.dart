@@ -185,12 +185,27 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             .where((fn) => fn.isNotEmpty)
             .toList();
         final pagesToFetch = <String>[];
+        final phantomPages = <String>[];
         for (final fn in allRemotePageNames) {
           final remoteEtag = remotePageEtags[fn];
+          // A page can be listed in document.json but absent from pages/
+          // folder when a previous save uploaded the document update but
+          // failed on the page body. We can't fetch what the server doesn't
+          // have — skip instead of firing a 404 retry burst.
+          if (remoteEtag == null) {
+            phantomPages.add(fn);
+            continue;
+          }
           final cachedEtag = cachedPageEtags[fn];
-          final etagChanged = remoteEtag != null && remoteEtag != cachedEtag;
+          final etagChanged = remoteEtag != cachedEtag;
           final missingLocally = !mergedPages.containsKey(fn);
           if (etagChanged || missingLocally) pagesToFetch.add(fn);
+        }
+        if (phantomPages.isNotEmpty) {
+          debugPrint('[BgSync] ${entry.metadata.title}: '
+              '${phantomPages.length} pages listed in document but missing '
+              'from pages/ folder (phantom): ${phantomPages.take(3).join(", ")}'
+              '${phantomPages.length > 3 ? "..." : ""}');
         }
 
         if (pagesToFetch.isNotEmpty) {

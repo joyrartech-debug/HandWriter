@@ -191,6 +191,52 @@ class NotebookListNotifier
       // Skip if ETag matches — notebook hasn't changed on the server.
       if (localEtag != null && localEtag == file.etag) continue;
 
+      // Skip if the currently-open notebook in the canvas owns this row.
+      // The canvas has an authoritative in-memory state and just persisted
+      // the fresh version locally via _savePulledChangesLocally / save().
+      // Overwriting its .ncnote with the server's stale root ZIP while the
+      // user is editing would trample pulled pages (the "orphan page_071
+      // hydrated then vanished" bug).
+      if (localRow != null) {
+        final lrId = localRow['id'] as String?;
+        final canvasOpenId = _ref.read(canvasProvider)?.metadata.id;
+        if (lrId != null && canvasOpenId == lrId) {
+          debugPrint('[Library] Skipping .ncnote download for $remotePath '
+              '(notebook is open in canvas, which owns the local copy)');
+          continue;
+        }
+      }
+
+      // Skip downloading the server .ncnote if a local row AND a delta
+      // folder exist on the server.  Delta sync is authoritative for
+      // these notebooks and the root .ncnote is a legacy snapshot that
+      // no delta-era writer updates; it's typically stale by minutes to
+      // hours. Downloading it would rewrite the local cache with old
+      // content and reset the library page count (the bug where AICD's
+      // 71st hydrated page was immediately overwritten back to 70 by
+      // the following library refresh).
+      //
+      // Falls back to the normal timestamp-based check when the delta
+      // folder check fails (network glitch, or genuinely absent delta
+      // folder for a legacy single-device notebook).
+      if (localRow != null) {
+        final lrId = localRow['id'] as String?;
+        if (lrId != null) {
+          bool deltaAlive = false;
+          try {
+            deltaAlive = await syncService.deltaFolderExists(lrId);
+          } catch (_) {
+            // Network/uncertainty — let the timestamp check below decide.
+            deltaAlive = false;
+          }
+          if (deltaAlive) {
+            debugPrint('[Library] Skipping .ncnote download for $remotePath '
+                '(delta folder on server is authoritative)');
+            continue;
+          }
+        }
+      }
+
       // Skip downloading the server .ncnote if local data is NEWER.
       // Notebooks that use delta sync are never re-packaged into the server
       // .ncnote — their local copy is always more up-to-date than the static
@@ -359,10 +405,19 @@ class NotebookListNotifier
       }
       // Root .ncnote missing — check the delta folder. If it's still
       // there, the notebook is alive; just the legacy ZIP is gone.
-      bool deltaAlive = false;
+      //
+      // PARANOID default: assume alive on ANY uncertainty. deltaFolderExists
+      // silently returns false on network errors, and we must never mistake
+      // a Tailscale glitch or transient 5xx for "notebook was deleted" —
+      // that mistake permanently wipes the local .ncnote + snapshots + DB
+      // row for a notebook the user is still actively using.
+      bool deltaAlive = true;
       try {
         deltaAlive = await syncService.deltaFolderExists(id);
-      } catch (_) {}
+      } catch (e) {
+        debugPrint('[Library] deltaFolderExists error for $id — assuming alive: $e');
+        deltaAlive = true; // explicit: uncertainty ⇒ keep local
+      }
       if (deltaAlive) {
         debugPrint('[Library] Root .ncnote missing for $id but delta folder alive — '
             'skipping cleanup (notebook still exists on server)');
