@@ -10,8 +10,8 @@ class AppConfig {
   // Patch every commit that only fixes bugs; minor for visible feature
   // work. The build number after "+" is the absolute counter — never
   // resets when the semver bumps.
-  static const String appVersion = '0.32.0';
-  static const int appBuildNumber = 10;
+  static const String appVersion = '0.33.0';
+  static const int appBuildNumber = 11;
   static String get fullVersion => '$appVersion+$appBuildNumber';
 
   // ── WebDAV / Nextcloud ──
@@ -34,7 +34,14 @@ class AppConfig {
 
   // ── Delta Sync ──
   /// How often the canvas checks for remote page changes from other devices.
-  static const Duration deltaPullInterval = Duration(seconds: 4);
+  /// Tuned to 2 s so a stroke made on PC surfaces on iPad in ~3-4 s on a
+  /// Tailscale HTTPS link. Actual network load stays low because most polls
+  /// short-circuit on the cached meta ETag (HEAD only, no body).
+  static const Duration deltaPullInterval = Duration(seconds: 2);
+  /// Random jitter added to each poll so multiple devices don't all PROPFIND
+  /// the server on the same 2 s beat. Prevents thundering-herd on the
+  /// Nextcloud side when user has PC + iPad + phone all open.
+  static const Duration deltaPullJitter = Duration(milliseconds: 600);
   /// Remote sub-folder that holds exploded per-page files for each notebook.
   static const String deltaSyncDir = '_delta/';
 

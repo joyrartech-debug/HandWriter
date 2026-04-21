@@ -36,10 +36,19 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   @override
   void initState() {
     super.initState();
-    Future.microtask(() {
+    Future.microtask(() async {
       ref.read(notebookListProvider.notifier).refresh();
       _startConnectivityMonitor();
       _startBackgroundSync();
+      // Retry uploads that a prior session couldn't complete (offline,
+      // Tailscale drop mid-save). Runs after refresh so local DB is fresh.
+      await Future.delayed(const Duration(seconds: 2));
+      if (!mounted) return;
+      try {
+        await ref.read(notebookListProvider.notifier).retryPendingUploads();
+      } catch (e) {
+        debugPrint('[Library] retryPendingUploads on boot failed: $e');
+      }
     });
   }
 
@@ -276,7 +285,17 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
     if (connectivity == null) return;
 
     connectivity.onReconnected = () async {
-      // Sync dirty notebooks FIRST, then refresh library.
+      // Delta-based retry is fast (only uploads changed pages) so try it
+      // first — if the notebook has a delta folder on the server it'll
+      // complete in a few hundred ms. _syncDirtyNotebooks is the legacy
+      // full-ZIP fallback that still handles notebooks created before the
+      // delta era.
+      try {
+        await ref.read(notebookListProvider.notifier).retryPendingUploads();
+      } catch (e) {
+        debugPrint('[Library] reconnect retryPendingUploads failed: $e');
+      }
+      // Sync dirty notebooks FIRST (legacy path), then refresh library.
       // Sequential to avoid 423 Locked from Nextcloud.
       await _syncDirtyNotebooks();
       ref.read(notebookListProvider.notifier).refresh();

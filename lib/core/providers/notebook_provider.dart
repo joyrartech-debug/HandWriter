@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
+import 'package:handwriter/core/services/crash_logger.dart';
 import 'package:handwriter/core/services/file_service.dart';
 import 'package:handwriter/core/services/search_service.dart';
 import 'package:handwriter/core/services/sync_service.dart';
@@ -801,6 +804,57 @@ class NotebookListNotifier
       }
       return e;
     }).toList());
+  }
+
+  /// Best-effort re-upload of every notebook whose local sync status is still
+  /// `modified` — i.e. previous save() couldn't reach the server (offline,
+  /// Tailscale drop, Nextcloud restart). Called when connectivity comes back,
+  /// and once at library boot after a cold start.
+  ///
+  /// Uses the local .ncnote as source of truth, pushes it via the delta-sync
+  /// exploded folder. Failures are logged but never throw — the notebook stays
+  /// marked `modified` so the next retry picks it up again.
+  Future<void> retryPendingUploads() async {
+    final syncService = _ref.read(syncServiceProvider);
+    final fileService = _ref.read(fileServiceProvider);
+    if (syncService == null) return;
+
+    final dirtyRows = await fileService.getDirtyNotebooks();
+    if (dirtyRows.isEmpty) return;
+    debugPrint('[Library] Retrying ${dirtyRows.length} pending notebook uploads');
+    unawaited(CrashLogger.append(
+      '[Retry] ${dirtyRows.length} pending notebooks to re-upload',
+    ));
+
+    for (final row in dirtyRows) {
+      final id = row['id'] as String?;
+      final remotePath = row['remote_path'] as String?;
+      if (id == null || remotePath == null || remotePath.isEmpty) continue;
+      try {
+        final localData = await fileService.readNotebookFile(id);
+        if (localData == null) continue;
+        final result = syncService.parseNcnoteMetadata(localData);
+        final allPages = syncService.extractAllPages(localData);
+        final allAssets = syncService.extractAllAssets(localData);
+        final symbolLibraries = syncService.extractSymbolLibraries(localData);
+
+        // Prefer the delta exploded folder — it matches the canvas save path
+        // and doesn't force a concurrently-open notebook to re-download the
+        // whole ZIP to pick up the fix.
+        final res = await syncService.syncDelta(
+          notebookId: id,
+          metadata: result.metadata,
+          document: result.document,
+          dirtyPages: allPages,
+          dirtyAssets: allAssets.isNotEmpty ? allAssets : null,
+          symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
+        );
+        await fileService.markNotebookSynced(id, res.metaEtag);
+        debugPrint('[Library] Retried upload OK for $id');
+      } catch (e) {
+        debugPrint('[Library] Retry upload failed for $id: $e (will retry next cycle)');
+      }
+    }
   }
 
 }

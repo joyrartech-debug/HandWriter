@@ -99,11 +99,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // We save after a short idle window (no new edits) so rapid strokes batch
   // into a single disk write. A second "max delay" timer guarantees we never
   // defer more than _autoSaveMaxDelay even if the user keeps drawing.
+  //
+  // Idle window tuned down from 4 s to 1.2 s so small-stroke edits reach
+  // the server in ~2-3 s end-to-end on Tailscale instead of the old 6-8 s.
+  // The hot-path save() is now non-blocking (remote delta fires first,
+  // local ZIP rebuild runs in the background), so firing it more often
+  // no longer pauses the UI.
   Timer? _autoSaveDebounce;
   Timer? _autoSaveMaxWait;
   bool _wasDirty = false;
-  static const _autoSaveIdle = Duration(seconds: 4);
-  static const _autoSaveMaxDelay = Duration(seconds: 45);
+  static const _autoSaveIdle = Duration(milliseconds: 1200);
+  static const _autoSaveMaxDelay = Duration(seconds: 15);
 
   // Key for the canvas Stack to convert coordinates properly
   final _canvasStackKey = GlobalKey();

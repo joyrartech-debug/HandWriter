@@ -85,26 +85,26 @@ class ActiveStrokeNotifier extends ChangeNotifier {
         sp = (p1.pressure + pressure) / 2;
       }
     } else {
-      // ── Touch / Apple Pencil smoothing (3-point window) ───────────────────
-      // Lighter smoothing keeps the stroke feeling instant and precise.
-      if (_points.length >= 3) {
-        final p2 = _points[_points.length - 1];
-        final p1 = _points[_points.length - 2];
-        final p0 = _points[_points.length - 3];
-        sx = (p0.x + p1.x * 2 + p2.x * 4 + pos.dx * 8) / 15;
-        sy = (p0.y + p1.y * 2 + p2.y * 4 + pos.dy * 8) / 15;
-        sp = (p0.pressure + p1.pressure * 2 + p2.pressure * 4 + pressure * 8) / 15;
-      } else if (_points.length >= 2) {
+      // ── Touch / Apple Pencil smoothing (very light, high current-weight) ─
+      // Apple Pencil is already hardware-filtered at 120 Hz. Heavier
+      // smoothing (old: current=53 %, 4-point window) caused two user-
+      // visible defects:
+      //   1. the stroke visibly lags the pen tip, and
+      //   2. the tail end is "pulled back" toward earlier points so the
+      //      final letter looks squeezed vs. what the user drew.
+      // A 3-point window with ~80 % weight on the current point removes
+      // sub-pixel ADC jitter without any perceptible drag.
+      if (_points.length >= 2) {
         final p1 = _points[_points.length - 1];
         final p0 = _points[_points.length - 2];
-        sx = (p0.x + p1.x * 2 + pos.dx * 4) / 7;
-        sy = (p0.y + p1.y * 2 + pos.dy * 4) / 7;
-        sp = (p0.pressure + p1.pressure * 2 + pressure * 4) / 7;
+        sx = (p0.x + p1.x * 3 + pos.dx * 16) / 20;
+        sy = (p0.y + p1.y * 3 + pos.dy * 16) / 20;
+        sp = (p0.pressure + p1.pressure * 3 + pressure * 16) / 20;
       } else if (_points.length == 1) {
         final p1 = _points.last;
-        sx = (p1.x + pos.dx * 2) / 3;
-        sy = (p1.y + pos.dy * 2) / 3;
-        sp = (p1.pressure + pressure * 2) / 3;
+        sx = (p1.x + pos.dx * 7) / 8;
+        sy = (p1.y + pos.dy * 7) / 8;
+        sp = (p1.pressure + pressure * 7) / 8;
       }
     }
 

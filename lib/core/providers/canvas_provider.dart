@@ -63,6 +63,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// re-enter, everything gone, re-sync" bug).
   Future<void>? _pendingPulledLocalSave;
 
+  /// Tracks the in-flight local ZIP rebuild from save(). Runs in background
+  /// so save() returns quickly; closeNotebook awaits this so the ZIP lands
+  /// on disk before the notebook is torn down.
+  Future<bool>? _pendingLocalSave;
+
   /// Acquire exclusive sync lock. Returns when lock available.
   /// Returns false if notifier was disposed while waiting.
   ///
@@ -416,21 +421,150 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // ui.instantiateImageCodec() for every image in one microtask burst can
     // cause the process to be OOM-killed before a single frame is drawn.
     //
-    // Strategy:
-    //   Phase 1 – current page assets: start immediately (usually 0-2 images).
+    // Strategy on iOS/Android (mobile, memory-constrained):
+    //   Decode only assets referenced by a **window** around the current page
+    //   (current ± _mobileAssetWindow). The rest are decoded lazily when the
+    //   user navigates near them (see [_ensureAssetsForPage]).
+    //
+    // Strategy on desktop:
+    //   Phase 1 – current page assets: start immediately.
     //   Phase 2 – all remaining assets: decoded sequentially, one per ~16 ms
     //             frame, in a background async loop.
     if (assets != null && assets.isNotEmpty) {
+      final isMobile = defaultTargetPlatform == TargetPlatform.iOS ||
+          defaultTargetPlatform == TargetPlatform.android;
       final initialRefs = _assetRefsForPage(startPageIndex, repaired.document, repaired.pages);
-      // Phase 1: kick off decodes for the initial page (fire-and-forget is fine
-      // here — there are typically very few and they finish quickly).
+      // Phase 1: kick off decodes for the initial page.
       for (final assetId in initialRefs) {
         final bytes = assets[assetId];
         if (bytes != null) unawaited(_decodeAndCacheImage(assetId, bytes));
       }
-      // Phase 2: remaining assets — sequential, throttled
-      _decodeAssetsThrottled(assets, skip: initialRefs);
+      if (isMobile) {
+        // Phase 2 mobile: decode only the ±_mobileAssetWindow page window.
+        final windowRefs = _assetRefsForWindow(
+          startPageIndex, _mobileAssetWindow, repaired.document, repaired.pages,
+        )..removeAll(initialRefs);
+        final windowAssets = <String, Uint8List>{};
+        for (final r in windowRefs) {
+          final b = assets[r];
+          if (b != null) windowAssets[r] = b;
+        }
+        unawaited(_decodeAssetsThrottled(windowAssets, skip: const {}));
+      } else {
+        // Phase 2 desktop: decode everything.
+        unawaited(_decodeAssetsThrottled(assets, skip: initialRefs));
+      }
     }
+    _logMemoryStats('openNotebook');
+  }
+
+  /// Pages ahead/behind current to keep decoded in the imageCache on mobile.
+  /// A 70-page notebook with full-page PDF backgrounds can easily consume
+  /// 300 MB of texture memory if decoded in full. The window keeps a tight
+  /// working set so iOS jetsam doesn't kill the process.
+  static const int _mobileAssetWindow = 2;
+
+  /// Max imageCache entries on mobile before LRU eviction kicks in. Each
+  /// ui.Image holds native/GPU memory; unbounded growth is the #1 iPad OOM
+  /// cause in this app.
+  static const int _mobileImageCacheMax = 12;
+
+  /// Access-time map for LRU tracking. Key: assetId, value: monotonic
+  /// counter bumped on every render access.
+  final Map<String, int> _imageAccessTime = {};
+  int _imageAccessCounter = 0;
+
+  /// Compute the union of asset refs across pages in [center ± radius].
+  Set<String> _assetRefsForWindow(
+      int center, int radius, DocumentStructure doc, Map<String, PageData> pages) {
+    final lo = (center - radius).clamp(0, doc.pages.length - 1);
+    final hi = (center + radius).clamp(0, doc.pages.length - 1);
+    final refs = <String>{};
+    for (var i = lo; i <= hi; i++) {
+      refs.addAll(_assetRefsForPage(i, doc, pages));
+    }
+    return refs;
+  }
+
+  /// Ensure assets needed by pages in the current window are decoded, and
+  /// evict far-away ones (mobile only). Called after page navigation.
+  void _ensureAssetsForCurrentWindow() {
+    final s = state;
+    if (s == null) return;
+    final isMobile = defaultTargetPlatform == TargetPlatform.iOS ||
+        defaultTargetPlatform == TargetPlatform.android;
+    if (!isMobile) return;
+    final needed = _assetRefsForWindow(
+        s.currentPageIndex, _mobileAssetWindow, s.document, s.pages);
+    // Decode missing ones that we already have bytes for.
+    for (final ref in needed) {
+      if (s.imageCache.containsKey(ref)) continue;
+      final bytes = s.assetBytes[ref];
+      if (bytes != null) {
+        unawaited(_decodeAndCacheImage(ref, bytes));
+      }
+    }
+    _evictDistantImages();
+  }
+
+  /// LRU-evict from imageCache when it grows beyond _mobileImageCacheMax.
+  /// Prefers to drop assets NOT referenced by pages in the current window.
+  void _evictDistantImages() {
+    final s = state;
+    if (s == null) return;
+    if (s.imageCache.length <= _mobileImageCacheMax) return;
+    final protect = _assetRefsForWindow(
+        s.currentPageIndex, _mobileAssetWindow, s.document, s.pages);
+    // Candidates: everything not in the window. Sort oldest first.
+    final candidates = s.imageCache.keys
+        .where((k) => !protect.contains(k))
+        .toList()
+      ..sort((a, b) =>
+          (_imageAccessTime[a] ?? 0).compareTo(_imageAccessTime[b] ?? 0));
+    final targetSize = _mobileImageCacheMax;
+    final toEvict = s.imageCache.length - targetSize;
+    if (toEvict <= 0 || candidates.isEmpty) return;
+    final newCache = Map<String, ui.Image>.from(s.imageCache);
+    var evicted = 0;
+    for (final key in candidates) {
+      if (evicted >= toEvict) break;
+      final img = newCache.remove(key);
+      img?.dispose();
+      _imageAccessTime.remove(key);
+      evicted++;
+    }
+    if (evicted > 0) {
+      state = s.copyWith(imageCache: newCache);
+      _logMemoryStats('evict($evicted)');
+    }
+  }
+
+  /// Record an access to an asset for LRU. Called by render paths.
+  void touchImageAsset(String assetId) {
+    _imageAccessTime[assetId] = ++_imageAccessCounter;
+  }
+
+  /// Log a one-line memory snapshot on mobile so we can tell, from the
+  /// crash log after a jetsam kill, roughly how big the caches had grown.
+  void _logMemoryStats(String context) {
+    if (defaultTargetPlatform != TargetPlatform.iOS &&
+        defaultTargetPlatform != TargetPlatform.android) return;
+    final s = state;
+    if (s == null) return;
+    // Approximate GPU texture bytes: 4 * w * h per cached ui.Image.
+    var gpuBytes = 0;
+    for (final img in s.imageCache.values) {
+      gpuBytes += img.width * img.height * 4;
+    }
+    final rawAssetBytes = s.assetBytes.values
+        .fold<int>(0, (sum, b) => sum + b.length);
+    unawaited(CrashLogger.append(
+      '[Mem] $context: imageCache=${s.imageCache.length} '
+      '(~${(gpuBytes / (1024 * 1024)).toStringAsFixed(1)} MB GPU), '
+      'assetBytes=${s.assetBytes.length} '
+      '(~${(rawAssetBytes / (1024 * 1024)).toStringAsFixed(1)} MB raw), '
+      'pages=${s.pages.length}',
+    ));
   }
 
   /// Returns the set of asset keys referenced by a single page.
@@ -652,6 +786,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       try { await pendingRemoteSave; } catch (_) {}
     }
     _pendingRemoteSave = null;
+
+    // Await in-flight local ZIP rebuild (from save()'s background task).
+    // Otherwise exit-after-stroke can leave the .ncnote without the very
+    // last stroke, and a cold reopen would show pre-stroke content until
+    // the next pull brings it back from the server.
+    final pendingLocalSave = _pendingLocalSave;
+    if (pendingLocalSave != null) {
+      try { await pendingLocalSave; } catch (_) {}
+    }
+    _pendingLocalSave = null;
   }
 
   Future<void> closeNotebook() async {
@@ -2596,6 +2740,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         clearSelectedElement: true,
       );
     }
+    _ensureAssetsForCurrentWindow();
   }
 
   void nextPage({bool resetViewport = false}) {
@@ -4870,22 +5015,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     debugPrint('[Canvas] Dirty: ${changedPages.length} pages, '
         '${changedAssets.length} assets, ${deletedPages.length} deleted');
 
-    // 1. Encode pages on the main thread with a per-page cache (so unchanged
-    //    pages skip JSON encoding), then build the ZIP in a background isolate.
-    final encodedPages = await _encodePagesWithCache(s.pages);
-    final package = await compute(_buildPackageInIsolate, _PackageParams(
-      metadata: updatedMeta,
-      document: s.document,
-      encodedPages: encodedPages,
-      assets: s.assetBytes.isNotEmpty ? s.assetBytes : null,
-      symbolLibraries: s.symbolLibraries.isNotEmpty
-          ? s.symbolLibraries.map((l) => l.toJson()).toList()
-          : null,
-    ));
-
-    debugPrint('[Canvas] Package built off-thread: ${package.length} bytes');
-
-    // 2. Update state IMMEDIATELY so the user sees "saved" — no more waiting.
+    // 1. Update state IMMEDIATELY so the UI unblocks on this microtask.
+    //    The remote delta sync and the local ZIP write run in parallel in
+    //    the background while we return control to the caller.
     if (state != null) {
       final changedDuringSave = !identical(state!.pages, s.pages);
       state = state!.copyWith(
@@ -4895,21 +5027,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
     _saveLastPosition();
 
-    // 3. Update the snapshot so future diffs are against this save.
+    // 2. Update the snapshot so future diffs are against this save.
     _lastSyncedPages = Map.of(s.pages);
     _dirtyAssetKeys.clear();
 
-    // 4. Start local save + remote sync in parallel. Await only the local
-    //    save — the remote sync continues in the background while holding
-    //    the sync lock (so pulls wait). This lets `save()` return to the
-    //    UI as soon as data is safe on disk.
-    final localSaveFuture = _localSave(
-      fileService: fileService,
-      package: package,
-      updatedMeta: updatedMeta,
-      remotePath: s.remotePath,
-    );
-
+    // 3. Fire remote delta sync RIGHT NOW — it only needs the in-memory
+    //    objects (changedPages + document + metadata), does not need the
+    //    full .ncnote ZIP. Putting it ahead of the expensive
+    //    compute(_buildPackageInIsolate) call is what makes small-stroke
+    //    edits actually reach the server in ~seconds on Tailscale instead
+    //    of waiting for the ZIP build to finish first.
     final remoteSyncFuture = _remoteSync(
       syncService: syncService,
       fileService: fileService,
@@ -4923,13 +5050,40 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       deletedPages: deletedPages.isNotEmpty ? deletedPages : null,
     );
 
-    final localOk = await localSaveFuture;
-    if (!localOk) {
-      // Local failed. Still drain the remote future under the lock so we
-      // don't leave an orphan upload running without guards.
-      try { await remoteSyncFuture; } catch (_) {}
-      return false;
-    }
+    // 4. Build the full-notebook ZIP off-thread and write it locally —
+    //    this is the "safety net" copy used on cold reopen and at close.
+    //    On large notebooks (70+ pages with PDF assets) this costs seconds
+    //    but it does NOT block the remote sync nor the UI.
+    final localSaveFuture = (() async {
+      try {
+        final encodedPages = await _encodePagesWithCache(s.pages);
+        final package = await compute(_buildPackageInIsolate, _PackageParams(
+          metadata: updatedMeta,
+          document: s.document,
+          encodedPages: encodedPages,
+          assets: s.assetBytes.isNotEmpty ? s.assetBytes : null,
+          symbolLibraries: s.symbolLibraries.isNotEmpty
+              ? s.symbolLibraries.map((l) => l.toJson()).toList()
+              : null,
+        ));
+        debugPrint('[Canvas] Package built off-thread: ${package.length} bytes');
+        return await _localSave(
+          fileService: fileService,
+          package: package,
+          updatedMeta: updatedMeta,
+          remotePath: s.remotePath,
+        );
+      } catch (e) {
+        debugPrint('[Canvas] Local save failed: $e');
+        return false;
+      }
+    })();
+    _pendingLocalSave = localSaveFuture;
+    unawaited(localSaveFuture.whenComplete(() {
+      if (identical(_pendingLocalSave, localSaveFuture)) {
+        _pendingLocalSave = null;
+      }
+    }));
 
     // Fire-and-forget: refresh thumbnail for the library card. Uses the
     // first page of the document — failures are swallowed (cards fall
@@ -5074,20 +5228,38 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   //  PULL TIMER — receive remote changes from other devices
   // ══════════════════════════════════════════════════════════════
 
+  /// Random source for per-device pull-interval jitter.
+  final _pullJitterRng = Random();
+
   void _startPullTimer() {
     _pullTimer?.cancel();
     // Immediate pull on notebook open — don't wait first interval.
     // Track the future so closeNotebook can await it.
     _pendingPullFuture = _pullRemoteChanges();
-    _pullTimer = Timer.periodic(AppConfig.deltaPullInterval, (_) {
-      // If a pull is already in flight, do NOT overwrite _pendingPullFuture
-      // with a no-op Future — _pullRemoteChanges returns immediately when
-      // _isPulling is true, and that stub would trick closeNotebook() into
-      // tearing down state before the real in-flight pull has merged its
-      // download. The result: pulled pages visible for a moment, then lost
-      // on exit — the "ci rientro ed è scomparso tutto" bug.
-      if (_isPulling) return;
-      _pendingPullFuture = _pullRemoteChanges();
+    _schedulePullTick();
+  }
+
+  /// Self-rescheduling pull tick. Adds random jitter per cycle so multiple
+  /// devices don't hit the server in lockstep, and skips firing while a
+  /// save() is still holding the sync lock (save releases the lock only
+  /// after its remote upload commits — running a pull against our own
+  /// half-committed upload would show the just-saved state as a remote
+  /// "conflict").
+  void _schedulePullTick() {
+    if (_disposed) return;
+    final jitterMs = _pullJitterRng.nextInt(AppConfig.deltaPullJitter.inMilliseconds + 1);
+    final next = AppConfig.deltaPullInterval + Duration(milliseconds: jitterMs);
+    _pullTimer?.cancel();
+    _pullTimer = Timer(next, () {
+      if (_disposed) return;
+      // Skip if a pull or save is still in flight. _pullRemoteChanges()
+      // early-returns on _isPulling already, but we also want to back off
+      // when save() is uploading so a concurrent PROPFIND doesn't see our
+      // half-committed delta folder and mis-diagnose it as a remote change.
+      if (!_isPulling && _syncLock == null && !_bulkOperationInProgress) {
+        _pendingPullFuture = _pullRemoteChanges();
+      }
+      _schedulePullTick();
     });
   }
 
