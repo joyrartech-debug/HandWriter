@@ -332,6 +332,58 @@ class CanvasRenderEngine extends CustomPainter {
     }
   }
 
+  /// Fill a variable-width ribbon along the given interpolated points.
+  /// Extracted from the fountain-pen code so the calligraphy branch can
+  /// share the same crisp-edge polygon fill.
+  void _paintVariableWidthRibbon(
+      Canvas canvas, List<_InterpolatedPoint> interp, Color fillColor) {
+    final count = interp.length;
+    if (count < 2) return;
+    final nxArr = List<double>.filled(count, 0.0);
+    final nyArr = List<double>.filled(count, 0.0);
+    for (int i = 0; i < count; i++) {
+      double dx, dy;
+      if (i == 0) {
+        dx = interp[1].x - interp[0].x;
+        dy = interp[1].y - interp[0].y;
+      } else if (i == count - 1) {
+        dx = interp[i].x - interp[i - 1].x;
+        dy = interp[i].y - interp[i - 1].y;
+      } else {
+        dx = interp[i + 1].x - interp[i - 1].x;
+        dy = interp[i + 1].y - interp[i - 1].y;
+      }
+      final len = sqrt(dx * dx + dy * dy);
+      if (len > 0.0001) {
+        nxArr[i] = -dy / len;
+        nyArr[i] = dx / len;
+      } else if (i > 0) {
+        nxArr[i] = nxArr[i - 1];
+        nyArr[i] = nyArr[i - 1];
+      }
+    }
+    final path = Path();
+    final hw0 = (interp[0].w * 0.5).clamp(0.2, 999.0);
+    path.moveTo(interp[0].x + nxArr[0] * hw0, interp[0].y + nyArr[0] * hw0);
+    for (int i = 1; i < count; i++) {
+      final hw = (interp[i].w * 0.5).clamp(0.2, 999.0);
+      path.lineTo(interp[i].x + nxArr[i] * hw, interp[i].y + nyArr[i] * hw);
+    }
+    for (int i = count - 1; i >= 0; i--) {
+      final hw = (interp[i].w * 0.5).clamp(0.2, 999.0);
+      path.lineTo(interp[i].x - nxArr[i] * hw, interp[i].y - nyArr[i] * hw);
+    }
+    path.close();
+    final paint = Paint()
+      ..color = fillColor
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+    canvas.drawPath(path, paint);
+    canvas.drawCircle(Offset(interp.first.x, interp.first.y), hw0, paint);
+    final lastHw = (interp.last.w * 0.5).clamp(0.2, 999.0);
+    canvas.drawCircle(Offset(interp.last.x, interp.last.y), lastHw, paint);
+  }
+
   void _paintStroke(Canvas canvas, StrokeData stroke) {
     if (stroke.points.length < 2) return;
 
@@ -394,6 +446,63 @@ class CanvasRenderEngine extends CustomPainter {
           canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
         }
       }
+      return;
+    }
+
+    // ── Calligraphy brush (variable-width, velocity + angle driven) ──
+    // Like a dip-pen nib: thick when moving slowly OR along the nib axis
+    // (NE→SW by convention), thin on fast movement orthogonal to the nib.
+    // Renders as a filled polygon between the two offset edges (same
+    // technique as fountain pen below) so edges stay crisp at any zoom.
+    if (stroke.toolType == 'calligraphy') {
+      final n = stroke.points.length;
+      // Nib angle: 45° (NE-SW), traditional italic calligraphy direction.
+      // Strokes moving perpendicular to this axis get the full nib width;
+      // strokes moving parallel to it get the thin side.
+      const nibAngle = -pi / 4;
+      final nibDx = cos(nibAngle);
+      final nibDy = sin(nibAngle);
+
+      final velocities = List<double>.filled(n, 0.0);
+      final angleFactors = List<double>.filled(n, 1.0);
+      for (int i = 1; i < n; i++) {
+        final dx = stroke.points[i].x - stroke.points[i - 1].x;
+        final dy = stroke.points[i].y - stroke.points[i - 1].y;
+        final len = sqrt(dx * dx + dy * dy);
+        velocities[i] = len;
+        if (len > 0.001) {
+          // cos of angle between motion direction and nib axis, 0..1.
+          // Parallel (cos = 1) → thin side, perpendicular (cos = 0) → fat side.
+          final cosTheta = ((dx * nibDx + dy * nibDy) / len).abs();
+          // Smooth falloff: thin at 20% base when parallel, 150% when perp.
+          angleFactors[i] = 1.5 - 1.3 * cosTheta;
+        }
+      }
+      if (n > 1) {
+        velocities[0] = velocities[1];
+        angleFactors[0] = angleFactors[1];
+      }
+
+      final calligWidths = List<double>.filled(n, stroke.baseWidth);
+      for (int i = 0; i < n; i++) {
+        // Velocity scales from 2.2× (stationary) down to 0.25× (very fast).
+        // The wide range is what makes calligraphy feel "inked": a slow
+        // pause on a letter apex deposits a visible blob.
+        final vF = (2.2 - (velocities[i] / 10.0).clamp(0.0, 1.95));
+        final pF = 0.4 + stroke.points[i].pressure * 0.6;
+        calligWidths[i] = stroke.baseWidth * pF * vF * angleFactors[i];
+      }
+      // Heavy smoothing (4 passes) because angle changes point-to-point
+      // would otherwise create sawtooth edges on the rendered ribbon.
+      for (int pass = 0; pass < 4; pass++) {
+        for (int i = 1; i < n - 1; i++) {
+          calligWidths[i] = (calligWidths[i - 1] + calligWidths[i] * 2 + calligWidths[i + 1]) / 4;
+        }
+      }
+
+      final interp = _catmullRomAdaptiveWithWidth(stroke.points, calligWidths, zoom);
+      if (interp.length < 2) return;
+      _paintVariableWidthRibbon(canvas, interp, color.withValues(alpha: stroke.opacity));
       return;
     }
 

@@ -303,7 +303,7 @@ class CanvasToolbar extends StatelessWidget {
   Widget _penOptions() {
     return Row(
       children: [
-        // ── Pen / Brush sub-toggle ──
+        // ── Pen / Brush / Calligraphy sub-toggle ──
         _MiniChip(
           icon: Icons.edit_rounded,
           label: 'Penna',
@@ -316,6 +316,13 @@ class CanvasToolbar extends StatelessWidget {
           label: 'Pennello',
           active: currentTool == CanvasTool.brush,
           onTap: () => onToolChanged(CanvasTool.brush),
+        ),
+        const SizedBox(width: 4),
+        _MiniChip(
+          icon: Icons.draw_rounded,
+          label: 'Calligrafia',
+          active: currentTool == CanvasTool.calligraphy,
+          onTap: () => onToolChanged(CanvasTool.calligraphy),
         ),
         const SizedBox(width: 10),
         Container(width: 1, height: 28, color: Colors.grey.shade300),
@@ -660,9 +667,14 @@ class _PenToolIcon extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active = currentTool == CanvasTool.pen || currentTool == CanvasTool.brush;
+    final active = currentTool == CanvasTool.pen ||
+        currentTool == CanvasTool.brush ||
+        currentTool == CanvasTool.calligraphy;
+    IconData activeIcon = Icons.edit_rounded;
+    if (currentTool == CanvasTool.brush) activeIcon = Icons.brush_rounded;
+    if (currentTool == CanvasTool.calligraphy) activeIcon = Icons.draw_rounded;
     return Tooltip(
-      message: 'Penna / Pennello',
+      message: 'Penna / Pennello / Calligrafia',
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
         onTap: () => active ? onToggleOptions() : onToolChanged(CanvasTool.pen),
@@ -675,7 +687,7 @@ class _PenToolIcon extends StatelessWidget {
           child: Stack(
             children: [
               Center(child: Icon(
-                currentTool == CanvasTool.brush ? Icons.brush_rounded : Icons.edit_rounded,
+                activeIcon,
                 size: 19,
                 color: active ? Colors.blue : Colors.grey.shade700,
               )),

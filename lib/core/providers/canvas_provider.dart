@@ -1322,6 +1322,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       case CanvasTool.pen: toolType = 'pen'; break;
       case CanvasTool.ballpoint: toolType = 'ballpoint'; break;
       case CanvasTool.brush: toolType = 'brush'; break;
+      case CanvasTool.calligraphy: toolType = 'calligraphy'; break;
       case CanvasTool.highlighter:
         toolType = 'highlighter'; isHighlighter = true; opacity = 0.35; break;
       default: toolType = 'pen';

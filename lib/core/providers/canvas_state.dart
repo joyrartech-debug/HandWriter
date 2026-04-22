@@ -24,6 +24,7 @@ enum CanvasTool {
   pen,
   ballpoint,
   brush,
+  calligraphy,
   highlighter,
   eraserStandard,
   eraserStroke,

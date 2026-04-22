@@ -650,6 +650,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     return tool == CanvasTool.pen ||
         tool == CanvasTool.ballpoint ||
         tool == CanvasTool.brush ||
+        tool == CanvasTool.calligraphy ||
         tool == CanvasTool.highlighter ||
         tool == CanvasTool.eraserStandard ||
         tool == CanvasTool.eraserStroke ||
@@ -3694,6 +3695,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   String _toolTypeString(CanvasTool tool) {
     switch (tool) {
       case CanvasTool.pen: return 'pen';
+      case CanvasTool.calligraphy: return 'calligraphy';
       case CanvasTool.ballpoint: return 'ballpoint';
       case CanvasTool.brush: return 'brush';
       case CanvasTool.highlighter: return 'highlighter';
