@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:handwriter/core/providers/app_settings_provider.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/crash_logger.dart';
@@ -44,14 +45,16 @@ void main() async {
   });
 }
 
-class HandWriterApp extends StatelessWidget {
+class HandWriterApp extends ConsumerWidget {
   const HandWriterApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final themeMode = ref.watch(appSettingsProvider).themeMode;
     return MaterialApp(
       title: 'HandWriter',
       debugShowCheckedModeBanner: false,
+      themeMode: themeMode,
       theme: ThemeData(
         colorSchemeSeed: const Color(0xFF1565C0),
         useMaterial3: true,

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/core/providers/app_settings_provider.dart';
 import 'package:handwriter/core/providers/auth_provider.dart';
 import 'package:handwriter/core/services/crash_logger.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -678,6 +679,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   }
 
   Future<void> _openNotebook(NotebookEntry entry) async {
+    // Mark this notebook as recently opened for the 'Recenti' section.
+    ref.read(appSettingsProvider.notifier).markOpened(entry.metadata.id);
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -862,6 +865,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
   }
 
   void _showNotebookMenu(NotebookEntry entry) {
+    final isFav = ref.read(appSettingsProvider)
+        .favoriteNotebookIds
+        .contains(entry.metadata.id);
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
@@ -878,6 +884,18 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                 color: Colors.grey.shade300,
                 borderRadius: BorderRadius.circular(2),
               ),
+            ),
+            ListTile(
+              leading: Icon(
+                isFav ? Icons.star_rounded : Icons.star_outline_rounded,
+                color: isFav ? Colors.amber.shade700 : null,
+              ),
+              title: Text(isFav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti'),
+              onTap: () {
+                Navigator.pop(ctx);
+                ref.read(appSettingsProvider.notifier)
+                    .toggleFavorite(entry.metadata.id);
+              },
             ),
             ListTile(
               leading: const Icon(Icons.edit_outlined),
@@ -1283,6 +1301,23 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  PopupMenuItem<String> _buildThemeMenuItem(
+      String value, IconData icon, String label, ThemeMode mode) {
+    final current = ref.read(appSettingsProvider).themeMode;
+    final isSel = current == mode;
+    return PopupMenuItem<String>(
+      value: value,
+      child: Row(children: [
+        Icon(icon, size: 18, color: isSel ? Colors.blue : null),
+        const SizedBox(width: 8),
+        Expanded(child: Text(label,
+            style: TextStyle(color: isSel ? Colors.blue : null,
+                fontWeight: isSel ? FontWeight.w600 : null))),
+        if (isSel) const Icon(Icons.check, size: 16, color: Colors.blue),
+      ]),
     );
   }
 
@@ -1734,6 +1769,15 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                 case 'forceresync':
                   _forceResync();
                   break;
+                case 'theme_system':
+                  ref.read(appSettingsProvider.notifier).setThemeMode(ThemeMode.system);
+                  break;
+                case 'theme_light':
+                  ref.read(appSettingsProvider.notifier).setThemeMode(ThemeMode.light);
+                  break;
+                case 'theme_dark':
+                  ref.read(appSettingsProvider.notifier).setThemeMode(ThemeMode.dark);
+                  break;
               }
             },
             itemBuilder: (_) => [
@@ -1772,6 +1816,20 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                   Text('Forza sync'),
                 ]),
               ),
+              const PopupMenuDivider(),
+              // Theme selector (live switch — no restart needed)
+              PopupMenuItem(
+                enabled: false,
+                padding: EdgeInsets.zero,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: Text('Tema',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
+                ),
+              ),
+              _buildThemeMenuItem('theme_system', Icons.brightness_auto_rounded, 'Sistema', ThemeMode.system),
+              _buildThemeMenuItem('theme_light', Icons.light_mode_rounded, 'Chiaro', ThemeMode.light),
+              _buildThemeMenuItem('theme_dark', Icons.dark_mode_rounded, 'Scuro', ThemeMode.dark),
               const PopupMenuDivider(),
               const PopupMenuItem(
                 value: 'logout',
@@ -1915,6 +1973,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           // Filter by search query (case-insensitive, matches title + chapter titles)
           // AND by selected tags (AND across selected tags).
           final query = _searchQuery.trim().toLowerCase();
+          final settings = ref.watch(appSettingsProvider);
           final filtered = list.where((e) {
             if (_selectedTags.isNotEmpty &&
                 !_selectedTags.every(e.metadata.tags.contains)) {
@@ -1925,6 +1984,52 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
             if (e.metadata.tags.any((t) => t.toLowerCase().contains(query))) return true;
             return e.metadata.chapters.any((c) => c.title.toLowerCase().contains(query));
           }).toList();
+
+          // Apply sort. Favorites-first puts starred notebooks at the top of
+          // each sort group without breaking within-group ordering.
+          int cmp(NotebookEntry a, NotebookEntry b) {
+            switch (settings.sortMode) {
+              case LibrarySortMode.modifiedDesc:
+                return b.metadata.modifiedAt.compareTo(a.metadata.modifiedAt);
+              case LibrarySortMode.modifiedAsc:
+                return a.metadata.modifiedAt.compareTo(b.metadata.modifiedAt);
+              case LibrarySortMode.titleAsc:
+                return a.metadata.title.toLowerCase()
+                    .compareTo(b.metadata.title.toLowerCase());
+              case LibrarySortMode.titleDesc:
+                return b.metadata.title.toLowerCase()
+                    .compareTo(a.metadata.title.toLowerCase());
+              case LibrarySortMode.createdDesc:
+                return b.metadata.createdAt.compareTo(a.metadata.createdAt);
+              case LibrarySortMode.createdAsc:
+                return a.metadata.createdAt.compareTo(b.metadata.createdAt);
+              case LibrarySortMode.colorGroup:
+                final c = a.metadata.coverColor.compareTo(b.metadata.coverColor);
+                if (c != 0) return c;
+                return b.metadata.modifiedAt.compareTo(a.metadata.modifiedAt);
+            }
+          }
+          filtered.sort((a, b) {
+            if (settings.favoritesFirst) {
+              final aFav = settings.favoriteNotebookIds.contains(a.metadata.id);
+              final bFav = settings.favoriteNotebookIds.contains(b.metadata.id);
+              if (aFav != bFav) return aFav ? -1 : 1;
+            }
+            return cmp(a, b);
+          });
+
+          // Recent files section: top 5 most recently opened (from settings,
+          // not from modified-at — 'opened' is more relevant to quick access).
+          final recent = <NotebookEntry>[];
+          if (settings.lastOpenedAt.isNotEmpty) {
+            final sortedIds = settings.lastOpenedAt.entries.toList()
+              ..sort((a, b) => b.value.compareTo(a.value));
+            for (final e in sortedIds) {
+              if (recent.length >= 5) break;
+              final match = list.where((n) => n.metadata.id == e.key);
+              if (match.isNotEmpty) recent.add(match.first);
+            }
+          }
 
           return RefreshIndicator(
             onRefresh: () => ref.read(notebookListProvider.notifier).refresh(),
@@ -1991,6 +2096,47 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                             label: const Text('Pulisci', style: TextStyle(fontSize: 12)),
                           ),
                       ],
+                    ),
+                  ),
+                // Sort + recent header.
+                if (filtered.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 12, 16, 4),
+                    child: Row(
+                      children: [
+                        if (recent.isNotEmpty && _searchQuery.isEmpty && _selectedTags.isEmpty) ...[
+                          Icon(Icons.history_rounded, size: 16, color: Colors.grey.shade600),
+                          const SizedBox(width: 6),
+                          Text('${recent.length} recenti',
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                        ],
+                        const Spacer(),
+                        _SortButton(
+                          mode: settings.sortMode,
+                          favoritesFirst: settings.favoritesFirst,
+                          onModeChanged: (m) => ref
+                              .read(appSettingsProvider.notifier)
+                              .setSortMode(m),
+                          onFavoritesFirstChanged: (v) => ref
+                              .read(appSettingsProvider.notifier)
+                              .setFavoritesFirst(v),
+                        ),
+                      ],
+                    ),
+                  ),
+                // Recent strip (only on unfiltered view).
+                if (recent.isNotEmpty && _searchQuery.isEmpty && _selectedTags.isEmpty)
+                  SizedBox(
+                    height: 72,
+                    child: ListView.separated(
+                      scrollDirection: Axis.horizontal,
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      itemCount: recent.length,
+                      separatorBuilder: (_, __) => const SizedBox(width: 8),
+                      itemBuilder: (_, i) => _RecentChip(
+                        entry: recent[i],
+                        onTap: () => _openNotebook(recent[i]),
+                      ),
                     ),
                   ),
                 if (filtered.isEmpty)
@@ -2090,6 +2236,9 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
     final paperLabel = _paperLabel(meta.paperType);
     final thumbs = ref.watch(thumbnailServiceProvider);
     final thumbPath = thumbs.thumbnailPath(meta.id);
+    final isFav = ref.watch(appSettingsProvider)
+        .favoriteNotebookIds
+        .contains(meta.id);
     // Re-read mtime so saves trigger a repaint.
     final thumbFile = File(thumbPath);
     // Tick is referenced so the analyzer knows it's used; it's also what
@@ -2173,6 +2322,32 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
                               ),
                             ),
                           ),
+                        // Favorite star overlay (top-right). Tapping toggles
+                        // the star without opening the notebook.
+                        Positioned(
+                          top: 6,
+                          right: 6,
+                          child: Material(
+                            color: Colors.transparent,
+                            child: InkWell(
+                              onTap: () => ref
+                                  .read(appSettingsProvider.notifier)
+                                  .toggleFavorite(meta.id),
+                              borderRadius: BorderRadius.circular(16),
+                              child: Padding(
+                                padding: const EdgeInsets.all(4),
+                                child: Icon(
+                                  isFav ? Icons.star_rounded : Icons.star_outline_rounded,
+                                  color: isFav ? Colors.amber : Colors.white.withValues(alpha: 0.7),
+                                  size: 22,
+                                  shadows: [
+                                    Shadow(color: Colors.black.withValues(alpha: 0.4), blurRadius: 4),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
                         if (!hasThumb) ...[
                           Positioned(
                             left: 16,
@@ -2395,4 +2570,134 @@ class _ShareDest {
 
   const _ShareDest.existing(NotebookEntry this.entry, {this.chapterId, this.newChapter = false})
       : isNewNotebook = false;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  SORT / RECENT UI
+// ═══════════════════════════════════════════════════════════════
+
+class _SortButton extends StatelessWidget {
+  final LibrarySortMode mode;
+  final bool favoritesFirst;
+  final ValueChanged<LibrarySortMode> onModeChanged;
+  final ValueChanged<bool> onFavoritesFirstChanged;
+
+  const _SortButton({
+    required this.mode,
+    required this.favoritesFirst,
+    required this.onModeChanged,
+    required this.onFavoritesFirstChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<Object>(
+      tooltip: 'Ordina',
+      icon: Icon(mode.icon, size: 20, color: Colors.grey.shade700),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      itemBuilder: (_) => [
+        PopupMenuItem(
+          enabled: false,
+          padding: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Text('Ordina per',
+                style: TextStyle(fontSize: 11, color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
+          ),
+        ),
+        ...LibrarySortMode.values.map((m) => PopupMenuItem<Object>(
+              value: m,
+              child: Row(
+                children: [
+                  Icon(m.icon, size: 18,
+                      color: m == mode ? Colors.blue : Colors.grey.shade600),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(m.label,
+                        style: TextStyle(
+                          color: m == mode ? Colors.blue : null,
+                          fontWeight: m == mode ? FontWeight.w600 : null,
+                        )),
+                  ),
+                  if (m == mode) const Icon(Icons.check, size: 16, color: Colors.blue),
+                ],
+              ),
+            )),
+        const PopupMenuDivider(),
+        PopupMenuItem<Object>(
+          value: 'toggle_fav_first',
+          child: Row(
+            children: [
+              Icon(
+                favoritesFirst ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                size: 20,
+                color: favoritesFirst ? Colors.blue : Colors.grey.shade600,
+              ),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('Preferiti in cima')),
+            ],
+          ),
+        ),
+      ],
+      onSelected: (v) {
+        if (v is LibrarySortMode) {
+          onModeChanged(v);
+        } else if (v == 'toggle_fav_first') {
+          onFavoritesFirstChanged(!favoritesFirst);
+        }
+      },
+    );
+  }
+}
+
+class _RecentChip extends ConsumerWidget {
+  final NotebookEntry entry;
+  final VoidCallback onTap;
+
+  const _RecentChip({required this.entry, required this.onTap});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final color = Color(entry.metadata.coverColor);
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        width: 160,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          gradient: LinearGradient(
+            colors: [color.withValues(alpha: 0.7), color.withValues(alpha: 0.95)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.book_rounded, size: 14, color: Colors.white.withValues(alpha: 0.9)),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    entry.metadata.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+            Text(
+              '${entry.metadata.pageCount} pagine',
+              style: TextStyle(color: Colors.white.withValues(alpha: 0.85), fontSize: 11),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }

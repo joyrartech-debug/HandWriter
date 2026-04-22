@@ -2096,6 +2096,22 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   child: GestureDetector(
                     onScaleStart: _onScaleStart,
                     onScaleUpdate: _onScaleUpdate,
+                    // Double-tap toggles zoom-to-fit <-> default 2.0x zoom.
+                    // Only fires for non-drawing tools so a user can't
+                    // accidentally zoom while sketching fast.
+                    onDoubleTap: (canvasState.currentTool == CanvasTool.pan ||
+                            canvasState.currentTool == CanvasTool.image)
+                        ? () {
+                            // Toggle: if already near fit-zoom, go back to 2.0
+                            // default; otherwise fit the full page.
+                            final notifier = ref.read(canvasProvider.notifier);
+                            if (canvasState.zoom < 1.4) {
+                              notifier.resetZoom();
+                            } else {
+                              notifier.zoomToFit();
+                            }
+                          }
+                        : null,
                     child: ClipRect(
                       child: RepaintBoundary(
                         child: CustomPaint(

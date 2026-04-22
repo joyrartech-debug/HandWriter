@@ -4984,6 +4984,31 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(zoom: 2.0, panOffset: _centeredPanOffset(2.0));
   }
 
+  /// Fit the current page vertically into the viewport. Computes the zoom
+  /// that makes the full page height visible at once + horizontally centers
+  /// the page. Bound to the double-tap gesture on the canvas.
+  void zoomToFit() {
+    final s = state;
+    final vp = _viewportSize;
+    if (s == null || vp == null) return;
+    final page = s.currentPage;
+    if (page == null) return;
+    // Fit entire page height with a small margin; width fits automatically
+    // because pages are narrower than the viewport on desktop/iPad.
+    const margin = 24.0;
+    final zoomH = (vp.height - margin * 2) / page.height;
+    final zoomW = (vp.width - margin * 2) / page.width;
+    final target = zoomH < zoomW ? zoomH : zoomW;
+    final newZoom = target.clamp(0.3, 5.0);
+    // Horizontally center: same rule as _centeredPanOffset but with margin.
+    final panX = (vp.width - page.width * newZoom) / 2;
+    final panY = (vp.height - page.height * newZoom) / 2;
+    state = s.copyWith(
+      zoom: newZoom,
+      panOffset: Offset(panX, panY),
+    );
+  }
+
   Future<void> save() async {
     if (state == null || !state!.isDirty) return;
     final locked = await _acquireSyncLock();
