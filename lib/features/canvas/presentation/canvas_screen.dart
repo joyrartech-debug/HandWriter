@@ -1971,17 +1971,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   Widget _buildTopBar(CanvasState canvasState) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final fg = isDark
+        ? Theme.of(context).colorScheme.onSurface
+        : Colors.grey.shade800;
     return Container(
       height: 44,
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: Colors.grey.shade300, width: 0.5)),
+        color: isDark
+            ? Theme.of(context).colorScheme.surfaceContainerHigh
+            : Colors.white,
+        border: Border(bottom: BorderSide(color: Theme.of(context).dividerColor, width: 0.5)),
       ),
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: Row(
         children: [
           IconButton(
-            icon: Icon(Icons.arrow_back_ios_new_rounded, color: Colors.grey.shade800, size: 18),
+            icon: Icon(Icons.arrow_back_ios_new_rounded, color: fg, size: 18),
             onPressed: () async {
               // _onWillPop handles pop + cleanup internally; it returns false.
               await _onWillPop();
@@ -3500,6 +3506,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     final filteredPos = canvasState.currentFilteredIndex;
     final filteredCount = canvasState.filteredPageCount;
     final hasChapters = canvasState.metadata.chapters.isNotEmpty;
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final navBg = isDark
+        ? Theme.of(context).colorScheme.surfaceContainer
+        : Colors.grey.shade50;
+    final navBorder = Theme.of(context).dividerColor;
 
     return Column(
       mainAxisSize: MainAxisSize.min,
@@ -3509,8 +3520,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           Container(
             height: 36,
             decoration: BoxDecoration(
-              color: Colors.grey.shade50,
-              border: Border(top: BorderSide(color: Colors.grey.shade300, width: 0.5)),
+              color: navBg,
+              border: Border(top: BorderSide(color: navBorder, width: 0.5)),
             ),
             child: ListView(
               scrollDirection: Axis.horizontal,
@@ -3574,20 +3585,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         Container(
           height: 44,
           decoration: BoxDecoration(
-            color: Colors.white,
-            border: Border(top: BorderSide(color: Colors.grey.shade300, width: 0.5)),
+            color: isDark
+                ? Theme.of(context).colorScheme.surfaceContainerHigh
+                : Colors.white,
+            border: Border(top: BorderSide(color: navBorder, width: 0.5)),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 12),
           child: Row(
             children: [
               IconButton(
-                icon: Icon(Icons.view_carousel_outlined, color: Colors.grey.shade700, size: 20),
+                icon: Icon(Icons.view_carousel_outlined,
+                    color: isDark ? Theme.of(context).colorScheme.onSurfaceVariant : Colors.grey.shade700, size: 20),
                 onPressed: () => _showPageManager(canvasState),
                 tooltip: 'Gestione pagine',
               ),
               const Spacer(),
               IconButton(
-                icon: Icon(Icons.chevron_left_rounded, color: Colors.grey.shade800, size: 22),
+                icon: Icon(Icons.chevron_left_rounded,
+                    color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800, size: 22),
                 onPressed: filteredPos > 0
                     ? () => ref.read(canvasProvider.notifier).prevPage()
                     : null,
@@ -3597,17 +3612,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 onTap: () => _showPageManager(canvasState),
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? Theme.of(context).colorScheme.surfaceContainerHighest
+                        : Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                   child: Text(
                     filteredCount > 0 && filteredPos >= 0
                         ? '${filteredPos + 1} / $filteredCount'
                         : '— / $filteredCount',
-                    style: TextStyle(color: Colors.grey.shade800, fontSize: 13, fontWeight: FontWeight.w500),
+                    style: TextStyle(
+                        color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800,
+                        fontSize: 13, fontWeight: FontWeight.w500),
                   ),
                 ),
               ),
               IconButton(
-                icon: Icon(Icons.chevron_right_rounded, color: Colors.grey.shade800, size: 22),
+                icon: Icon(Icons.chevron_right_rounded,
+                    color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800, size: 22),
                 onPressed: filteredPos >= 0 && filteredPos < filteredCount - 1
                     ? () => ref.read(canvasProvider.notifier).nextPage()
                     : null,

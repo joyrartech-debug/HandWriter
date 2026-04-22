@@ -69,6 +69,11 @@ class CanvasToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final toolbarBg = isDark
+        ? Theme.of(context).colorScheme.surfaceContainerHigh
+        : const Color(0xFFF8F9FA);
+    final toolbarBorder = Theme.of(context).dividerColor;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -76,8 +81,8 @@ class CanvasToolbar extends StatelessWidget {
         Container(
           height: 48,
           decoration: BoxDecoration(
-            color: const Color(0xFFF8F9FA),
-            border: Border(bottom: BorderSide(color: Colors.grey.shade300, width: 0.5)),
+            color: toolbarBg,
+            border: Border(bottom: BorderSide(color: toolbarBorder, width: 0.5)),
           ),
           child: Row(
             children: [
@@ -272,11 +277,14 @@ class CanvasToolbar extends StatelessWidget {
   }
 
   Widget _buildOptionsPanel(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       height: 52,
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(bottom: BorderSide(color: Colors.grey.shade200, width: 0.5)),
+        color: isDark
+            ? Theme.of(context).colorScheme.surfaceContainer
+            : Colors.white,
+        border: Border(bottom: BorderSide(color: Theme.of(context).dividerColor, width: 0.5)),
         boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 4, offset: const Offset(0, 2))],
       ),
       padding: const EdgeInsets.symmetric(horizontal: 16),

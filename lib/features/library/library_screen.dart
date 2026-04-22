@@ -1685,11 +1685,21 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       crossAxisCount = 2;
     }
 
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      backgroundColor: const Color(0xFFF8F8F8),
+      backgroundColor: isDark
+          ? Theme.of(context).colorScheme.surface
+          : const Color(0xFFF8F8F8),
       appBar: AppBar(
-        backgroundColor: Colors.white,
-        surfaceTintColor: Colors.white,
+        backgroundColor: isDark
+            ? Theme.of(context).colorScheme.surfaceContainerHigh
+            : Colors.white,
+        surfaceTintColor: isDark
+            ? Theme.of(context).colorScheme.surfaceContainerHigh
+            : Colors.white,
+        foregroundColor: isDark
+            ? Theme.of(context).colorScheme.onSurface
+            : null,
         elevation: 0,
         title: Row(
           children: [
@@ -2055,14 +2065,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                       isDense: true,
                       contentPadding: const EdgeInsets.symmetric(vertical: 12),
                       filled: true,
-                      fillColor: Colors.white,
+                      fillColor: Theme.of(context).brightness == Brightness.dark
+                          ? Theme.of(context).colorScheme.surfaceContainerHigh
+                          : Colors.white,
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(color: Colors.grey.shade300),
+                        borderSide: BorderSide(color: Theme.of(context).dividerColor),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide(color: Colors.grey.shade300),
+                        borderSide: BorderSide(color: Theme.of(context).dividerColor),
                       ),
                     ),
                   ),
