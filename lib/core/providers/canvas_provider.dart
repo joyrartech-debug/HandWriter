@@ -1117,11 +1117,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// avoiding the intermediate frame that causes visible line stretching.
   void commitAndEndStroke(List<StrokePoint> points) {
     if (state == null) return;
-    if (points.length < 2) {
+    if (points.isEmpty) {
       state = state!.copyWith(activeStroke: []);
       return;
     }
-    // Set the points, then immediately finalize
+    // Single-point taps are valid 'dot' strokes — Apple Pencil quick taps
+    // were previously discarded because the jitter-rejection filter trims
+    // every nearby sample, leaving only the first point. Now we keep them
+    // and the renderer draws a proportional dot for length-1 strokes.
     state = state!.copyWith(activeStroke: List.of(points));
     _addStrokeElement(state!);
   }
@@ -1137,7 +1140,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
     if (tool == CanvasTool.shape) { _finalizeShape(); return; }
 
-    if (state!.activeStroke.length < 2) {
+    if (state!.activeStroke.isEmpty) {
       state = state!.copyWith(activeStroke: []);
       return;
     }

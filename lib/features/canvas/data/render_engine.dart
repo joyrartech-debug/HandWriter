@@ -385,7 +385,27 @@ class CanvasRenderEngine extends CustomPainter {
   }
 
   void _paintStroke(Canvas canvas, StrokeData stroke) {
-    if (stroke.points.length < 2) return;
+    if (stroke.points.isEmpty) return;
+    // Single-point stroke = Apple Pencil quick tap. Render as a filled
+    // circle proportional to baseWidth so dots actually appear (the old
+    // `< 2` early-return silently dropped them).
+    if (stroke.points.length == 1) {
+      final p = stroke.points.first;
+      final color = Color(stroke.color);
+      final paint = Paint()
+        ..color = color.withValues(
+            alpha: stroke.isHighlighter ? 0.35 : stroke.opacity)
+        ..style = PaintingStyle.fill
+        ..isAntiAlias = true;
+      // Match the per-tool width math: pen ~baseWidth, brush 1.5×, etc.
+      double radius = stroke.baseWidth * 0.55;
+      if (stroke.toolType == 'brush') radius *= 1.4;
+      if (stroke.toolType == 'highlighter') radius = stroke.baseWidth * 0.6;
+      // Pressure factor (Apple Pencil reports light pressure on quick taps).
+      final pf = 0.4 + p.pressure * 0.6;
+      canvas.drawCircle(Offset(p.x, p.y), (radius * pf).clamp(0.5, 50.0), paint);
+      return;
+    }
 
     final color = Color(stroke.color);
 

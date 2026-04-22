@@ -223,6 +223,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _triggerAutoSave() {
     final state = ref.read(canvasProvider);
     if (state == null || !state.isDirty || _isSaving) return;
+    // Defer the save while a stroke is mid-flight. Even with the encoding
+    // yield-batches, _saveInner does enough sync work (state.copyWith,
+    // setState in the canvas chrome) to drop ~1-2 frames — visible as a
+    // tiny gap in the stroke the user is actively drawing on iPad. Save
+    // fires the moment the pen lifts, when the autosave timer reschedules
+    // on the next dirty transition or on lifecycle pause.
+    if (_activeStrokeNotifier.isActive) {
+      // Re-arm the debounce so we try again when the stroke ends. Don't
+      // bypass the max-delay timer though — if user keeps writing for
+      // 15 s straight, we still attempt save (the new stroke point burst
+      // might tolerate it).
+      _autoSaveDebounce?.cancel();
+      _autoSaveDebounce = Timer(const Duration(milliseconds: 600), _triggerAutoSave);
+      return;
+    }
     _save(silent: true);
   }
 
@@ -580,14 +595,28 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _startLongPressTimer(Offset globalPos, Offset localPos, CanvasState state, Size canvasSize) {
     _cancelLongPressTimer();
     // Never show context menu while stylus is actively touching the screen
-    // (the touch event is almost certainly a palm)
+    // (the touch event is almost certainly a palm).
     if (_stylusDown) return;
-    // Suppress context menu if user was drawing recently (palm rest while writing)
-    if (DateTime.now().difference(_lastStrokeActivity).inMilliseconds < 3000) return;
+    // Bumped from 3 s → 8 s. A user pausing mid-sentence often rests the
+    // palm for several seconds before writing again; the old window let
+    // the context menu pop up unexpectedly during that pause. 8 s is
+    // close to a 'really not writing anymore' threshold without being
+    // annoying for legitimate context-menu requests.
+    if (DateTime.now().difference(_lastStrokeActivity).inMilliseconds < 8000) return;
+    // Require the touch to be the ONLY active pointer at start. Palm-rest
+    // during writing typically registers as a touch alongside the stylus,
+    // bringing _activePointers to 2; rejecting now avoids opening the
+    // menu on the iPad while the user is mid-stroke.
+    if (_activePointers > 1) return;
     _longPressGlobalPos = globalPos;
     _longPressFired = false;
-    _longPressTimer = Timer(const Duration(milliseconds: 500), () {
+    _longPressTimer = Timer(const Duration(milliseconds: 600), () {
       _longPressTimer = null;
+      // Recheck guards at fire time — a palm could have landed during
+      // the 600 ms wait. Don't open the menu if any of those triggered.
+      if (_stylusDown) return;
+      if (_activePointers != 1) return;
+      if (DateTime.now().difference(_lastStrokeActivity).inMilliseconds < 8000) return;
       _longPressFired = true;
       final latestState = ref.read(canvasProvider);
       if (latestState != null) {
