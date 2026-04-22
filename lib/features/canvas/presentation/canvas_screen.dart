@@ -18,6 +18,7 @@ import 'package:handwriter/core/providers/auth_provider.dart' show webdavService
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/pending_import_provider.dart';
+import 'package:handwriter/core/providers/preset_colors_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
@@ -1340,12 +1341,28 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     (Formats.bmp, 'bmp'),
   ];
 
-  Future<void> _pasteFromClipboard() async {
-    // If the internal clipboard has content, prefer it
-    final cs = ref.read(canvasProvider);
-    if (cs != null && cs.clipboard != null) {
-      ref.read(canvasProvider.notifier).paste();
-      return;
+  /// Paste an image specifically from the SYSTEM clipboard, bypassing the
+  /// HandWriter-internal clipboard. Used by the 'Incolla immagine' menu
+  /// item — the user explicitly asked for an image, so we must ignore
+  /// any older internal selection that might still be in memory.
+  Future<void> _pasteSystemClipboardImageOnly() async {
+    await _pasteFromClipboard(preferSystemImage: true);
+  }
+
+  Future<void> _pasteFromClipboard({bool preferSystemImage = false}) async {
+    // The 'preferSystemImage' flag, set by the 'Incolla immagine' menu,
+    // skips the internal-first short-circuit. The user explicitly asked
+    // for an image, and if they copied one externally (iPad screenshot,
+    // Safari image, etc.) that new clipboard entry must win over any
+    // stale internal selection the app still holds in memory. Without
+    // this, every paste returned the last thing copied INSIDE HandWriter
+    // even when the system clipboard had a newer, clearly-intended image.
+    if (!preferSystemImage) {
+      final cs = ref.read(canvasProvider);
+      if (cs != null && cs.clipboard != null) {
+        ref.read(canvasProvider.notifier).paste();
+        return;
+      }
     }
 
     try {
@@ -1876,6 +1893,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 },
                 onCreateSymbol: canvasState.lassoSelection != null ? () => _promptCreateSymbolFromSelection() : null,
                 symbolCount: canvasState.symbolLibraries.fold(0, (sum, l) => sum + l.symbols.length),
+                presetColors: ref.watch(presetColorsProvider),
+                onEditColorSlot: (idx, newColor) =>
+                    ref.read(presetColorsProvider.notifier).setColor(idx, newColor),
+                onMoveColorSlot: (from, to) =>
+                    ref.read(presetColorsProvider.notifier).swap(from, to),
               ),
               Expanded(child: _buildCanvas(canvasState, currentPage)),
               _buildPageNav(canvasState),
@@ -2869,7 +2891,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         case 'duplicate_sel': notifier.duplicateSelection(); _toast('Selezione duplicata'); break;
         case 'delete_sel': notifier.deleteSelection(); break;
         case 'paste': notifier.paste(at: pagePos); break;
-        case 'paste_clipboard_image': _pasteFromClipboard(); break;
+        case 'paste_clipboard_image': _pasteSystemClipboardImageOnly(); break;
         case 'select_all': notifier.selectAll(); break;
         case 'clear_page': _confirmClearPage(); break;
         case 'insert_image': _pickAndInsertImage(pagePos); break;

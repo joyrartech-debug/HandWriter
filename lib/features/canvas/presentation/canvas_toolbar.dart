@@ -29,6 +29,12 @@ class CanvasToolbar extends StatelessWidget {
   final VoidCallback? onCreateSymbol;
   final int symbolCount;
   final List<int> presetColors;
+  /// Called when the user long-presses a preset slot and picks a new color
+  /// from the palette editor. Provides (slotIndex, newColorInt).
+  final void Function(int slotIndex, int newColor)? onEditColorSlot;
+  /// Called when the user long-presses a preset slot and taps move L/R in
+  /// the palette editor. Provides (fromIndex, toIndex).
+  final void Function(int fromIndex, int toIndex)? onMoveColorSlot;
 
   const CanvasToolbar({
     super.key,
@@ -57,6 +63,8 @@ class CanvasToolbar extends StatelessWidget {
     this.onCreateSymbol,
     this.symbolCount = 0,
     this.presetColors = const [0xFF000000, 0xFF1565C0, 0xFFC62828, 0xFFFFFFFF, 0xFFFF9800, 0xFF2196F3],
+    this.onEditColorSlot,
+    this.onMoveColorSlot,
   });
 
   @override
@@ -175,11 +183,17 @@ class CanvasToolbar extends StatelessWidget {
 
   // ── Width indicators: 3 inline line bars (thin / medium / thick) ──
   List<Widget> _buildWidthIndicators() {
-    final widths = [1.0, 3.0, 6.0];
+    // Quick thin / normal / thick sizes in the main toolbar. 'Normal' (2.0)
+    // must match ToolSettings.strokeWidth's default so the middle button is
+    // highlighted out of the box — without this the user opens the pen and
+    // sees three equally-unselected indicators, then has to tap one just
+    // to see anything active.
+    final widths = [1.0, 2.0, 4.0];
+    final labels = {1.0: 'Sottile', 2.0: 'Normale', 4.0: 'Spesso'};
     return widths.map((w) {
-      final selected = (toolSettings.strokeWidth - w).abs() < 0.8;
+      final selected = (toolSettings.strokeWidth - w).abs() < 0.5;
       return Tooltip(
-        message: 'Spessore ${w.toStringAsFixed(0)}',
+        message: labels[w] ?? 'Spessore ${w.toStringAsFixed(0)}',
         child: InkWell(
           borderRadius: BorderRadius.circular(6),
           onTap: () => onSettingsChanged(toolSettings.copyWith(strokeWidth: w)),
@@ -207,7 +221,9 @@ class CanvasToolbar extends StatelessWidget {
   // ── Color dots ──
   List<Widget> _buildColorDots(BuildContext context) {
     return [
-      ...presetColors.map((c) {
+      ...presetColors.asMap().entries.map((entry) {
+        final idx = entry.key;
+        final c = entry.value;
         final isSel = toolSettings.color == c;
         return Padding(
           padding: const EdgeInsets.symmetric(horizontal: 1),
@@ -216,6 +232,9 @@ class CanvasToolbar extends StatelessWidget {
               onSettingsChanged(toolSettings.copyWith(color: c));
               if (lassoSelection != null) onChangeSelectionColor?.call(c);
             },
+            onLongPress: (onEditColorSlot == null && onMoveColorSlot == null)
+                ? null
+                : () => _showColorSlotEditor(context, idx, c),
             child: Container(
               width: 22, height: 22,
               decoration: BoxDecoration(
@@ -397,6 +416,117 @@ class CanvasToolbar extends StatelessWidget {
           ),
         ),
       )).toList(),
+    );
+  }
+
+  /// Long-press on a preset slot opens this editor. User can:
+  ///  • pick a different color from the full palette (replaces that slot)
+  ///  • shift the slot one step left or right (reorder)
+  /// Uses explicit buttons instead of gesture-based drag because long-press
+  /// + drag conflicts are unreliable with stylus on iPad.
+  void _showColorSlotEditor(BuildContext context, int slotIndex, int currentColor) {
+    if (onEditColorSlot == null && onMoveColorSlot == null) return;
+    final colors = <int>[
+      0xFF000000, 0xFF424242, 0xFF757575, 0xFFBDBDBD, 0xFFFFFFFF,
+      0xFFC62828, 0xFFE53935, 0xFFEF5350, 0xFFEF9A9A,
+      0xFFE65100, 0xFFF57C00, 0xFFFF9800, 0xFFFFCC80,
+      0xFFF9A825, 0xFFFDD835, 0xFFFFEB3B, 0xFFFFF59D,
+      0xFF2E7D32, 0xFF43A047, 0xFF66BB6A, 0xFFA5D6A7,
+      0xFF1565C0, 0xFF1E88E5, 0xFF42A5F5, 0xFF90CAF9,
+      0xFF4527A0, 0xFF7B1FA2, 0xFF9C27B0, 0xFFCE93D8,
+      0xFF006064, 0xFF00838F, 0xFF00ACC1, 0xFF80DEEA,
+      0xFF3E2723, 0xFF5D4037, 0xFF795548, 0xFFA1887F,
+    ];
+    showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      width: 28, height: 28,
+                      decoration: BoxDecoration(
+                        color: Color(currentColor),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: Colors.grey.shade400),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Text('Slot ${slotIndex + 1}',
+                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                    const Spacer(),
+                    // Reorder buttons
+                    if (onMoveColorSlot != null) ...[
+                      IconButton(
+                        tooltip: 'Sposta a sinistra',
+                        icon: const Icon(Icons.arrow_back_rounded),
+                        onPressed: slotIndex == 0
+                            ? null
+                            : () {
+                                onMoveColorSlot!(slotIndex, slotIndex - 1);
+                                Navigator.pop(ctx);
+                              },
+                      ),
+                      IconButton(
+                        tooltip: 'Sposta a destra',
+                        icon: const Icon(Icons.arrow_forward_rounded),
+                        onPressed: slotIndex >= presetColors.length - 1
+                            ? null
+                            : () {
+                                onMoveColorSlot!(slotIndex, slotIndex + 1);
+                                Navigator.pop(ctx);
+                              },
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 10),
+                const Text('Scegli un nuovo colore per questo slot:',
+                    style: TextStyle(fontSize: 13, color: Colors.grey)),
+                const SizedBox(height: 10),
+                if (onEditColorSlot != null)
+                  Wrap(
+                    spacing: 8, runSpacing: 8,
+                    children: colors.map((c) {
+                      final isSel = c == currentColor;
+                      return GestureDetector(
+                        onTap: () {
+                          onEditColorSlot!(slotIndex, c);
+                          Navigator.pop(ctx);
+                        },
+                        child: Container(
+                          width: 34, height: 34,
+                          decoration: BoxDecoration(
+                            color: Color(c),
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                              color: isSel
+                                  ? Colors.blue
+                                  : (c == 0xFFFFFFFF ? Colors.grey.shade400 : Colors.grey.shade300),
+                              width: isSel ? 2.5 : 1,
+                            ),
+                          ),
+                          child: isSel
+                              ? Icon(Icons.check, size: 14, color: c == 0xFF000000 ? Colors.white : Colors.blue)
+                              : null,
+                        ),
+                      );
+                    }).toList(),
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

@@ -6423,6 +6423,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     print('[Canvas] User accepted remote changes (landed on page $newPageIndex, '
         'chapter $mergedChapterId)');
 
+    // The pull may have placed us on a different page than the pre-pull
+    // one (new pages added, landing shifted). The decode priority loop
+    // inside _pullFromDeltaDownload runs against the BEFORE-landing
+    // current page, so the AFTER-landing page's images can still be
+    // blank bytes-only in state.assetBytes with no ui.Image cached.
+    // Without this call the user sees blank images/PDFs until they flip
+    // to the next page and back (which triggers decode via goToPage).
+    _ensureAssetsForCurrentWindow();
+
     // Persist the merged state locally. Tracked so closeNotebook() can
     // await it — otherwise exiting immediately after an auto-accept loses
     // the pulled pages (they're in memory but the .ncnote wasn't rewritten
