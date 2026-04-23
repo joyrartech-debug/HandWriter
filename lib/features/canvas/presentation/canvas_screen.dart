@@ -3143,6 +3143,69 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     return byteData?.buffer.asUint8List();
   }
 
+  /// Resolve the chapter the user means by "capitolo corrente". Prefers
+  /// the navigator filter ([CanvasState.activeChapterId]) but falls back
+  /// to the chapterId of the page currently under the viewport so the
+  /// "all pages" view still exports a meaningful chapter.
+  Chapter? _resolveActiveChapter(CanvasState state) {
+    String? chId = state.activeChapterId;
+    if (chId == null) {
+      final idx = state.currentPageIndex;
+      if (idx >= 0 && idx < state.document.pages.length) {
+        chId = state.document.pages[idx].chapterId;
+      }
+    }
+    if (chId == null) return null;
+    return state.metadata.chapters
+        .cast<Chapter?>()
+        .firstWhere((c) => c?.id == chId, orElse: () => null);
+  }
+
+  /// Return every [PageEntry] that belongs to [chapter], using the same
+  /// OR rule as the collector (PageEntry.chapterId match OR pageIds
+  /// membership) so the count shown in the dialog and the pages exported
+  /// stay in sync even after a heal pass truncated one side.
+  List<PageEntry> _chapterPageEntries(CanvasState state, Chapter chapter) {
+    final pageIds = chapter.pageIds.toSet();
+    return state.document.pages
+        .where((e) =>
+            e.chapterId == chapter.id || pageIds.contains(e.pageId))
+        .toList();
+  }
+
+  /// Sanitise a string for use inside a filename on every platform we
+  /// ship on (Windows is the strict one: no `\ / : * ? " < > |` and no
+  /// trailing dots or spaces). Returns a non-empty placeholder when
+  /// nothing survives the filter.
+  String _sanitiseForFilename(String raw) {
+    var out = raw.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '_').trim();
+    while (out.endsWith('.') || out.endsWith(' ')) {
+      out = out.substring(0, out.length - 1).trimRight();
+    }
+    return out.isEmpty ? 'Quaderno' : out;
+  }
+
+  /// Build the suggested export filename. For chapter scope we append
+  /// ` - <chapter title>` so exports from different chapters don't
+  /// collide in the user's downloads folder.
+  String _exportFilename(
+      CanvasState state, _ExportScope scope, String extension) {
+    final base = _sanitiseForFilename(state.metadata.title);
+    switch (scope) {
+      case _ExportScope.currentPage:
+        return '$base - pag. ${state.currentPageIndex + 1}.$extension';
+      case _ExportScope.currentChapter:
+        final ch = _resolveActiveChapter(state);
+        if (ch != null && ch.title.trim().isNotEmpty) {
+          final chTitle = _sanitiseForFilename(ch.title);
+          return '$base - $chTitle.$extension';
+        }
+        return '$base.$extension';
+      case _ExportScope.entireNotebook:
+        return '$base.$extension';
+    }
+  }
+
   /// Collect the pages to export based on user-chosen [scope].
   List<PageData> _collectExportPages(CanvasState state, _ExportScope scope) {
     switch (scope) {
@@ -3150,20 +3213,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         final p = state.currentPage;
         return p != null ? [p] : [];
       case _ExportScope.currentChapter:
-        final chId = state.activeChapterId;
-        if (chId == null) {
+        final chapter = _resolveActiveChapter(state);
+        if (chapter == null) {
           final p = state.currentPage;
+          debugPrint('[Export] currentChapter fallback to currentPage: '
+              'no chapter id resolvable');
           return p != null ? [p] : [];
         }
-        final chapterPageIds = state.metadata.chapters
-            .firstWhere((c) => c.id == chId, orElse: () => state.metadata.chapters.first)
-            .pageIds
-            .toSet();
-        return state.document.pages
-            .where((e) => chapterPageIds.contains(e.pageId))
+        final entries = _chapterPageEntries(state, chapter);
+        final result = entries
             .map((e) => state.pages[e.fileName])
             .whereType<PageData>()
             .toList();
+        debugPrint('[Export] currentChapter ${chapter.id}: '
+            'document match=${entries.length}, '
+            'page data resolved=${result.length}, '
+            'chapter.pageIds=${chapter.pageIds.length}, '
+            'activeChapterFilter=${state.activeChapterId}, '
+            'navigatorFilteredCount=${state.filteredPageCount}');
+        return result;
       case _ExportScope.entireNotebook:
         return state.document.pages
             .map((e) => state.pages[e.fileName])
@@ -3308,7 +3376,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       if (pagePayload.isEmpty) return;
 
       final pdfBytes = await compute(_buildPdfOnIsolate, pagePayload);
-      final fileName = '${state.metadata.title}.pdf';
+      final fileName = _exportFilename(state, scope, 'pdf');
       await _saveOrShare(fileName, pdfBytes, 'application/pdf');
 
       if (mounted) {
@@ -3523,13 +3591,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   String _currentChapterLabel(CanvasState state) {
-    final chId = state.activeChapterId;
-    if (chId == null) return '';
-    final ch = state.metadata.chapters.cast<Chapter?>().firstWhere(
-          (c) => c?.id == chId, orElse: () => null);
+    // Resolve with the same fallback the collector uses so the dialog
+    // count stays in sync with the number of pages the PDF will contain
+    // (and so "all pages" view still shows a chapter name).
+    final ch = _resolveActiveChapter(state);
     if (ch == null) return '';
-    final pageCount = ch.pageIds.length;
-    return '${ch.title} ($pageCount ${pageCount == 1 ? "pagina" : "pagine"})';
+    final count = _chapterPageEntries(state, ch).length;
+    return '${ch.title} ($count ${count == 1 ? "pagina" : "pagine"})';
   }
 
   Widget _buildPageNav(CanvasState canvasState) {
