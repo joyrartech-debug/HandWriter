@@ -1016,10 +1016,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       return;
     }
 
-    // Lasso tool: only track via provider (no visual pen stroke)
+    // Lasso tool: only track via provider (no visual pen stroke).
+    // ORDER MATTERS: bake+clear the previous selection BEFORE starting the new
+    // lasso path. Otherwise the render engine paints one frame with the stale
+    // selection bounds (still carrying the previous dragOffset) while the new
+    // path already contains its first point — the user perceives this as the
+    // new lasso "starting offset" from the true touch location.
     if (tool == CanvasTool.lasso) {
+      ref.read(canvasProvider.notifier).clearLassoPath(); // bake previous + reset provider path
       _lassoPathNotifier.start(pagePos);
-      ref.read(canvasProvider.notifier).clearLassoPath(); // reset provider path
       return;
     }
 
