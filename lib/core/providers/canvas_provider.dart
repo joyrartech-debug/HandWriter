@@ -521,7 +521,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         .toList()
       ..sort((a, b) =>
           (_imageAccessTime[a] ?? 0).compareTo(_imageAccessTime[b] ?? 0));
-    final targetSize = _mobileImageCacheMax;
+    const targetSize = _mobileImageCacheMax;
     final toEvict = s.imageCache.length - targetSize;
     if (toEvict <= 0 || candidates.isEmpty) return;
     final newCache = Map<String, ui.Image>.from(s.imageCache);
@@ -548,7 +548,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// crash log after a jetsam kill, roughly how big the caches had grown.
   void _logMemoryStats(String context) {
     if (defaultTargetPlatform != TargetPlatform.iOS &&
-        defaultTargetPlatform != TargetPlatform.android) return;
+        defaultTargetPlatform != TargetPlatform.android) {
+      return;
+    }
     final s = state;
     if (s == null) return;
     // Approximate GPU texture bytes: 4 * w * h per cached ui.Image.
@@ -1105,12 +1107,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Pen/brush/highlighter: fast notifier handles visual rendering,
     // no need to update Riverpod state on every point (avoids O(n) list copy).
     // Points are committed via commitAndEndStroke on pointer up.
-  }
-
-  /// Called from the fast notifier to bulk-set the active stroke before endStroke.
-  void commitActiveStroke(List<StrokePoint> points) {
-    if (state == null) return;
-    state = state!.copyWith(activeStroke: List.of(points));
   }
 
   /// Commit fast-notifier points and finalize the stroke in a single state update,
@@ -3887,9 +3883,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }).toList();
 
     if (copied.isEmpty) return;
-    final _clip0 = CanvasClipboard(elements: copied, bounds: sel.bounds);
-    state = state!.copyWith(clipboard: _clip0);
-    _ref.read(crossNotebookClipboardProvider.notifier).state = _clip0;
+    final clip = CanvasClipboard(elements: copied, bounds: sel.bounds);
+    state = state!.copyWith(clipboard: clip);
+    _ref.read(crossNotebookClipboardProvider.notifier).state = clip;
   }
 
   void cutSelection() {
@@ -3909,9 +3905,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (element == null) return;
     final bounds = _getElementBounds(element);
     if (bounds == null) return;
-    final _clip1 = CanvasClipboard(elements: [element], bounds: bounds);
-    state = state!.copyWith(clipboard: _clip1);
-    _ref.read(crossNotebookClipboardProvider.notifier).state = _clip1;
+    final clip = CanvasClipboard(elements: [element], bounds: bounds);
+    state = state!.copyWith(clipboard: clip);
+    _ref.read(crossNotebookClipboardProvider.notifier).state = clip;
   }
 
   /// Cut a single element: copy to clipboard, then delete.
@@ -3985,10 +3981,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // Copy the element to clipboard and enter placement mode
     final bounds = _elementBounds(original);
-    final _clip2 = CanvasClipboard(elements: [original], bounds: bounds);
-    _ref.read(crossNotebookClipboardProvider.notifier).state = _clip2;
+    final clip = CanvasClipboard(elements: [original], bounds: bounds);
+    _ref.read(crossNotebookClipboardProvider.notifier).state = clip;
     state = s.copyWith(
-      clipboard: _clip2,
+      clipboard: clip,
       pendingPaste: true,
       clearSelectedElement: true,
     );
