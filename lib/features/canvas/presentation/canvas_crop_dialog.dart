@@ -48,7 +48,7 @@ class _CropDialogState extends State<CropDialog> {
       child: Container(
         width: displayW + 48,
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: Theme.of(context).colorScheme.surface,
           borderRadius: BorderRadius.circular(16),
         ),
         padding: const EdgeInsets.all(24),
