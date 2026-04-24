@@ -632,13 +632,14 @@ class SelectionActionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surface,
         border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.06),
+            color: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.06),
             blurRadius: 8,
             offset: const Offset(0, -2),
           ),
@@ -917,7 +918,7 @@ class _PageGridReorderableState extends State<PageGridReorderable> {
             ? Colors.blue.shade300
             : isCurrentPage
                 ? Colors.blue
-                : Colors.grey.shade300;
+                : Theme.of(ctx).colorScheme.outlineVariant;
     final borderWidth = isSelected ? 2.5 : isCurrentPage ? 2.5 : isDragOver ? 2.0 : 1.0;
 
     return AnimatedContainer(
@@ -946,14 +947,14 @@ class _PageGridReorderableState extends State<PageGridReorderable> {
                         width: 22, height: 22,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: isSelected ? Colors.blue : Colors.white,
+                          color: isSelected ? Colors.blue : Theme.of(ctx).colorScheme.surface,
                           border: Border.all(
-                            color: isSelected ? Colors.blue : Colors.grey.shade400,
+                            color: isSelected ? Colors.blue : Theme.of(ctx).colorScheme.outlineVariant,
                             width: 1.5,
                           ),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.15),
+                              color: Theme.of(ctx).colorScheme.shadow.withValues(alpha: 0.15),
                               blurRadius: 3,
                             ),
                           ],
@@ -1011,38 +1012,44 @@ class _PageGridReorderableState extends State<PageGridReorderable> {
     int docIndex, bool isCurrentPage, PageData? page, CanvasState state, {
     bool overrideBorder = true,
   }) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        border: overrideBorder
-            ? Border.all(
-                color: isCurrentPage ? Colors.blue : Colors.grey.shade300,
-                width: isCurrentPage ? 2.5 : 1,
-              )
-            : null,
-        borderRadius: BorderRadius.circular(6),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.08),
-            blurRadius: 4,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(5),
-        child: page != null
-            ? CustomPaint(
-                painter: CanvasRenderEngine(
-                  pageData: page,
-                  zoom: 1.0,
-                  panOffset: Offset.zero,
-                  imageCache: state.imageCache,
-                ),
-                size: Size.infinite,
-              )
-            : const Center(child: Icon(Icons.description_outlined, color: Colors.grey)),
-      ),
-    );
+    return Builder(builder: (ctx) {
+      final outline = Theme.of(ctx).colorScheme.outlineVariant;
+      final shadowColor = Theme.of(ctx).colorScheme.shadow;
+      return Container(
+        decoration: BoxDecoration(
+          // Paper-simulate background — CanvasRenderEngine renders page paper
+          // over this, so keep white to match the paper color even in dark mode.
+          color: Colors.white,
+          border: overrideBorder
+              ? Border.all(
+                  color: isCurrentPage ? Colors.blue : outline,
+                  width: isCurrentPage ? 2.5 : 1,
+                )
+              : null,
+          borderRadius: BorderRadius.circular(6),
+          boxShadow: [
+            BoxShadow(
+              color: shadowColor.withValues(alpha: 0.08),
+              blurRadius: 4,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(5),
+          child: page != null
+              ? CustomPaint(
+                  painter: CanvasRenderEngine(
+                    pageData: page,
+                    zoom: 1.0,
+                    panOffset: Offset.zero,
+                    imageCache: state.imageCache,
+                  ),
+                  size: Size.infinite,
+                )
+              : Center(child: Icon(Icons.description_outlined, color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
+        ),
+      );
+    });
   }
 }
