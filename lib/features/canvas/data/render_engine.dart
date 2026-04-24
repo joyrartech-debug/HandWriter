@@ -529,6 +529,19 @@ class CanvasRenderEngine extends CustomPainter {
     // ── Fountain pen (default "pen") ──
     // Compute per-original-point width from pressure + velocity, smooth,
     // then interpolate through adaptive Catmull-Rom.
+    //
+    // Width-modulation curves tuned (0.36.x) to feel closer to GoodNotes:
+    //   - pressure: 0.45 → 1.05 (was 0.15 → 1.0). The old lower bound made
+    //     the stroke "anorexic" at light touches and especially at the
+    //     start/end of a fast scribble where Apple Pencil reports near-zero
+    //     pressure. Keeping more body matches the visual weight of a real
+    //     fountain pen and the "pen" tool in GoodNotes.
+    //   - velocity: clamp thinning at 30% (was 50%). A 50% reduction at
+    //     speed turned the middle of fast cursive strokes into hairlines;
+    //     30% preserves character without losing all the velocity feedback.
+    //   - 3 smoothing passes (was 2). Cheaper than it looks (operates on
+    //     N original points, not interpolated) and removes the small
+    //     width-step artifacts visible on slow zoomed-in strokes.
     final n = stroke.points.length;
 
     // Compute velocity from original points (independent of interpolation)
@@ -542,12 +555,12 @@ class CanvasRenderEngine extends CustomPainter {
 
     final rawWidths = List<double>.filled(n, stroke.baseWidth);
     for (int i = 0; i < n; i++) {
-      final velocityFactor = (1.0 - (velocities[i] / 20.0).clamp(0.0, 0.50));
-      final pressureFactor = 0.15 + stroke.points[i].pressure * 0.85;
+      final velocityFactor = (1.0 - (velocities[i] / 20.0).clamp(0.0, 0.30));
+      final pressureFactor = 0.45 + stroke.points[i].pressure * 0.60;
       rawWidths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
     }
-    // Smooth widths on original points (cheap — only N points)
-    for (int pass = 0; pass < 2; pass++) {
+    // Smooth widths on original points (cheap — only N points).
+    for (int pass = 0; pass < 3; pass++) {
       for (int i = 1; i < n - 1; i++) {
         rawWidths[i] = (rawWidths[i - 1] + rawWidths[i] * 2 + rawWidths[i + 1]) / 4;
       }
