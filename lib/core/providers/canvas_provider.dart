@@ -6284,7 +6284,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             remoteImageCache: Map.of(state!.imageCache),
           ));
           print('[Canvas] CONFLICT on $fileName — local + remote edits');
-        } else if (locallyEdited && !remoteEdited && localPage != null) {
+        } else if (locallyEdited && !remoteEdited) {
           // Local has unsynced edits but remote is unchanged from baseline:
           // the server's "new" ETag is just our own pending upload echoing
           // back (or a touched mtime on identical bytes). Keep local content
@@ -6292,6 +6292,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           // Without this, the safePages branch would overwrite the user's
           // in-progress strokes with the older remote bytes — exactly the
           // data-loss bug behind the false-conflict UX on flaky links.
+          //
+          // `localPage != null` is already implied by `locallyEdited`.
           updatedPages[fileName] = localPage;
           print('[Canvas] Pull: $fileName changed remotely but matches '
               'baseline; preserving local edits');
