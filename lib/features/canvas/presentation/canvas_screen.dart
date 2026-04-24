@@ -2117,7 +2117,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           Expanded(
             child: Text(
               canvasState.metadata.title,
-              style: TextStyle(color: Colors.grey.shade900, fontSize: 16, fontWeight: FontWeight.w600),
+              style: TextStyle(color: fg, fontSize: 16, fontWeight: FontWeight.w600),
               overflow: TextOverflow.ellipsis,
             ),
           ),
@@ -2139,10 +2139,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             message: 'Livello di zoom corrente',
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
+              decoration: BoxDecoration(
+                color: isDark
+                    ? Theme.of(context).colorScheme.surfaceContainerHighest
+                    : Colors.grey.shade100,
+                borderRadius: BorderRadius.circular(12),
+              ),
               child: Text(
                 '${(canvasState.zoom * 100).round()}%',
-                style: TextStyle(color: Colors.grey.shade700, fontSize: 12, fontWeight: FontWeight.w500),
+                style: TextStyle(color: fg, fontSize: 12, fontWeight: FontWeight.w500),
               ),
             ),
           ),
@@ -2152,7 +2157,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 : 'Dito attivo — tocca per accettare solo la penna',
             icon: Icon(
               _stylusOnlyDrawing ? Icons.create_rounded : Icons.touch_app_rounded,
-              color: _stylusOnlyDrawing ? Colors.blue : Colors.grey.shade600,
+              color: _stylusOnlyDrawing ? Colors.blue : fg,
               size: 20,
             ),
             onPressed: () {
@@ -2170,7 +2175,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               ),
             ),
           IconButton(
-            icon: Icon(Icons.save_rounded, color: canvasState.isDirty ? Colors.blue : Colors.grey.shade400, size: 20),
+            icon: Icon(
+              Icons.save_rounded,
+              color: canvasState.isDirty
+                  ? Colors.blue
+                  : Theme.of(context).disabledColor,
+              size: 20,
+            ),
             tooltip: canvasState.isDirty
                 ? 'Salva ora (Ctrl+S)'
                 : 'Tutto salvato',
@@ -3854,13 +3865,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                     decoration: BoxDecoration(
-                      color: canvasState.zoom != 2.0 ? Colors.blue.shade50 : Colors.grey.shade100,
+                      color: canvasState.zoom != 2.0
+                          ? (isDark ? Colors.blue.shade900.withValues(alpha: 0.4) : Colors.blue.shade50)
+                          : (isDark ? Theme.of(context).colorScheme.surfaceContainerHighest : Colors.grey.shade100),
                       borderRadius: BorderRadius.circular(8),
                     ),
                     child: Text(
                       '${(canvasState.zoom * 100).round()}%',
                       style: TextStyle(
-                        color: canvasState.zoom != 2.0 ? Colors.blue.shade700 : Colors.grey.shade600,
+                        color: canvasState.zoom != 2.0
+                            ? (isDark ? Colors.blue.shade200 : Colors.blue.shade700)
+                            : (isDark ? Theme.of(context).colorScheme.onSurfaceVariant : Colors.grey.shade600),
                         fontSize: 11,
                         fontWeight: FontWeight.w500,
                       ),
@@ -3872,7 +3887,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               Text(
                 'v${AppConfig.appVersion}',
                 style: TextStyle(
-                  color: Colors.grey.shade400,
+                  color: Theme.of(context).disabledColor,
                   fontSize: 10,
                 ),
               ),
@@ -3894,7 +3909,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: Theme.of(context).colorScheme.surface,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
