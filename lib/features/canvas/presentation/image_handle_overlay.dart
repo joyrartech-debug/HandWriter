@@ -259,52 +259,59 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
   }
 
   Widget _buildActionBar() {
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.15), blurRadius: 6, offset: const Offset(0, 2))],
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (widget.onCrop != null && !widget.isLocked) ...[
-            _actionBtn(Icons.crop_rounded, Colors.blueGrey, widget.onCrop!, 'Ritaglia'),
-            _divider(),
+    return Builder(builder: (context) {
+      final surface = Theme.of(context).colorScheme.surface;
+      final shadow = Theme.of(context).colorScheme.shadow;
+      final inactiveIcon = Theme.of(context).colorScheme.onSurfaceVariant;
+      return Container(
+        decoration: BoxDecoration(
+          color: surface,
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: [BoxShadow(color: shadow.withValues(alpha: 0.15), blurRadius: 6, offset: const Offset(0, 2))],
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (widget.onCrop != null && !widget.isLocked) ...[
+              _actionBtn(Icons.crop_rounded, Colors.blueGrey, widget.onCrop!, 'Ritaglia'),
+              _divider(),
+            ],
+            if (widget.onBringToFront != null) ...[
+              _actionBtn(Icons.flip_to_front_rounded, Colors.indigo, widget.onBringToFront!, 'In primo piano'),
+              _divider(),
+            ],
+            if (widget.onSendToBack != null) ...[
+              _actionBtn(Icons.flip_to_back_rounded, Colors.indigo, widget.onSendToBack!, 'Dietro a tutto'),
+              _divider(),
+            ],
+            if (widget.onToggleLock != null) ...[
+              _actionBtn(
+                widget.isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
+                widget.isLocked ? Colors.orange : inactiveIcon,
+                widget.onToggleLock!,
+                widget.isLocked ? 'Sblocca' : 'Blocca',
+              ),
+              _divider(),
+            ],
+            if (!widget.isLocked) ...[
+              _actionBtn(Icons.delete_outline_rounded, Colors.red, widget.onDelete, 'Elimina'),
+              _divider(),
+            ],
+            // Overflow menu for less-used actions (comment, reflect, copy, cut)
+            if (_hasOverflowActions()) ...[
+              _buildOverflowMenu(),
+              _divider(),
+            ],
+            _actionBtn(Icons.close_rounded, inactiveIcon, widget.onDeselect, 'Deseleziona'),
           ],
-          if (widget.onBringToFront != null) ...[
-            _actionBtn(Icons.flip_to_front_rounded, Colors.indigo, widget.onBringToFront!, 'In primo piano'),
-            _divider(),
-          ],
-          if (widget.onSendToBack != null) ...[
-            _actionBtn(Icons.flip_to_back_rounded, Colors.indigo, widget.onSendToBack!, 'Dietro a tutto'),
-            _divider(),
-          ],
-          if (widget.onToggleLock != null) ...[
-            _actionBtn(
-              widget.isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
-              widget.isLocked ? Colors.orange : Colors.grey.shade600,
-              widget.onToggleLock!,
-              widget.isLocked ? 'Sblocca' : 'Blocca',
-            ),
-            _divider(),
-          ],
-          if (!widget.isLocked) ...[
-            _actionBtn(Icons.delete_outline_rounded, Colors.red, widget.onDelete, 'Elimina'),
-            _divider(),
-          ],
-          // Overflow menu for less-used actions (comment, reflect, copy, cut)
-          if (_hasOverflowActions()) ...[
-            _buildOverflowMenu(),
-            _divider(),
-          ],
-          _actionBtn(Icons.close_rounded, Colors.grey.shade700, widget.onDeselect, 'Deseleziona'),
-        ],
-      ),
-    );
+        ),
+      );
+    });
   }
 
-  Widget _divider() => Container(width: 1, height: 24, color: Colors.grey.shade200);
+  Widget _divider() => Builder(builder: (context) {
+    return Container(width: 1, height: 24, color: Theme.of(context).colorScheme.outlineVariant);
+  });
 
   bool _hasOverflowActions() {
     return widget.onEditComment != null ||
@@ -314,76 +321,79 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
   }
 
   Widget _buildOverflowMenu() {
-    return Tooltip(
-      message: 'Altre azioni',
-      child: PopupMenuButton<String>(
-        tooltip: '',
-        padding: EdgeInsets.zero,
-        icon: Icon(Icons.more_vert_rounded, size: 18, color: Colors.grey.shade700),
-        onSelected: (value) {
-          switch (value) {
-            case 'comment':
-              widget.onEditComment?.call();
-              break;
-            case 'flip':
-              widget.onFlipHorizontal?.call();
-              break;
-            case 'copy':
-              widget.onCopy?.call();
-              break;
-            case 'cut':
-              widget.onCut?.call();
-              break;
-          }
-        },
-        itemBuilder: (ctx) => [
-          if (widget.onEditComment != null)
-            PopupMenuItem<String>(
-              value: 'comment',
-              child: Row(children: [
-                Icon(
-                  widget.hasComment ? Icons.comment_rounded : Icons.comment_outlined,
-                  size: 18,
-                  color: widget.hasComment ? Colors.green : Colors.grey.shade700,
-                ),
-                const SizedBox(width: 10),
-                const Text('Commento'),
-              ]),
-            ),
-          if (widget.onFlipHorizontal != null && !widget.isLocked)
-            PopupMenuItem<String>(
-              value: 'flip',
-              child: Row(children: [
-                Icon(
-                  Icons.flip_rounded,
-                  size: 18,
-                  color: widget.isFlipped ? Colors.blue : Colors.grey.shade700,
-                ),
-                const SizedBox(width: 10),
-                Text(widget.isFlipped ? 'Rifletti H ✓' : 'Rifletti H'),
-              ]),
-            ),
-          if (widget.onCopy != null)
-            const PopupMenuItem<String>(
-              value: 'copy',
-              child: Row(children: [
-                Icon(Icons.copy_rounded, size: 18, color: Colors.blueGrey),
-                SizedBox(width: 10),
-                Text('Copia'),
-              ]),
-            ),
-          if (widget.onCut != null && !widget.isLocked)
-            const PopupMenuItem<String>(
-              value: 'cut',
-              child: Row(children: [
-                Icon(Icons.content_cut_rounded, size: 18, color: Colors.blueGrey),
-                SizedBox(width: 10),
-                Text('Taglia'),
-              ]),
-            ),
-        ],
-      ),
-    );
+    return Builder(builder: (context) {
+      final inactiveIcon = Theme.of(context).colorScheme.onSurfaceVariant;
+      return Tooltip(
+        message: 'Altre azioni',
+        child: PopupMenuButton<String>(
+          tooltip: '',
+          padding: EdgeInsets.zero,
+          icon: Icon(Icons.more_vert_rounded, size: 18, color: inactiveIcon),
+          onSelected: (value) {
+            switch (value) {
+              case 'comment':
+                widget.onEditComment?.call();
+                break;
+              case 'flip':
+                widget.onFlipHorizontal?.call();
+                break;
+              case 'copy':
+                widget.onCopy?.call();
+                break;
+              case 'cut':
+                widget.onCut?.call();
+                break;
+            }
+          },
+          itemBuilder: (ctx) => [
+            if (widget.onEditComment != null)
+              PopupMenuItem<String>(
+                value: 'comment',
+                child: Row(children: [
+                  Icon(
+                    widget.hasComment ? Icons.comment_rounded : Icons.comment_outlined,
+                    size: 18,
+                    color: widget.hasComment ? Colors.green : inactiveIcon,
+                  ),
+                  const SizedBox(width: 10),
+                  const Text('Commento'),
+                ]),
+              ),
+            if (widget.onFlipHorizontal != null && !widget.isLocked)
+              PopupMenuItem<String>(
+                value: 'flip',
+                child: Row(children: [
+                  Icon(
+                    Icons.flip_rounded,
+                    size: 18,
+                    color: widget.isFlipped ? Colors.blue : inactiveIcon,
+                  ),
+                  const SizedBox(width: 10),
+                  Text(widget.isFlipped ? 'Rifletti H ✓' : 'Rifletti H'),
+                ]),
+              ),
+            if (widget.onCopy != null)
+              const PopupMenuItem<String>(
+                value: 'copy',
+                child: Row(children: [
+                  Icon(Icons.copy_rounded, size: 18, color: Colors.blueGrey),
+                  SizedBox(width: 10),
+                  Text('Copia'),
+                ]),
+              ),
+            if (widget.onCut != null && !widget.isLocked)
+              const PopupMenuItem<String>(
+                value: 'cut',
+                child: Row(children: [
+                  Icon(Icons.content_cut_rounded, size: 18, color: Colors.blueGrey),
+                  SizedBox(width: 10),
+                  Text('Taglia'),
+                ]),
+              ),
+          ],
+        ),
+      );
+    });
   }
 
   Widget _actionBtn(IconData icon, Color color, VoidCallback onTap, String tooltip) {
