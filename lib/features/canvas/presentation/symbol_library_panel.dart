@@ -198,6 +198,13 @@ class _SymbolLibraryPanelState extends ConsumerState<SymbolLibraryPanel> {
     final selLib = libs.where((l) => l.id == _selectedLibId).firstOrNull;
     if (selLib != null) _ensurePreviewsFor(selLib, state.imageCache);
 
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final surfaceContainer = Theme.of(context).colorScheme.surfaceContainer;
+    final surfaceContainerHighest = Theme.of(context).colorScheme.surfaceContainerHighest;
+    final outlineVariant = Theme.of(context).colorScheme.outlineVariant;
+    final textStrong = Theme.of(context).colorScheme.onSurface;
+    final textMuted = Theme.of(context).colorScheme.onSurfaceVariant;
+
     return Material(
       elevation: 8,
       borderRadius: BorderRadius.circular(12),
@@ -205,7 +212,7 @@ class _SymbolLibraryPanelState extends ConsumerState<SymbolLibraryPanel> {
         width: 560,
         height: 440,
         decoration: BoxDecoration(
-          color: const Color(0xFFF8F9FA),
+          color: isDark ? surfaceContainer : const Color(0xFFF8F9FA),
           borderRadius: BorderRadius.circular(12),
         ),
         child: Column(
@@ -215,9 +222,9 @@ class _SymbolLibraryPanelState extends ConsumerState<SymbolLibraryPanel> {
               height: 44,
               padding: const EdgeInsets.symmetric(horizontal: 16),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: isDark ? surfaceContainerHighest : Colors.white,
                 borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-                border: Border(bottom: BorderSide(color: Colors.grey.shade200)),
+                border: Border(bottom: BorderSide(color: outlineVariant)),
               ),
               child: Row(
                 children: [
@@ -244,16 +251,16 @@ class _SymbolLibraryPanelState extends ConsumerState<SymbolLibraryPanel> {
                     width: 150,
                     child: Container(
                       decoration: BoxDecoration(
-                        color: Colors.white,
-                        border: Border(right: BorderSide(color: Colors.grey.shade200)),
+                        color: isDark ? surfaceContainerHighest : Colors.white,
+                        border: Border(right: BorderSide(color: outlineVariant)),
                       ),
                       child: Column(
                         children: [
                           Expanded(
                             child: libs.isEmpty
-                                ? const Center(
+                                ? Center(
                                     child: Text('Nessuna libreria',
-                                        style: TextStyle(fontSize: 11, color: Colors.grey),
+                                        style: TextStyle(fontSize: 11, color: textMuted),
                                         textAlign: TextAlign.center),
                                   )
                                 : ListView.builder(
@@ -270,19 +277,19 @@ class _SymbolLibraryPanelState extends ConsumerState<SymbolLibraryPanel> {
                                           child: Row(
                                             children: [
                                               Icon(Icons.folder_rounded, size: 15,
-                                                  color: sel ? Colors.blue : Colors.grey.shade500),
+                                                  color: sel ? Colors.blue : textMuted),
                                               const SizedBox(width: 6),
                                               Expanded(
                                                 child: Text(lib.name,
                                                     style: TextStyle(
                                                       fontSize: 12,
                                                       fontWeight: sel ? FontWeight.w600 : FontWeight.normal,
-                                                      color: sel ? Colors.blue.shade800 : Colors.black87,
+                                                      color: sel ? Colors.blue.shade800 : textStrong,
                                                     ),
                                                     overflow: TextOverflow.ellipsis),
                                               ),
                                               Text('${lib.symbols.length}',
-                                                  style: TextStyle(fontSize: 10, color: Colors.grey.shade500)),
+                                                  style: TextStyle(fontSize: 10, color: textMuted)),
                                             ],
                                           ),
                                         ),
@@ -311,19 +318,19 @@ class _SymbolLibraryPanelState extends ConsumerState<SymbolLibraryPanel> {
                   // Symbols grid
                   Expanded(
                     child: selLib == null
-                        ? const Center(
+                        ? Center(
                             child: Text('Seleziona una libreria',
-                                style: TextStyle(color: Colors.grey, fontSize: 13)),
+                                style: TextStyle(color: textMuted, fontSize: 13)),
                           )
                         : selLib.symbols.isEmpty
-                            ? const Center(
+                            ? Center(
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Icon(Icons.star_border_rounded, size: 40, color: Colors.grey),
-                                    SizedBox(height: 8),
+                                    Icon(Icons.star_border_rounded, size: 40, color: textMuted),
+                                    const SizedBox(height: 8),
                                     Text('Nessun simbolo\nSeleziona elementi con il lazo e premi ✚',
-                                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                                        style: TextStyle(color: textMuted, fontSize: 12),
                                         textAlign: TextAlign.center),
                                   ],
                                 ),
@@ -360,17 +367,17 @@ class _SymbolLibraryPanelState extends ConsumerState<SymbolLibraryPanel> {
               height: 36,
               padding: const EdgeInsets.symmetric(horizontal: 16),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: isDark ? surfaceContainerHighest : Colors.white,
                 borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
-                border: Border(top: BorderSide(color: Colors.grey.shade200)),
+                border: Border(top: BorderSide(color: outlineVariant)),
               ),
               child: Row(
                 children: [
-                  Icon(Icons.info_outline_rounded, size: 13, color: Colors.grey.shade500),
+                  Icon(Icons.info_outline_rounded, size: 13, color: textMuted),
                   const SizedBox(width: 6),
                   Text(
                     'Seleziona elementi con il lazo → ✚ per salvare nella libreria attiva',
-                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                    style: TextStyle(fontSize: 11, color: textMuted),
                   ),
                 ],
               ),
@@ -422,6 +429,9 @@ class _SymbolTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
+    final textStrong = Theme.of(context).colorScheme.onSurface;
+    final shadowColor = Theme.of(context).colorScheme.shadow;
     return GestureDetector(
       onTap: onInsert,
       onSecondaryTapDown: (_) => _showContextMenu(context),
@@ -430,12 +440,14 @@ class _SymbolTile extends StatelessWidget {
           Expanded(
             child: Container(
               decoration: BoxDecoration(
+                // Preview images are rasterized on white, so keep white here
+                // to match the baked background (avoids a grey halo in dark mode).
                 color: Colors.white,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.grey.shade200),
+                border: Border.all(color: outline),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.04),
+                    color: shadowColor.withValues(alpha: 0.04),
                     blurRadius: 4,
                     offset: const Offset(0, 1),
                   ),
@@ -454,7 +466,7 @@ class _SymbolTile extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             symbol.name,
-            style: const TextStyle(fontSize: 10, color: Colors.black87),
+            style: TextStyle(fontSize: 10, color: textStrong),
             overflow: TextOverflow.ellipsis,
             textAlign: TextAlign.center,
             maxLines: 1,
