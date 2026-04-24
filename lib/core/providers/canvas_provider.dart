@@ -6009,8 +6009,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             anyPageChanged = true;
             downloadedCount++;
           } else if (err != null) {
-            _pullHadFailures = true;
-            print('[Canvas] Failed to pull asset $ref: $err');
+            // Do NOT set _pullHadFailures on asset failures. Assets are
+            // rediscovered via the missingAssets scan at the top of the
+            // next pull, so a flaky Tailscale link can retry them without
+            // blocking meta-ETag advance. Blocking here caused the Samsung
+            // "391/391 stuck" loop on notebooks with ~200 assets (60+ MB)
+            // where a handful of asset downloads time out each pull.
+            print('[Canvas] Failed to pull asset $ref: $err (will retry next pull)');
           }
         }
       }

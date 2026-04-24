@@ -1170,6 +1170,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   void _onPointerCancel(PointerCancelEvent event) {
     _activePointers = max(0, _activePointers - 1);
+    // If iOS palm-rejection cancels a touch pointer while the stylus is
+    // actively drawing, DO NOT tear down the stylus stroke — the pen is
+    // still making a valid mark. Only reset touch-specific gesture state
+    // and return. Previously this path undid the user's first stroke
+    // whenever their palm brushed the screen mid-draw on iPad.
+    if (event.kind == PointerDeviceKind.touch && _stylusDown) {
+      _isTouchPanning = false;
+      _holdRecognizeTimer?.cancel();
+      _shapeRecognizedDuringHold = false;
+      return;
+    }
     _isTouchPanning = false;
     _isDraggingSelection = false;
     _holdRecognizeTimer?.cancel();
