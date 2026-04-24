@@ -1754,16 +1754,16 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
               ),
             ),
           IconButton(
-            icon: Icon(Icons.manage_search_rounded, color: Colors.grey.shade700),
+            icon: const Icon(Icons.manage_search_rounded),
             tooltip: 'Cerca nei contenuti',
             onPressed: _showSearch,
           ),
           IconButton(
-            icon: Icon(Icons.refresh_rounded, color: Colors.grey.shade700),
+            icon: const Icon(Icons.refresh_rounded),
             onPressed: () => ref.read(notebookListProvider.notifier).refresh(),
           ),
           PopupMenuButton<String>(
-            icon: Icon(Icons.account_circle_rounded, color: Colors.grey.shade700, size: 28),
+            icon: const Icon(Icons.account_circle_rounded, size: 28),
             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
             onSelected: (value) {
               switch (value) {
@@ -1796,8 +1796,8 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(creds?.username ?? '', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black)),
-                    Text(creds?.serverUrl ?? '', style: TextStyle(fontSize: 12, color: Colors.grey.shade600)),
+                    Text(creds?.username ?? '', style: TextStyle(fontWeight: FontWeight.bold, color: Theme.of(context).colorScheme.onSurface)),
+                    Text(creds?.serverUrl ?? '', style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
                   ],
                 ),
               ),
@@ -1834,7 +1834,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                 child: Padding(
                   padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
                   child: Text('Tema',
-                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
+                      style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant, fontWeight: FontWeight.w600)),
                 ),
               ),
               _buildThemeMenuItem('theme_system', Icons.brightness_auto_rounded, 'Sistema', ThemeMode.system),
@@ -1897,11 +1897,11 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.cloud_off_rounded, size: 56, color: Colors.grey.shade400),
+              Icon(Icons.cloud_off_rounded, size: 56, color: Theme.of(context).colorScheme.outline),
               const SizedBox(height: 16),
-              Text('Impossibile caricare i notebook', style: TextStyle(fontSize: 16, color: Colors.grey.shade600)),
+              Text('Impossibile caricare i notebook', style: TextStyle(fontSize: 16, color: Theme.of(context).colorScheme.onSurfaceVariant)),
               const SizedBox(height: 8),
-              Text('$e', style: TextStyle(fontSize: 12, color: Colors.grey.shade500)),
+              Text('$e', style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
               const SizedBox(height: 20),
               OutlinedButton.icon(
                 onPressed: () => ref.read(notebookListProvider.notifier).refresh(),
@@ -1940,7 +1940,7 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                             const SizedBox(height: 20),
                             Text(
                               label,
-                              style: TextStyle(color: Colors.grey.shade600),
+                              style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant),
                             ),
                           ],
                         );
@@ -1961,9 +1961,9 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                         child: Icon(Icons.note_add_rounded, size: 48, color: Colors.blue.shade300),
                       ),
                       const SizedBox(height: 20),
-                      Text('Nessun notebook', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Colors.grey.shade700)),
+                      Text('Nessun notebook', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: Theme.of(context).colorScheme.onSurface)),
                       const SizedBox(height: 8),
-                      Text('Crea il tuo primo notebook premendo il bottone +', style: TextStyle(color: Colors.grey.shade500)),
+                      Text('Crea il tuo primo notebook premendo il bottone +', style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
                     ],
                   ),
                 );
@@ -2117,10 +2117,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                     child: Row(
                       children: [
                         if (recent.isNotEmpty && _searchQuery.isEmpty && _selectedTags.isEmpty) ...[
-                          Icon(Icons.history_rounded, size: 16, color: Colors.grey.shade600),
+                          Icon(Icons.history_rounded, size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant),
                           const SizedBox(width: 6),
                           Text('${recent.length} recenti',
-                              style: TextStyle(fontSize: 12, color: Colors.grey.shade700)),
+                              style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
                         ],
                         const Spacer(),
                         _SortButton(
@@ -2157,10 +2157,10 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.search_off_rounded, size: 48, color: Colors.grey.shade400),
+                          Icon(Icons.search_off_rounded, size: 48, color: Theme.of(context).colorScheme.outline),
                           const SizedBox(height: 12),
                           Text('Nessun risultato per "$_searchQuery"',
-                              style: TextStyle(color: Colors.grey.shade600)),
+                              style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant)),
                         ],
                       ),
                     ),
@@ -2477,7 +2477,7 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
               ),
               // Info bar
               Container(
-                color: Colors.white,
+                color: Theme.of(context).colorScheme.surface,
                 padding: const EdgeInsets.all(10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -2489,19 +2489,19 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
                       style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        color: Colors.grey.shade800,
+                        color: Theme.of(context).colorScheme.onSurface,
                       ),
                     ),
                     const SizedBox(height: 2),
                     Row(
                       children: [
-                        Icon(Icons.grid_on, size: 11, color: Colors.grey.shade500),
+                        Icon(Icons.grid_on, size: 11, color: Theme.of(context).colorScheme.onSurfaceVariant),
                         const SizedBox(width: 3),
-                        Text(paperLabel, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+                        Text(paperLabel, style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant)),
                         const Spacer(),
                         Text(
                           _formatDate(meta.modifiedAt),
-                          style: TextStyle(fontSize: 10, color: Colors.grey.shade400),
+                          style: TextStyle(fontSize: 10, color: Theme.of(context).colorScheme.outline),
                         ),
                       ],
                     ),
@@ -2511,7 +2511,7 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
                         meta.chapters.map((c) => c.title).join(' \u2022 '),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 10, color: Colors.grey.shade400, fontStyle: FontStyle.italic),
+                        style: TextStyle(fontSize: 10, color: Theme.of(context).colorScheme.outline, fontStyle: FontStyle.italic),
                       ),
                     ],
                   ],
@@ -2627,7 +2627,7 @@ class _SortButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return PopupMenuButton<Object>(
       tooltip: 'Ordina',
-      icon: Icon(mode.icon, size: 20, color: Colors.grey.shade700),
+      icon: Icon(mode.icon, size: 20, color: Theme.of(context).colorScheme.onSurfaceVariant),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       itemBuilder: (_) => [
         PopupMenuItem(
@@ -2636,7 +2636,7 @@ class _SortButton extends StatelessWidget {
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text('Ordina per',
-                style: TextStyle(fontSize: 11, color: Colors.grey.shade600, fontWeight: FontWeight.w600)),
+                style: TextStyle(fontSize: 11, color: Theme.of(context).colorScheme.onSurfaceVariant, fontWeight: FontWeight.w600)),
           ),
         ),
         ...LibrarySortMode.values.map((m) => PopupMenuItem<Object>(
