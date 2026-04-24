@@ -464,7 +464,35 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
         ref.read(canvasProvider.notifier).renameChapter(chapter.id, newTitle.trim());
       }
     } else if (action == 'delete') {
-      ref.read(canvasProvider.notifier).deleteChapter(chapter.id);
+      // Distructive action: ask for confirmation so a stray tap on the
+      // overflow menu doesn't wipe the user's chapter structure. The pages
+      // themselves are preserved (they just become unassigned), but users
+      // reasonably expect a safety net on anything named "Elimina".
+      if (!ctx.mounted) return;
+      final confirm = await showDialog<bool>(
+        context: ctx,
+        builder: (dCtx) => AlertDialog(
+          title: const Text('Elimina capitolo'),
+          content: Text(
+            'Eliminare "${chapter.title}"? '
+            'Le pagine al suo interno resteranno ma senza capitolo.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dCtx, false),
+              child: const Text('Annulla'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(dCtx, true),
+              child: const Text('Elimina'),
+            ),
+          ],
+        ),
+      );
+      if (confirm == true) {
+        ref.read(canvasProvider.notifier).deleteChapter(chapter.id);
+      }
     }
   }
 
