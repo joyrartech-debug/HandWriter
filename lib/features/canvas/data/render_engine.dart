@@ -78,7 +78,12 @@ class CanvasRenderEngine extends CustomPainter {
     // 3. Content elements (cached sort to avoid O(n log n) per frame)
     final sortedContent = _getSortedContent(pageData.layers.content);
 
-    final selectedIds = lassoSelection?.selectedIds ?? [];
+    // Use a Set for selectedIds so isSelected lookup is O(1) per element
+    // instead of O(m) over the List. At large selections (100+ elements
+    // from a big lasso) this changes the inner loop from O(n*m) to O(n).
+    final selectedIdsSet = lassoSelection != null
+        ? lassoSelection!.selectedIds.toSet()
+        : const <String>{};
     final selDragOffset = lassoSelection?.dragOffset ?? Offset.zero;
     final selRotation = lassoSelection?.rotation ?? 0.0;
     final selScale = lassoSelection?.scale ?? 1.0;
@@ -89,7 +94,7 @@ class CanvasRenderEngine extends CustomPainter {
 
     for (final element in sortedContent) {
       final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
-      final isSelected = selectedIds.contains(id);
+      final isSelected = selectedIdsSet.contains(id);
 
       // If this element is being moved/rotated/scaled via lasso, apply transform
       if (isSelected && hasTransform) {
@@ -247,13 +252,24 @@ class CanvasRenderEngine extends CustomPainter {
   }
 
   void _paintDottedBackground(Canvas canvas, double spacing, Paint paint) {
+    // Use drawPoints(points) instead of per-dot drawCircle(). On an A4
+    // portrait page with spacing=25 this issues ~2500 draw calls per
+    // paint frame; drawPoints batches them into a single Skia op.
+    // Visual match: a round-capped stroke of width=diameter produces
+    // the same dot as a filled circle of radius=diameter/2.
     final dotPaint = Paint()
       ..color = Color(pageData.layers.background.lineColor)
-      ..style = PaintingStyle.fill;
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 3.0; // matches previous radius 1.5
+    final offsets = <Offset>[];
     for (double y = spacing; y < pageData.height; y += spacing) {
       for (double x = spacing; x < pageData.width; x += spacing) {
-        canvas.drawCircle(Offset(x, y), 1.5, dotPaint);
+        offsets.add(Offset(x, y));
       }
+    }
+    if (offsets.isNotEmpty) {
+      canvas.drawPoints(ui.PointMode.points, offsets, dotPaint);
     }
   }
 

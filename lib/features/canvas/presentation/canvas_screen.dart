@@ -95,6 +95,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   final _activeStrokeNotifier = ActiveStrokeNotifier();
   // ── High-performance lasso path notifier (avoids Riverpod rebuild per point) ──
   final _lassoPathNotifier = LassoPathNotifier();
+  // Cached Listenable.merge for the CustomPaint.repaintNotifier — avoids
+  // rebuilding the composite on every parent rebuild (each new merge re-
+  // subscribes to both underlying notifiers, which is non-trivial work on
+  // the hot draw path).
+  late final Listenable _repaintNotifier =
+      Listenable.merge([_activeStrokeNotifier, _lassoPathNotifier]);
 
   // ── Auto-save (debounced) ──
   //
@@ -2259,10 +2265,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             activeWidth: canvasState.toolSettings.strokeWidth,
                             lassoSelection: canvasState.lassoSelection,
                             lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
-                                ? _lassoPathNotifier.points.toList()
+                                ? _lassoPathNotifier.points
                                 : (canvasState.lassoPath.isNotEmpty ? canvasState.lassoPath : null),
                             lassoPathGetter: _lassoPathNotifier.isActive
-                                ? () => List<Offset>.from(_lassoPathNotifier.points)
+                                ? () => _lassoPathNotifier.points
                                 : null,
                             shapePreview: (canvasState.shapeStartPos != null && canvasState.shapeEndPos != null)
                                 ? (canvasState.shapeStartPos!, canvasState.shapeEndPos!, canvasState.toolSettings.shapeType)
@@ -2271,7 +2277,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             zoom: canvasState.zoom,
                             panOffset: canvasState.panOffset,
                             imageCache: canvasState.imageCache,
-                            repaintNotifier: Listenable.merge([_activeStrokeNotifier, _lassoPathNotifier]),
+                            repaintNotifier: _repaintNotifier,
                           ),
                           isComplex: true,
                           willChange: true,

@@ -2213,10 +2213,29 @@ class _NotebookCard extends ConsumerStatefulWidget {
 }
 
 class _NotebookCardState extends ConsumerState<_NotebookCard> {
-  /// Bumped each time we successfully lazy-render a missing thumbnail so
-  /// the FutureBuilder below re-evaluates and picks up the new file.
-  int _lazyRenderTick = 0;
   bool _lazyRenderTriggered = false;
+  // Cache the thumbnail-existence check so we don't stat the disk on every
+  // rebuild (previously a FutureBuilder<bool>(thumbFile.exists()) fired a
+  // fresh I/O on every rebuild per card — scrolling a 50-card library was
+  // spamming ~50 stat calls per frame before).
+  //   null  = not checked yet (show gradient, async-probe once)
+  //   true  = file exists (render Image.file)
+  //   false = file absent (show gradient; if this is the first "absent"
+  //           result, trigger a one-shot lazy render)
+  bool? _thumbExists;
+  String? _checkedForPath;
+
+  Future<void> _checkThumbExistence(String path) async {
+    try {
+      final exists = await File(path).exists();
+      if (!mounted) return;
+      if (_thumbExists != exists) {
+        setState(() => _thumbExists = exists);
+      }
+    } catch (_) {
+      // Swallow — card gracefully falls back to gradient cover.
+    }
+  }
 
   Future<void> _maybeLazyRenderThumb() async {
     if (_lazyRenderTriggered) return;
@@ -2231,7 +2250,7 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
         bytes,
       );
       if (path != null && mounted) {
-        setState(() => _lazyRenderTick++);
+        setState(() => _thumbExists = true);
       }
     } catch (_) {
       // Swallow — card gracefully falls back to gradient cover.
@@ -2251,11 +2270,27 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
     final isFav = ref.watch(appSettingsProvider)
         .favoriteNotebookIds
         .contains(meta.id);
-    // Re-read mtime so saves trigger a repaint.
     final thumbFile = File(thumbPath);
-    // Tick is referenced so the analyzer knows it's used; it's also what
-    // forces FutureBuilder to re-check file existence after a lazy render.
-    final _ = _lazyRenderTick;
+
+    // Kick off the existence probe exactly once per thumbPath. If the
+    // path changes (rename / id change) re-probe. This replaces the old
+    // FutureBuilder which re-issued a File.exists() on every rebuild.
+    if (_checkedForPath != thumbPath) {
+      _checkedForPath = thumbPath;
+      _thumbExists = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _checkThumbExistence(thumbPath);
+      });
+    }
+
+    final hasThumb = _thumbExists == true;
+    // Trigger lazy-render once the probe tells us the thumb is missing.
+    if (_thumbExists == false) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _maybeLazyRenderThumb();
+      });
+    }
 
     return GestureDetector(
       onTap: onTap,
@@ -2278,21 +2313,8 @@ class _NotebookCardState extends ConsumerState<_NotebookCard> {
               // Cover
               Expanded(
                 flex: 3,
-                child: FutureBuilder<bool>(
-                  future: thumbFile.exists(),
-                  builder: (ctx, snap) {
-                    final hasThumb = snap.data == true;
-                    if (snap.connectionState == ConnectionState.done &&
-                        !hasThumb) {
-                      // Schedule a one-shot lazy render from the local
-                      // notebook bytes so previously-unrendered notebooks
-                      // (downloaded, imported, or pre-thumbnail-era) get
-                      // a cover preview without the user having to edit
-                      // and save them first.
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        _maybeLazyRenderThumb();
-                      });
-                    }
+                child: Builder(
+                  builder: (ctx) {
                     return Stack(
                       fit: StackFit.expand,
                       children: [
