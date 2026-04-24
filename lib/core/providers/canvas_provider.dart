@@ -5836,6 +5836,64 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     if (pagesToPull.isEmpty && deletedRemotelyByEtag.isEmpty) {
+      // ── Metadata-only change check ───────────────────────────────────
+      // We're here because the meta-ETag moved (slow path was triggered)
+      // but no per-page ETag changed. The most common cause is a metadata-
+      // only edit on another device: chapter renamed, chapter added with
+      // no pages yet, title changed, paper type changed. The old code
+      // dropped through to the ETag-advance path without ever downloading
+      // metadata.json/document.json — so a chapter rename done on PC was
+      // INVISIBLE on iPad until the next page edit happened to bump a
+      // page ETag. Now we always pull the metadata pair when the slow
+      // path fires, and apply any content changes so they propagate.
+      try {
+        final remoteMeta =
+            await syncService.downloadDeltaMeta(s.metadata.id);
+        // Preserve pages that exist locally but not on the server (offline
+        // additions waiting to upload) when adopting the remote document.
+        final remoteFileNames =
+            remoteMeta.document.pages.map((p) => p.fileName).toSet();
+        final localOnlyEntries = s.document.pages
+            .where((p) => !remoteFileNames.contains(p.fileName))
+            .toList();
+        final mergedDoc = localOnlyEntries.isEmpty
+            ? remoteMeta.document
+            : DocumentStructure(
+                notebookId: remoteMeta.document.notebookId,
+                formatVersion: remoteMeta.document.formatVersion,
+                pages: [...remoteMeta.document.pages, ...localOnlyEntries],
+              );
+        final metaChanged = remoteMeta.metadata != s.metadata;
+        final docChanged = mergedDoc != s.document;
+        if ((metaChanged || docChanged) &&
+            state != null &&
+            state!.metadata.id == s.metadata.id) {
+          // Stamp pageCount from the merged document so the library card
+          // stays accurate when local-only entries exist.
+          final mergedMeta = remoteMeta.metadata.copyWith(
+            pageCount: mergedDoc.pages.length,
+          );
+          state = state!.copyWith(
+            metadata: mergedMeta,
+            document: mergedDoc,
+            isDirty: true,
+          );
+          print('[Canvas] Pull noop: applied metadata-only changes '
+              '(meta=$metaChanged, doc=$docChanged) — '
+              'chapters/title/paper from remote');
+          unawaited(CrashLogger.append(
+            '[Pull] noop: metadata content changed → applied '
+            '(meta=$metaChanged, doc=$docChanged)',
+          ));
+        }
+      } catch (e) {
+        // Don't fail the whole pull on a metadata-fetch hiccup; next pull
+        // will retry. The ETag advance below means we WON'T retry — but
+        // that's fine: any subsequent metadata edit will move the meta
+        // ETag again and trigger another slow-path tick.
+        print('[Canvas] Pull noop: metadata-content check failed: $e');
+      }
+
       print('[Canvas] Delta pull: no page ETags changed, no deletions');
       unawaited(CrashLogger.append(
         '[Pull] diff: noop (remote=${remotePageEtags.length} '
