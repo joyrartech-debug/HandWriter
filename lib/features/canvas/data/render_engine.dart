@@ -569,77 +569,34 @@ class CanvasRenderEngine extends CustomPainter {
     final interpolated = _catmullRomAdaptiveWithWidth(stroke.points, rawWidths, zoom);
     if (interpolated.length < 2) return;
 
-    // Render as filled outline polygon for smooth edges at any zoom.
-    // Compute perpendicular normals at each interpolated point.
-    final count = interpolated.length;
-    final nxArr = List<double>.filled(count, 0.0);
-    final nyArr = List<double>.filled(count, 0.0);
-    for (int i = 0; i < count; i++) {
-      double dx, dy;
-      if (i == 0) {
-        dx = interpolated[1].x - interpolated[0].x;
-        dy = interpolated[1].y - interpolated[0].y;
-      } else if (i == count - 1) {
-        dx = interpolated[i].x - interpolated[i - 1].x;
-        dy = interpolated[i].y - interpolated[i - 1].y;
-      } else {
-        dx = interpolated[i + 1].x - interpolated[i - 1].x;
-        dy = interpolated[i + 1].y - interpolated[i - 1].y;
-      }
-      final len = sqrt(dx * dx + dy * dy);
-      if (len > 0.0001) {
-        nxArr[i] = -dy / len;
-        nyArr[i] = dx / len;
-      } else if (i > 0) {
-        nxArr[i] = nxArr[i - 1];
-        nyArr[i] = nyArr[i - 1];
-      }
-    }
-
-    final path = Path();
-    final hw0 = (interpolated[0].w * 0.5).clamp(0.2, 999.0);
-
-    // Right edge (forward)
-    path.moveTo(
-      interpolated[0].x + nxArr[0] * hw0,
-      interpolated[0].y + nyArr[0] * hw0,
-    );
-    for (int i = 1; i < count; i++) {
-      final hw = (interpolated[i].w * 0.5).clamp(0.2, 999.0);
-      path.lineTo(
-        interpolated[i].x + nxArr[i] * hw,
-        interpolated[i].y + nyArr[i] * hw,
-      );
-    }
-
-    // Left edge (backward) — straight connection at the end
-    for (int i = count - 1; i >= 0; i--) {
-      final hw = (interpolated[i].w * 0.5).clamp(0.2, 999.0);
-      path.lineTo(
-        interpolated[i].x - nxArr[i] * hw,
-        interpolated[i].y - nyArr[i] * hw,
-      );
-    }
-    path.close();
-
-    final fillPaint = Paint()
+    // ── Render as overlapping round-capped line segments ──
+    //
+    // The previous implementation built a filled polygon ribbon with per-
+    // point perpendicular normals. At sharp peaks (e.g. the top of a
+    // cursive U) the chord between i-1 and i+1 collapsed to nearly zero,
+    // the normal vector became degenerate, and the polygon either pinched
+    // to zero width — visible as a "detached" gap mid-stroke — or self-
+    // intersected into a rectangle-shaped artifact at the peak.
+    //
+    // Drawing short line segments with strokeCap=round and strokeJoin=round
+    // sidesteps both problems: round caps blend consecutive segments
+    // smoothly even when the direction reverses, and there's no polygon
+    // edge to misalign. The width still varies smoothly because each
+    // segment uses its own strokeWidth from the interpolated widths.
+    final paint = Paint()
       ..color = color.withValues(alpha: stroke.opacity)
-      ..style = PaintingStyle.fill
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
-    canvas.drawPath(path, fillPaint);
-
-    // Round endpoint circles
-    canvas.drawCircle(
-      Offset(interpolated.first.x, interpolated.first.y),
-      hw0,
-      fillPaint,
-    );
-    final lastHw = (interpolated.last.w * 0.5).clamp(0.2, 999.0);
-    canvas.drawCircle(
-      Offset(interpolated.last.x, interpolated.last.y),
-      lastHw,
-      fillPaint,
-    );
+    final count = interpolated.length;
+    for (int i = 0; i < count - 1; i++) {
+      final p0 = interpolated[i];
+      final p1 = interpolated[i + 1];
+      final w = ((p0.w + p1.w) * 0.5).clamp(0.4, 999.0);
+      paint.strokeWidth = w;
+      canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
+    }
   }
 
   List<StrokePoint> _catmullRomInterpolate(List<StrokePoint> points, double zoom) {
