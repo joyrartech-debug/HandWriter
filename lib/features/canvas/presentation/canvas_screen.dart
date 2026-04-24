@@ -453,7 +453,79 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       return KeyEventResult.handled;
     }
 
+    // ? (Shift+/) — open keyboard shortcut cheat sheet. Power users on
+    // desktop/iPad with keyboard have no other way to discover the
+    // Ctrl+C/X/V/D/A/0, P/E/L/H/T/B/S single-key shortcuts — they were
+    // only visible to someone reading the source code.
+    if (shift && event.logicalKey == LogicalKeyboardKey.question) {
+      _showShortcutHelp();
+      return KeyEventResult.handled;
+    }
+    if (event.logicalKey == LogicalKeyboardKey.slash && shift) {
+      _showShortcutHelp();
+      return KeyEventResult.handled;
+    }
+
     return KeyEventResult.ignored;
+  }
+
+  void _showShortcutHelp() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.keyboard_rounded, size: 20),
+            SizedBox(width: 8),
+            Text('Scorciatoie tastiera'),
+          ],
+        ),
+        content: const SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _ShortcutGroup('Generale', [
+                  ('Ctrl+S', 'Salva ora'),
+                  ('Ctrl+Z', 'Annulla'),
+                  ('Ctrl+Shift+Z / Ctrl+Y', 'Ripeti'),
+                  ('Ctrl+A', 'Seleziona tutto'),
+                  ('Ctrl+0', 'Azzera zoom'),
+                  ('Esc', 'Deseleziona / annulla'),
+                  ('?', 'Questa guida'),
+                ]),
+                SizedBox(height: 12),
+                _ShortcutGroup('Appunti', [
+                  ('Ctrl+C', 'Copia selezione'),
+                  ('Ctrl+X', 'Taglia selezione'),
+                  ('Ctrl+V', 'Incolla'),
+                  ('Ctrl+D', 'Duplica selezione'),
+                  ('Canc / Backspace', 'Elimina elemento o selezione'),
+                ]),
+                SizedBox(height: 12),
+                _ShortcutGroup('Strumenti', [
+                  ('P', 'Penna'),
+                  ('B', 'Pennello'),
+                  ('E', 'Gomma'),
+                  ('L', 'Lazo'),
+                  ('H', 'Mano / sposta'),
+                  ('T', 'Testo'),
+                  ('S', 'Forma'),
+                ]),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('Chiudi'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<bool> _onWillPop() async {
@@ -2029,6 +2101,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         children: [
           IconButton(
             icon: Icon(Icons.arrow_back_ios_new_rounded, color: fg, size: 18),
+            tooltip: 'Torna alla libreria',
             onPressed: () async {
               // _onWillPop handles pop + cleanup internally; it returns false.
               await _onWillPop();
@@ -2043,26 +2116,34 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             ),
           ),
           if (canvasState.isDirty)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: Colors.orange.shade50,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.orange.shade200),
+            Tooltip(
+              message: 'Ci sono modifiche non ancora salvate sul server',
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.orange.shade200),
+                ),
+                child: Text('Non salvato', style: TextStyle(fontSize: 11, color: Colors.orange.shade800)),
               ),
-              child: Text('Non salvato', style: TextStyle(fontSize: 11, color: Colors.orange.shade800)),
             ),
           const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-            decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
-            child: Text(
-              '${(canvasState.zoom * 100).round()}%',
-              style: TextStyle(color: Colors.grey.shade700, fontSize: 12, fontWeight: FontWeight.w500),
+          Tooltip(
+            message: 'Livello di zoom corrente',
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(color: Colors.grey.shade100, borderRadius: BorderRadius.circular(12)),
+              child: Text(
+                '${(canvasState.zoom * 100).round()}%',
+                style: TextStyle(color: Colors.grey.shade700, fontSize: 12, fontWeight: FontWeight.w500),
+              ),
             ),
           ),
           IconButton(
-            tooltip: 'Disegna solo con penna',
+            tooltip: _stylusOnlyDrawing
+                ? 'Solo penna attivo — tocca per consentire anche il dito'
+                : 'Dito attivo — tocca per accettare solo la penna',
             icon: Icon(
               _stylusOnlyDrawing ? Icons.create_rounded : Icons.touch_app_rounded,
               color: _stylusOnlyDrawing ? Colors.blue : Colors.grey.shade600,
@@ -2075,12 +2156,18 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           const SizedBox(width: 4),
           // Auto-save indicator
           if (_isSaving)
-            const Padding(
-              padding: EdgeInsets.only(right: 4),
-              child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+            const Tooltip(
+              message: 'Salvataggio in corso…',
+              child: Padding(
+                padding: EdgeInsets.only(right: 4),
+                child: SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2)),
+              ),
             ),
           IconButton(
             icon: Icon(Icons.save_rounded, color: canvasState.isDirty ? Colors.blue : Colors.grey.shade400, size: 20),
+            tooltip: canvasState.isDirty
+                ? 'Salva ora (Ctrl+S)'
+                : 'Tutto salvato',
             onPressed: canvasState.isDirty && !_isSaving ? _save : null,
           ),
         ],
@@ -3712,34 +3799,39 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               IconButton(
                 icon: Icon(Icons.chevron_left_rounded,
                     color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800, size: 22),
+                tooltip: 'Pagina precedente',
                 onPressed: filteredPos > 0
                     ? () => ref.read(canvasProvider.notifier).prevPage()
                     : null,
                 splashRadius: 18,
               ),
-              GestureDetector(
-                onTap: () => _showPageManager(canvasState),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: isDark
-                        ? Theme.of(context).colorScheme.surfaceContainerHighest
-                        : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(
-                    filteredCount > 0 && filteredPos >= 0
-                        ? '${filteredPos + 1} / $filteredCount'
-                        : '— / $filteredCount',
-                    style: TextStyle(
-                        color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800,
-                        fontSize: 13, fontWeight: FontWeight.w500),
+              Tooltip(
+                message: 'Apri gestione pagine',
+                child: GestureDetector(
+                  onTap: () => _showPageManager(canvasState),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: isDark
+                          ? Theme.of(context).colorScheme.surfaceContainerHighest
+                          : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      filteredCount > 0 && filteredPos >= 0
+                          ? '${filteredPos + 1} / $filteredCount'
+                          : '— / $filteredCount',
+                      style: TextStyle(
+                          color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800,
+                          fontSize: 13, fontWeight: FontWeight.w500),
+                    ),
                   ),
                 ),
               ),
               IconButton(
                 icon: Icon(Icons.chevron_right_rounded,
                     color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800, size: 22),
+                tooltip: 'Pagina successiva',
                 onPressed: filteredPos >= 0 && filteredPos < filteredCount - 1
                     ? () => ref.read(canvasProvider.notifier).nextPage()
                     : null,
@@ -3747,22 +3839,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               ),
               const Spacer(),
               // Zoom indicator — tap to reset to 200%
-              GestureDetector(
-                onTap: () {
-                  ref.read(canvasProvider.notifier).resetZoom();
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: canvasState.zoom != 2.0 ? Colors.blue.shade50 : Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    '${(canvasState.zoom * 100).round()}%',
-                    style: TextStyle(
-                      color: canvasState.zoom != 2.0 ? Colors.blue.shade700 : Colors.grey.shade600,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
+              Tooltip(
+                message: 'Tocca per azzerare lo zoom (Ctrl+0)',
+                child: GestureDetector(
+                  onTap: () {
+                    ref.read(canvasProvider.notifier).resetZoom();
+                  },
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: canvasState.zoom != 2.0 ? Colors.blue.shade50 : Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Text(
+                      '${(canvasState.zoom * 100).round()}%',
+                      style: TextStyle(
+                        color: canvasState.zoom != 2.0 ? Colors.blue.shade700 : Colors.grey.shade600,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                   ),
                 ),
@@ -3882,6 +3977,62 @@ class _MenuRow extends StatelessWidget {
         Expanded(child: Text(label, style: const TextStyle(fontSize: 14))),
         if (shortcut != null)
           Text(shortcut!, style: TextStyle(fontSize: 11, color: Colors.grey.shade500)),
+      ],
+    );
+  }
+}
+
+/// Group of keyboard-shortcut rows shown in the help dialog. Kept const so
+/// the list of (combo, description) pairs can be declared inline without
+/// per-build allocations.
+class _ShortcutGroup extends StatelessWidget {
+  final String title;
+  final List<(String, String)> entries;
+  const _ShortcutGroup(this.title, this.entries);
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text(
+          title,
+          style: const TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.3,
+            color: Colors.blueGrey,
+          ),
+        ),
+        const SizedBox(height: 6),
+        ...entries.map((e) => Padding(
+              padding: const EdgeInsets.symmetric(vertical: 2),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.grey.shade300, width: 0.5),
+                    ),
+                    child: Text(
+                      e.$1,
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(e.$2, style: const TextStyle(fontSize: 13)),
+                  ),
+                ],
+              ),
+            )),
       ],
     );
   }
