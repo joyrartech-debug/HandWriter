@@ -5654,6 +5654,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
               ? false
               : sNow.pages.length >= sNow.document.pages.length;
           if (stillOpen && !_pullHadFailures && stateConsistent) {
+            // Wait for the pulled-changes local save to land on disk BEFORE
+            // persisting the meta ETag. Otherwise a crash/kill in the small
+            // window between persist and save completion leaves the
+            // _remoteMetaEtag matching the server while the .ncnote zip is
+            // still the pre-pull version — next open's fast path skips
+            // because ETag matches, and the user is wedged at the old
+            // page count until they manually force-sync.
+            final pendingSave = _pendingPulledLocalSave;
+            if (pendingSave != null) {
+              try {
+                await pendingSave;
+              } catch (e) {
+                print('[Canvas] Pre-ETag save wait failed: $e');
+              }
+            }
             _remoteMetaEtag = changeState.metaEtag;
             // Persist so next cold-start's first pull can skip immediately.
             // Awaited: SharedPreferences.setString is a few ms, and we need
@@ -5975,36 +5990,48 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         );
       }
     }
+    // ── Asset download: priority (current page) sync, rest in background ─
+    //
+    // Previously the entire asset download was awaited inline before the
+    // function could return. For an asset-heavy notebook (Automotive: 200+
+    // assets / 60+ MB) over Tailscale the awaited pull took 2-5 minutes,
+    // and the meta-ETag persist (which happens AFTER this function returns)
+    // never ran if the user closed the app during that window. Result:
+    // every reopen replayed a full 389-page slow-path pull because
+    // `_remoteMetaEtag` was still null on disk.
+    //
+    // Now we only await the current page's assets (so the visible page
+    // renders correctly when this function returns); the rest fire as an
+    // unawaited background task that updates `state.assetBytes` incremen-
+    // tally and marks the notebook dirty so the next save flushes them to
+    // the .ncnote zip. The ETag can advance as soon as page commit + local
+    // save complete, independent of asset progress.
     if (missingAssets.isNotEmpty) {
-      // ── Batched download (platform-aware concurrency) ───────────────────
-      // Downloading all assets simultaneously spikes RAM with raw bytes
-      // (JPEG buffers) before any have been decoded. Mobile concurrency
-      // is bounded but bumped from 2 → 4 because the previous cap made a
-      // 200-asset notebook (Automotive, ~60 MB) crawl over Tailscale.
-      // Per-asset retry with backoff replaces the old "fail and wait for
-      // next pull" pattern so a flaky link converges in a single pass.
       final maxAssetConcurrency = (defaultTargetPlatform == TargetPlatform.iOS ||
               defaultTargetPlatform == TargetPlatform.android)
           ? 4
           : 6;
-      final missingList = missingAssets.toList();
-      final newlyDownloaded = <String, Uint8List>{};
-      int downloadedCount = 0;
-      int failedCount = 0;
+      final notebookId = s.metadata.id;
+      final curPageRefs =
+          _assetRefsForPage(s.currentPageIndex, s.document, updatedPages);
+      final priorityList =
+          missingAssets.where(curPageRefs.contains).toList();
+      final backgroundList =
+          missingAssets.where((r) => !curPageRefs.contains(r)).toList();
 
       Future<(String, Uint8List?, Object?)> pullOneAsset(String ref) async {
         const maxAttempts = 3;
         Object? lastError;
         for (var attempt = 0; attempt < maxAttempts; attempt++) {
           try {
-            final data = await syncService.downloadDeltaAsset(s.metadata.id, ref);
+            final data = await syncService.downloadDeltaAsset(notebookId, ref);
             return (ref, data, null);
           } catch (e) {
             lastError = e;
             if (attempt == maxAttempts - 1) break;
             await Future.delayed(
                 Duration(milliseconds: 200 * (1 << attempt)));
-            if (_disposed || state?.metadata.id != s.metadata.id) {
+            if (_disposed || state?.metadata.id != notebookId) {
               return (ref, null, lastError);
             }
           }
@@ -6012,48 +6039,83 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         return (ref, null, lastError);
       }
 
-      for (var i = 0; i < missingList.length; i += maxAssetConcurrency) {
+      // Priority pass: await current-page assets so the visible page renders
+      // correctly when the function returns.
+      final priorityDownloaded = <String, Uint8List>{};
+      for (var i = 0; i < priorityList.length; i += maxAssetConcurrency) {
         if (_disposed) break;
-        final batch = missingList.skip(i).take(maxAssetConcurrency);
+        final batch = priorityList.skip(i).take(maxAssetConcurrency);
         final batchResults = await Future.wait(batch.map(pullOneAsset));
         for (final (ref, data, err) in batchResults) {
           if (data != null) {
             updatedAssets[ref] = data;
-            newlyDownloaded[ref] = data;
+            priorityDownloaded[ref] = data;
             anyPageChanged = true;
-            downloadedCount++;
           } else if (err != null) {
-            // Do NOT set _pullHadFailures on asset failures. Assets are
-            // rediscovered via the missingAssets scan at the top of the
-            // next pull, so a flaky Tailscale link can retry them without
-            // blocking meta-ETag advance. Blocking here caused the Samsung
-            // "391/391 stuck" loop on notebooks with ~200 assets (60+ MB)
-            // where a handful of asset downloads time out each pull.
-            failedCount++;
-            print('[Canvas] Failed to pull asset $ref after retries: $err '
+            print('[Canvas] Failed to pull priority asset $ref: $err '
                 '(will retry next pull)');
           }
         }
       }
-      print('[Canvas] Pulled $downloadedCount/${missingList.length} assets '
-          '(failed: $failedCount, max $maxAssetConcurrency concurrent)');
-
-      // ── Throttled decode — current-page assets first ─────────────────────
-      // Decoding all images concurrently (ui.instantiateImageCodec) spikes
-      // GPU memory by 4 bytes × width × height per image.  On iPad this is
-      // the primary OOM trigger during sync.  Use the same throttled pipeline
-      // as _restoreLastPosition: priority-decode the current page, then
-      // sequentially decode the rest with a 16 ms gap between each.
-      if (newlyDownloaded.isNotEmpty && !_disposed) {
-        final curPageRefs = _assetRefsForPage(
-            s.currentPageIndex, s.document, updatedPages);
-        final priorityAssets = curPageRefs.intersection(newlyDownloaded.keys.toSet());
-        for (final assetId in priorityAssets) {
-          unawaited(_decodeAndCacheImage(assetId, newlyDownloaded[assetId]!));
+      if (priorityDownloaded.isNotEmpty) {
+        for (final entry in priorityDownloaded.entries) {
+          unawaited(_decodeAndCacheImage(entry.key, entry.value));
         }
-        // Decode the rest sequentially in the background — do NOT await here
-        // so the pull logic can continue updating state immediately.
-        unawaited(_decodeAssetsThrottled(newlyDownloaded, skip: priorityAssets));
+      }
+
+      // Background pass: fire-and-forget. Updates state.assetBytes as bytes
+      // arrive and marks the notebook dirty when complete so the next save
+      // flushes them to the .ncnote zip. Aborts if the user switches notebooks.
+      if (backgroundList.isNotEmpty) {
+        unawaited(() async {
+          final bgDownloaded = <String, Uint8List>{};
+          int bgOk = 0;
+          int bgFailed = 0;
+          for (var i = 0;
+              i < backgroundList.length;
+              i += maxAssetConcurrency) {
+            if (_disposed || state?.metadata.id != notebookId) break;
+            final batch =
+                backgroundList.skip(i).take(maxAssetConcurrency);
+            final batchResults = await Future.wait(batch.map(pullOneAsset));
+            final batchAssets = <String, Uint8List>{};
+            for (final (ref, data, err) in batchResults) {
+              if (data != null) {
+                batchAssets[ref] = data;
+                bgDownloaded[ref] = data;
+                bgOk++;
+              } else if (err != null) {
+                bgFailed++;
+                print('[Canvas] Failed to pull bg asset $ref: $err '
+                    '(will retry next pull)');
+              }
+            }
+            // Merge this batch into state so the canvas can render any new
+            // images without waiting for the entire background pass.
+            if (batchAssets.isNotEmpty &&
+                state != null &&
+                state!.metadata.id == notebookId) {
+              final merged =
+                  Map<String, Uint8List>.from(state!.assetBytes)
+                    ..addAll(batchAssets);
+              state = state!.copyWith(assetBytes: merged);
+              for (final entry in batchAssets.entries) {
+                unawaited(_decodeAndCacheImage(entry.key, entry.value));
+              }
+            }
+          }
+          print('[Canvas] Background asset pull done: '
+              '$bgOk/${backgroundList.length} ok, $bgFailed failed');
+          // Mark notebook dirty so the next save persists the new bytes to
+          // the .ncnote zip. Without this, a kill before the next user edit
+          // would leave the bytes only in memory; on next open the
+          // missingAssets scan would re-download them — correct but wasteful.
+          if (bgDownloaded.isNotEmpty &&
+              state != null &&
+              state!.metadata.id == notebookId) {
+            state = state!.copyWith(isDirty: true);
+          }
+        }());
       }
     }
 
