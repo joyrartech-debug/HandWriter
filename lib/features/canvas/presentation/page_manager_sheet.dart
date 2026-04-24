@@ -93,9 +93,41 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
     _clearSelection();
   }
 
-  void _deleteSelected() {
+  Future<void> _deleteSelected() async {
+    final count = _selected.length;
+    final ok = await _confirmDelete(
+      context,
+      count == 1
+          ? 'Eliminare 1 pagina?'
+          : 'Eliminare $count pagine?',
+      'Questa azione non può essere annullata.',
+    );
+    if (!ok) return;
     ref.read(canvasProvider.notifier).deletePages(_selected.toList());
     _clearSelection();
+  }
+
+  /// Confirm destructive page actions with a simple AlertDialog.
+  Future<bool> _confirmDelete(BuildContext ctx, String title, String body) async {
+    final result = await showDialog<bool>(
+      context: ctx,
+      builder: (dCtx) => AlertDialog(
+        title: Text(title),
+        content: Text(body),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dCtx, false),
+            child: const Text('Annulla'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            onPressed: () => Navigator.pop(dCtx, true),
+            child: const Text('Elimina'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
   }
 
   void _cutSelected(CanvasState s) {
@@ -151,7 +183,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                 width: 40, height: 4,
                 margin: const EdgeInsets.only(top: 8, bottom: 4),
                 decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
+                  color: Theme.of(context).colorScheme.outlineVariant,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -179,12 +211,23 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                           onPressed: _clearSelection,
                         ),
                       ] else ...[
-                        const Text('Pagine', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+                        Text(
+                          visibleIndices.length == liveState.pageCount
+                              ? 'Pagine (${liveState.pageCount})'
+                              : 'Pagine (${visibleIndices.length}/${liveState.pageCount})',
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                        ),
                         const Spacer(),
+                        // Jump to page by number
+                        if (liveState.pageCount > 1)
+                          IconButton(
+                            icon: const Icon(Icons.pin_rounded),
+                            tooltip: 'Vai alla pagina…',
+                            onPressed: () => _promptJumpToPage(ctx, liveState),
+                          ),
                         IconButton(
                           icon: const Icon(Icons.checklist_rounded),
                           tooltip: 'Seleziona pagine',
-                          color: Colors.grey.shade700,
                           onPressed: () {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
@@ -372,7 +415,14 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                       _showChapterPickerForPage(ctx, liveState, docIndex);
                       break;
                     case 'delete':
-                      ref.read(canvasProvider.notifier).deletePage(docIndex);
+                      _confirmDelete(
+                        ctx,
+                        'Eliminare la pagina ${docIndex + 1}?',
+                        'Questa azione non può essere annullata.',
+                      ).then((ok) {
+                        if (!ok) return;
+                        ref.read(canvasProvider.notifier).deletePage(docIndex);
+                      });
                       break;
                   }
                 },
@@ -496,6 +546,42 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
     }
   }
 
+  Future<void> _promptJumpToPage(BuildContext ctx, CanvasState s) async {
+    final controller = TextEditingController();
+    final result = await showDialog<int>(
+      context: ctx,
+      builder: (dCtx) => AlertDialog(
+        title: const Text('Vai alla pagina'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            hintText: '1–${s.pageCount}',
+          ),
+          onSubmitted: (v) {
+            final n = int.tryParse(v);
+            Navigator.pop(dCtx, n);
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dCtx),
+            child: const Text('Annulla'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(dCtx, int.tryParse(controller.text)),
+            child: const Text('Vai'),
+          ),
+        ],
+      ),
+    );
+    if (result == null) return;
+    final target = (result - 1).clamp(0, s.pageCount - 1);
+    ref.read(canvasProvider.notifier).goToPage(target);
+    if (ctx.mounted) Navigator.pop(ctx);
+  }
+
   Future<String?> _promptForTextLocal(
     BuildContext ctx, String title, String hint, {String? initial}) async {
     String value = initial ?? '';
@@ -548,8 +634,8 @@ class SelectionActionBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border(top: BorderSide(color: Colors.grey.shade200)),
+        color: Theme.of(context).colorScheme.surface,
+        border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.06),
@@ -570,7 +656,7 @@ class SelectionActionBar extends StatelessWidget {
                   '$count pag.',
                   style: TextStyle(
                     fontSize: 13,
-                    color: Colors.grey.shade600,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
@@ -882,7 +968,7 @@ class _PageGridReorderableState extends State<PageGridReorderable> {
                     Positioned(
                       top: 2, right: 2,
                       child: PopupMenuButton<String>(
-                        icon: Icon(Icons.more_vert, size: 18, color: Colors.grey.shade600),
+                        icon: Icon(Icons.more_vert, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                         itemBuilder: (_) => [
@@ -911,7 +997,7 @@ class _PageGridReorderableState extends State<PageGridReorderable> {
                   ? Colors.blue
                   : isCurrentPage
                       ? Colors.blue
-                      : Colors.grey.shade700,
+                      : Theme.of(context).colorScheme.onSurfaceVariant,
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
