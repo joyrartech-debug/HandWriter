@@ -6184,15 +6184,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           continue;
         }
 
-        // Conflict: local page was edited since last sync AND remote changed.
-        // Compare without modifiedAt so that a sync-induced timestamp change on
-        // an otherwise identical page doesn't count as a local edit.
+        // Conflict: local page was edited since last sync AND remote ALSO
+        // diverged from that same baseline. Classic 3-way merge: if only one
+        // side moved, it's not a conflict.
+        //
+        // The remoteEdited check matters on flaky networks: when a save's
+        // upload reaches the server but the response packet is dropped, the
+        // iPad thinks the save failed and leaves lastSynced at the old
+        // baseline. Subsequent local edits then look "edited locally", and
+        // the next pull sees the server's new ETag (matching what the iPad
+        // just uploaded) and pulls it back — without remoteEdited the user
+        // gets a false conflict prompt for their own pending work.
+        // Compare without modifiedAt so a sync-induced timestamp change on
+        // otherwise-identical content doesn't register as edited.
         final lastSynced = _lastSyncedPages[fileName];
+        final lastSyncedNorm = lastSynced?.copyWith(modifiedAt: null);
         final locallyEdited = localPage != null &&
             lastSynced != null &&
-            localPage.copyWith(modifiedAt: null) !=
-                lastSynced.copyWith(modifiedAt: null);
-        if (locallyEdited) {
+            localPage.copyWith(modifiedAt: null) != lastSyncedNorm;
+        final remoteEdited = lastSynced != null &&
+            remotePage.copyWith(modifiedAt: null) != lastSyncedNorm;
+        if (locallyEdited && remoteEdited) {
           final pageIndex = remoteMeta.document.pages.indexWhere(
               (e) => e.fileName == fileName);
           final pageEntry = pageIndex >= 0
@@ -6209,6 +6221,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             remoteImageCache: Map.of(state!.imageCache),
           ));
           print('[Canvas] CONFLICT on $fileName — local + remote edits');
+        } else if (locallyEdited && !remoteEdited && localPage != null) {
+          // Local has unsynced edits but remote is unchanged from baseline:
+          // the server's "new" ETag is just our own pending upload echoing
+          // back (or a touched mtime on identical bytes). Keep local content
+          // by reverting the merge map; the next save will push local up.
+          // Without this, the safePages branch would overwrite the user's
+          // in-progress strokes with the older remote bytes — exactly the
+          // data-loss bug behind the false-conflict UX on flaky links.
+          updatedPages[fileName] = localPage;
+          print('[Canvas] Pull: $fileName changed remotely but matches '
+              'baseline; preserving local edits');
         } else {
           safePages.add(fileName);
         }
