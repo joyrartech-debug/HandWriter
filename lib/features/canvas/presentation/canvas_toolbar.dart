@@ -199,32 +199,38 @@ class CanvasToolbar extends StatelessWidget {
       final selected = (toolSettings.strokeWidth - w).abs() < 0.5;
       return Tooltip(
         message: labels[w] ?? 'Spessore ${w.toStringAsFixed(0)}',
-        child: InkWell(
-          borderRadius: BorderRadius.circular(6),
-          onTap: () => onSettingsChanged(toolSettings.copyWith(strokeWidth: w)),
-          child: Container(
-            width: 28, height: 36,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(6),
-              color: selected ? const Color(0xFFE3F2FD) : Colors.transparent,
-            ),
+        child: Builder(builder: (context) {
+          final isDark = Theme.of(context).brightness == Brightness.dark;
+          return InkWell(
+            borderRadius: BorderRadius.circular(6),
+            onTap: () => onSettingsChanged(toolSettings.copyWith(strokeWidth: w)),
             child: Container(
-              width: 16,
-              height: (w * 1.2).clamp(1.5, 8.0),
+              width: 28, height: 36,
+              alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: selected ? Colors.blue.shade800 : Colors.grey.shade700,
-                borderRadius: BorderRadius.circular(w),
+                borderRadius: BorderRadius.circular(6),
+                color: selected ? const Color(0xFFE3F2FD) : Colors.transparent,
+              ),
+              child: Container(
+                width: 16,
+                height: (w * 1.2).clamp(1.5, 8.0),
+                decoration: BoxDecoration(
+                  color: selected
+                      ? Colors.blue.shade800
+                      : (isDark ? Theme.of(context).colorScheme.onSurfaceVariant : Colors.grey.shade700),
+                  borderRadius: BorderRadius.circular(w),
+                ),
               ),
             ),
-          ),
-        ),
+          );
+        }),
       );
     }).toList();
   }
 
   // ── Color dots ──
   List<Widget> _buildColorDots(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
     return [
       ...presetColors.asMap().entries.map((entry) {
         final idx = entry.key;
@@ -246,7 +252,7 @@ class CanvasToolbar extends StatelessWidget {
                 color: Color(c),
                 shape: BoxShape.circle,
                 border: Border.all(
-                  color: isSel ? Colors.blue : (c == 0xFFFFFFFF ? Colors.grey.shade400 : Colors.grey.shade300),
+                  color: isSel ? Colors.blue : outline,
                   width: isSel ? 2.5 : 1,
                 ),
               ),
@@ -268,7 +274,7 @@ class CanvasToolbar extends StatelessWidget {
             gradient: const SweepGradient(colors: [
               Colors.red, Colors.orange, Colors.yellow, Colors.green, Colors.blue, Colors.purple, Colors.red,
             ]),
-            border: Border.all(color: Colors.grey.shade400, width: 1),
+            border: Border.all(color: outline, width: 1),
           ),
         ),
       ),
@@ -285,7 +291,7 @@ class CanvasToolbar extends StatelessWidget {
             ? Theme.of(context).colorScheme.surfaceContainer
             : Colors.white,
         border: Border(bottom: BorderSide(color: Theme.of(context).dividerColor, width: 0.5)),
-        boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.04), blurRadius: 4, offset: const Offset(0, 2))],
+        boxShadow: [BoxShadow(color: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.04), blurRadius: 4, offset: const Offset(0, 2))],
       ),
       padding: const EdgeInsets.symmetric(horizontal: 16),
       child: _optionsForTool(context),
@@ -294,13 +300,15 @@ class CanvasToolbar extends StatelessWidget {
 
   Widget _optionsForTool(BuildContext context) {
     if (currentTool == CanvasTool.eraserStandard || currentTool == CanvasTool.eraserStroke) {
-      return _eraserOptions();
+      return _eraserOptions(context);
     }
-    if (currentTool == CanvasTool.shape) return _shapeOptions();
-    return _penOptions();
+    if (currentTool == CanvasTool.shape) return _shapeOptions(context);
+    return _penOptions(context);
   }
 
-  Widget _penOptions() {
+  Widget _penOptions(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
+    final textMuted = Theme.of(context).colorScheme.onSurfaceVariant;
     return Row(
       children: [
         // ── Pen / Brush / Calligraphy sub-toggle ──
@@ -325,9 +333,9 @@ class CanvasToolbar extends StatelessWidget {
           onTap: () => onToolChanged(CanvasTool.calligraphy),
         ),
         const SizedBox(width: 10),
-        Container(width: 1, height: 28, color: Colors.grey.shade300),
+        Container(width: 1, height: 28, color: outline),
         const SizedBox(width: 10),
-        const Text('Spessore:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+        Text('Spessore:', style: TextStyle(fontSize: 12, color: textMuted)),
         const SizedBox(width: 8),
         ...[0.5, 1.0, 2.0, 4.0, 8.0, 12.0].map((w) => Padding(
           padding: const EdgeInsets.symmetric(horizontal: 2),
@@ -338,7 +346,7 @@ class CanvasToolbar extends StatelessWidget {
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(6),
                 color: toolSettings.strokeWidth == w ? const Color(0xFFE3F2FD) : Colors.transparent,
-                border: Border.all(color: toolSettings.strokeWidth == w ? Colors.blue : Colors.grey.shade300),
+                border: Border.all(color: toolSettings.strokeWidth == w ? Colors.blue : outline),
               ),
               child: Center(
                 child: Container(
@@ -362,7 +370,9 @@ class CanvasToolbar extends StatelessWidget {
     );
   }
 
-  Widget _eraserOptions() {
+  Widget _eraserOptions(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
+    final textMuted = Theme.of(context).colorScheme.onSurfaceVariant;
     return Row(
       children: [
         _EraserChip('Standard', Icons.circle_outlined,
@@ -371,7 +381,7 @@ class CanvasToolbar extends StatelessWidget {
         _EraserChip('Per tratto', Icons.gesture,
             currentTool == CanvasTool.eraserStroke, () => onToolChanged(CanvasTool.eraserStroke)),
         const SizedBox(width: 24),
-        const Text('Dimensione:', style: TextStyle(fontSize: 12, color: Colors.grey)),
+        Text('Dimensione:', style: TextStyle(fontSize: 12, color: textMuted)),
         const SizedBox(width: 8),
         ...(EraserSize.values.map((size) {
           final labels = {EraserSize.small: 'S', EraserSize.medium: 'M', EraserSize.large: 'L'};
@@ -385,16 +395,16 @@ class CanvasToolbar extends StatelessWidget {
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(8),
                   color: toolSettings.eraserSize == size ? const Color(0xFFFCE4EC) : Colors.transparent,
-                  border: Border.all(color: toolSettings.eraserSize == size ? Colors.red.shade300 : Colors.grey.shade300),
+                  border: Border.all(color: toolSettings.eraserSize == size ? Colors.red.shade300 : outline),
                 ),
                 child: Center(
                   child: Container(
                     width: diameters[size], height: diameters[size],
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      border: Border.all(color: Colors.grey.shade600, width: 1.5),
+                      border: Border.all(color: textMuted, width: 1.5),
                     ),
-                    child: Center(child: Text(labels[size]!, style: TextStyle(fontSize: 10, color: Colors.grey.shade600))),
+                    child: Center(child: Text(labels[size]!, style: TextStyle(fontSize: 10, color: textMuted))),
                   ),
                 ),
               ),
@@ -405,7 +415,9 @@ class CanvasToolbar extends StatelessWidget {
     );
   }
 
-  Widget _shapeOptions() {
+  Widget _shapeOptions(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
+    final iconColor = Theme.of(context).colorScheme.onSurfaceVariant;
     final shapes = [
       ('rectangle', Icons.rectangle_outlined, 'Rettangolo'),
       ('circle', Icons.circle_outlined, 'Cerchio'),
@@ -425,9 +437,9 @@ class CanvasToolbar extends StatelessWidget {
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),
               color: toolSettings.shapeType == s.$1 ? const Color(0xFFE3F2FD) : Colors.transparent,
-              border: Border.all(color: toolSettings.shapeType == s.$1 ? Colors.blue : Colors.grey.shade300),
+              border: Border.all(color: toolSettings.shapeType == s.$1 ? Colors.blue : outline),
             ),
-            child: Tooltip(message: s.$3, child: Icon(s.$2, size: 20, color: toolSettings.shapeType == s.$1 ? Colors.blue : Colors.grey.shade700)),
+            child: Tooltip(message: s.$3, child: Icon(s.$2, size: 20, color: toolSettings.shapeType == s.$1 ? Colors.blue : iconColor)),
           ),
         ),
       )).toList(),
@@ -458,6 +470,8 @@ class CanvasToolbar extends StatelessWidget {
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) {
+        final outline = Theme.of(ctx).colorScheme.outlineVariant;
+        final textMuted = Theme.of(ctx).colorScheme.onSurfaceVariant;
         return SafeArea(
           child: Padding(
             padding: const EdgeInsets.fromLTRB(20, 14, 20, 18),
@@ -472,7 +486,7 @@ class CanvasToolbar extends StatelessWidget {
                       decoration: BoxDecoration(
                         color: Color(currentColor),
                         shape: BoxShape.circle,
-                        border: Border.all(color: Colors.grey.shade400),
+                        border: Border.all(color: outline),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -505,8 +519,8 @@ class CanvasToolbar extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 10),
-                const Text('Scegli un nuovo colore per questo slot:',
-                    style: TextStyle(fontSize: 13, color: Colors.grey)),
+                Text('Scegli un nuovo colore per questo slot:',
+                    style: TextStyle(fontSize: 13, color: textMuted)),
                 const SizedBox(height: 10),
                 if (onEditColorSlot != null)
                   Wrap(
@@ -524,9 +538,7 @@ class CanvasToolbar extends StatelessWidget {
                             color: Color(c),
                             shape: BoxShape.circle,
                             border: Border.all(
-                              color: isSel
-                                  ? Colors.blue
-                                  : (c == 0xFFFFFFFF ? Colors.grey.shade400 : Colors.grey.shade300),
+                              color: isSel ? Colors.blue : outline,
                               width: isSel ? 2.5 : 1,
                             ),
                           ),
@@ -564,34 +576,37 @@ class CanvasToolbar extends StatelessWidget {
     ];
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Colore'),
-        contentPadding: const EdgeInsets.all(20),
-        content: SizedBox(
-          width: 260,
-          child: Wrap(
-            spacing: 10, runSpacing: 10,
-            children: colors.map((c) {
-              final sel = currentColor == c;
-              return GestureDetector(
-                onTap: () { onPick(c); Navigator.pop(ctx); },
-                child: Container(
-                  width: 36, height: 36,
-                  decoration: BoxDecoration(
-                    color: Color(c), shape: BoxShape.circle,
-                    border: Border.all(
-                      color: sel ? Colors.blue : (c == 0xFFFFFFFF ? Colors.grey.shade300 : Colors.transparent),
-                      width: sel ? 3 : 1,
+      builder: (ctx) {
+        final outline = Theme.of(ctx).colorScheme.outlineVariant;
+        return AlertDialog(
+          title: const Text('Colore'),
+          contentPadding: const EdgeInsets.all(20),
+          content: SizedBox(
+            width: 260,
+            child: Wrap(
+              spacing: 10, runSpacing: 10,
+              children: colors.map((c) {
+                final sel = currentColor == c;
+                return GestureDetector(
+                  onTap: () { onPick(c); Navigator.pop(ctx); },
+                  child: Container(
+                    width: 36, height: 36,
+                    decoration: BoxDecoration(
+                      color: Color(c), shape: BoxShape.circle,
+                      border: Border.all(
+                        color: sel ? Colors.blue : (c == 0xFFFFFFFF ? outline : Colors.transparent),
+                        width: sel ? 3 : 1,
+                      ),
+                      boxShadow: sel ? [BoxShadow(color: Color(c).withValues(alpha: 0.4), blurRadius: 8)] : null,
                     ),
-                    boxShadow: sel ? [BoxShadow(color: Color(c).withValues(alpha: 0.4), blurRadius: 8)] : null,
+                    child: sel ? const Icon(Icons.check, color: Colors.blue, size: 16) : null,
                   ),
-                  child: sel ? const Icon(Icons.check, color: Colors.blue, size: 16) : null,
-                ),
-              );
-            }).toList(),
+                );
+              }).toList(),
+            ),
           ),
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -641,6 +656,8 @@ class _TbBtn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final activeColor = Theme.of(context).colorScheme.onSurface;
+    final disabledColor = Theme.of(context).disabledColor;
     return Tooltip(
       message: tip,
       child: InkWell(
@@ -648,7 +665,7 @@ class _TbBtn extends StatelessWidget {
         onTap: onTap,
         child: SizedBox(
           width: 34, height: 34,
-          child: Icon(icon, size: 19, color: onTap != null ? Colors.grey.shade800 : Colors.grey.shade400),
+          child: Icon(icon, size: 19, color: onTap != null ? activeColor : disabledColor),
         ),
       ),
     );
@@ -689,7 +706,7 @@ class _PenToolIcon extends StatelessWidget {
               Center(child: Icon(
                 activeIcon,
                 size: 19,
-                color: active ? Colors.blue : Colors.grey.shade700,
+                color: active ? Colors.blue : Theme.of(context).colorScheme.onSurfaceVariant,
               )),
               if (active)
                 const Positioned(
@@ -713,6 +730,8 @@ class _MiniChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
+    final textMuted = Theme.of(context).colorScheme.onSurfaceVariant;
     return Tooltip(
       message: label,
       child: GestureDetector(
@@ -723,12 +742,12 @@ class _MiniChip extends StatelessWidget {
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(6),
             color: active ? const Color(0xFFE3F2FD) : Colors.transparent,
-            border: Border.all(color: active ? Colors.blue : Colors.grey.shade300),
+            border: Border.all(color: active ? Colors.blue : outline),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Icon(icon, size: 15, color: active ? Colors.blue : Colors.grey.shade600),
+            Icon(icon, size: 15, color: active ? Colors.blue : textMuted),
             const SizedBox(width: 4),
-            Text(label, style: TextStyle(fontSize: 11, color: active ? Colors.blue : Colors.grey.shade600)),
+            Text(label, style: TextStyle(fontSize: 11, color: active ? Colors.blue : textMuted)),
           ]),
         ),
       ),
@@ -759,7 +778,7 @@ class _ToolIcon extends StatelessWidget {
             borderRadius: BorderRadius.circular(8),
             color: active ? const Color(0xFFE3F2FD) : Colors.transparent,
           ),
-          child: Icon(icon, size: 19, color: active ? Colors.blue : Colors.grey.shade700),
+          child: Icon(icon, size: 19, color: active ? Colors.blue : Theme.of(context).colorScheme.onSurfaceVariant),
         ),
       ),
     );
@@ -790,7 +809,7 @@ class _EraserIcon extends StatelessWidget {
             child: CustomPaint(
               size: const Size(19, 19),
               painter: _EraserPainter(
-                color: active ? Colors.red.shade400 : Colors.grey.shade700,
+                color: active ? Colors.red.shade400 : Theme.of(context).colorScheme.onSurfaceVariant,
               ),
             ),
           ),
@@ -857,7 +876,7 @@ class _Sep extends StatelessWidget {
     return Container(
       width: 1, height: 22,
       margin: const EdgeInsets.symmetric(horizontal: 5),
-      color: Colors.grey.shade300,
+      color: Theme.of(context).colorScheme.outlineVariant,
     );
   }
 }
@@ -882,7 +901,7 @@ class _ToggleIcon extends StatelessWidget {
             borderRadius: BorderRadius.circular(8),
             color: active ? const Color(0xFFE8F5E9) : Colors.transparent,
           ),
-          child: Icon(icon, size: 17, color: active ? Colors.green : Colors.grey.shade500),
+          child: Icon(icon, size: 17, color: active ? Colors.green : Theme.of(context).colorScheme.onSurfaceVariant),
         ),
       ),
     );
@@ -898,7 +917,7 @@ class _ChipBtn extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = color ?? Colors.grey.shade800;
+    final c = color ?? Theme.of(context).colorScheme.onSurface;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 2),
       child: InkWell(
@@ -929,24 +948,28 @@ class _EraserChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outlineVariant;
+    final surfaceHighest = Theme.of(context).colorScheme.surfaceContainerHighest;
+    final textMuted = Theme.of(context).colorScheme.onSurfaceVariant;
+    final textStrong = Theme.of(context).colorScheme.onSurface;
     return GestureDetector(
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(20),
-          color: selected ? const Color(0xFFFCE4EC) : Colors.grey.shade100,
-          border: Border.all(color: selected ? Colors.red.shade300 : Colors.grey.shade300),
+          color: selected ? const Color(0xFFFCE4EC) : surfaceHighest,
+          border: Border.all(color: selected ? Colors.red.shade300 : outline),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 15, color: selected ? Colors.red : Colors.grey.shade600),
+            Icon(icon, size: 15, color: selected ? Colors.red : textMuted),
             const SizedBox(width: 4),
             Text(label, style: TextStyle(
               fontSize: 12,
               fontWeight: selected ? FontWeight.w600 : FontWeight.normal,
-              color: selected ? Colors.red.shade700 : Colors.grey.shade700,
+              color: selected ? Colors.red.shade700 : textStrong,
             )),
           ],
         ),
@@ -981,7 +1004,7 @@ class _SymbolButton extends StatelessWidget {
                 alignment: Alignment.center,
                 children: [
                   Icon(Icons.star_rounded, size: 19,
-                      color: count > 0 ? Colors.amber.shade700 : Colors.grey.shade500),
+                      color: count > 0 ? Colors.amber.shade700 : Theme.of(context).colorScheme.onSurfaceVariant),
                   if (count > 0)
                     Positioned(
                       right: 3, top: 3,
