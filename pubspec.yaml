@@ -1,6 +1,6 @@
 name: handwriter
 description: Handwriting note-taking app with Nextcloud sync via WebDAV.
-version: 0.36.3+32
+version: 0.36.4+33
 publish_to: 'none'
 
 environment:

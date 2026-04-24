@@ -5978,30 +5978,44 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (missingAssets.isNotEmpty) {
       // ── Batched download (platform-aware concurrency) ───────────────────
       // Downloading all assets simultaneously spikes RAM with raw bytes
-      // (JPEG buffers) before any have been decoded. Mobile devices (iPad,
-      // phones) have much less headroom than the desktop before iOS jetsam
-      // or Android lowmemkiller starts killing the process, so halve the
-      // concurrency there.
+      // (JPEG buffers) before any have been decoded. Mobile concurrency
+      // is bounded but bumped from 2 → 4 because the previous cap made a
+      // 200-asset notebook (Automotive, ~60 MB) crawl over Tailscale.
+      // Per-asset retry with backoff replaces the old "fail and wait for
+      // next pull" pattern so a flaky link converges in a single pass.
       final maxAssetConcurrency = (defaultTargetPlatform == TargetPlatform.iOS ||
               defaultTargetPlatform == TargetPlatform.android)
-          ? 2
-          : 4;
+          ? 4
+          : 6;
       final missingList = missingAssets.toList();
       final newlyDownloaded = <String, Uint8List>{};
       int downloadedCount = 0;
+      int failedCount = 0;
+
+      Future<(String, Uint8List?, Object?)> pullOneAsset(String ref) async {
+        const maxAttempts = 3;
+        Object? lastError;
+        for (var attempt = 0; attempt < maxAttempts; attempt++) {
+          try {
+            final data = await syncService.downloadDeltaAsset(s.metadata.id, ref);
+            return (ref, data, null);
+          } catch (e) {
+            lastError = e;
+            if (attempt == maxAttempts - 1) break;
+            await Future.delayed(
+                Duration(milliseconds: 200 * (1 << attempt)));
+            if (_disposed || state?.metadata.id != s.metadata.id) {
+              return (ref, null, lastError);
+            }
+          }
+        }
+        return (ref, null, lastError);
+      }
+
       for (var i = 0; i < missingList.length; i += maxAssetConcurrency) {
         if (_disposed) break;
         final batch = missingList.skip(i).take(maxAssetConcurrency);
-        final batchResults = await Future.wait(
-          batch.map((ref) async {
-            try {
-              final data = await syncService.downloadDeltaAsset(s.metadata.id, ref);
-              return (ref, data, null as Object?);
-            } catch (e) {
-              return (ref, null as Uint8List?, e);
-            }
-          }),
-        );
+        final batchResults = await Future.wait(batch.map(pullOneAsset));
         for (final (ref, data, err) in batchResults) {
           if (data != null) {
             updatedAssets[ref] = data;
@@ -6015,11 +6029,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             // blocking meta-ETag advance. Blocking here caused the Samsung
             // "391/391 stuck" loop on notebooks with ~200 assets (60+ MB)
             // where a handful of asset downloads time out each pull.
-            print('[Canvas] Failed to pull asset $ref: $err (will retry next pull)');
+            failedCount++;
+            print('[Canvas] Failed to pull asset $ref after retries: $err '
+                '(will retry next pull)');
           }
         }
       }
-      print('[Canvas] Pulled $downloadedCount assets (batched, max $maxAssetConcurrency concurrent)');
+      print('[Canvas] Pulled $downloadedCount/${missingList.length} assets '
+          '(failed: $failedCount, max $maxAssetConcurrency concurrent)');
 
       // ── Throttled decode — current-page assets first ─────────────────────
       // Decoding all images concurrently (ui.instantiateImageCodec) spikes
