@@ -5419,6 +5419,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     try {
       releaseImageCache();
     } catch (_) {}
+    // Dispose the ValueNotifier instances so any still-subscribed listeners
+    // (e.g. the sync pill widget) get cleaned up instead of leaking their
+    // attached callbacks on hot-restart / provider container teardown.
+    try { isPullingFromRemote.dispose(); } catch (_) {}
+    try { pullProgress.dispose(); } catch (_) {}
     super.dispose();
   }
 
