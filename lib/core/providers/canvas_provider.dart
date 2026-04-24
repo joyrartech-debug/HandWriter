@@ -1109,12 +1109,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Points are committed via commitAndEndStroke on pointer up.
   }
 
-  /// Called from the fast notifier to bulk-set the active stroke before endStroke.
-  void commitActiveStroke(List<StrokePoint> points) {
-    if (state == null) return;
-    state = state!.copyWith(activeStroke: List.of(points));
-  }
-
   /// Commit fast-notifier points and finalize the stroke in a single state update,
   /// avoiding the intermediate frame that causes visible line stretching.
   void commitAndEndStroke(List<StrokePoint> points) {
