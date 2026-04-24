@@ -252,13 +252,24 @@ class CanvasRenderEngine extends CustomPainter {
   }
 
   void _paintDottedBackground(Canvas canvas, double spacing, Paint paint) {
+    // Use drawPoints(points) instead of per-dot drawCircle(). On an A4
+    // portrait page with spacing=25 this issues ~2500 draw calls per
+    // paint frame; drawPoints batches them into a single Skia op.
+    // Visual match: a round-capped stroke of width=diameter produces
+    // the same dot as a filled circle of radius=diameter/2.
     final dotPaint = Paint()
       ..color = Color(pageData.layers.background.lineColor)
-      ..style = PaintingStyle.fill;
+      ..style = PaintingStyle.stroke
+      ..strokeCap = StrokeCap.round
+      ..strokeWidth = 3.0; // matches previous radius 1.5
+    final offsets = <Offset>[];
     for (double y = spacing; y < pageData.height; y += spacing) {
       for (double x = spacing; x < pageData.width; x += spacing) {
-        canvas.drawCircle(Offset(x, y), 1.5, dotPaint);
+        offsets.add(Offset(x, y));
       }
+    }
+    if (offsets.isNotEmpty) {
+      canvas.drawPoints(ui.PointMode.points, offsets, dotPaint);
     }
   }
 
