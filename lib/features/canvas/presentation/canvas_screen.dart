@@ -112,6 +112,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   DateTime? _deferredCommitAt;
   Offset? _deferredCommitLastScreenPos;
 
+  // [StrokeDbg] logging is gated by [CrashLogger.verboseEnabled] (default
+  // false). Set that flag to true to re-enable [Pull], [Mem], [StrokeDbg]
+  // and [Retry] tags all at once when investigating an issue.
   void _strokeDbg(String msg) {
     CrashLogger.append('[StrokeDbg] $msg');
   }

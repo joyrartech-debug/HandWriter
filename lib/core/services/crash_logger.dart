@@ -21,6 +21,25 @@ import 'package:path_provider/path_provider.dart';
 class CrashLogger {
   static const int _maxBytes = 256 * 1024; // 256 KB cap
 
+  /// Verbose debug logging gate. When `false` (default), routine
+  /// instrumentation tags ([Pull], [Mem], [StrokeDbg], [Retry]) are
+  /// dropped at write time so the persisted log stays readable. Real
+  /// errors (FlutterError, PlatformDispatcher, ZoneError, untagged
+  /// messages, "[Tag] failed: …" lines) always go through. Flip this
+  /// to `true` from the debugger or a settings switch when you need
+  /// to investigate a pointer-pipeline / sync issue.
+  static bool verboseEnabled = false;
+
+  /// Tag prefixes that count as "verbose / routine instrumentation"
+  /// and are gated by [verboseEnabled]. Order: most-frequent first
+  /// (short-circuit on the first match).
+  static const List<String> _verboseTags = [
+    '[Pull]',
+    '[Mem]',
+    '[StrokeDbg]',
+    '[Retry]',
+  ];
+
   static File? _logFile;
   static bool _initialised = false;
 
@@ -63,9 +82,17 @@ class CrashLogger {
   }
 
   /// Append one line to the log with an ISO-8601 timestamp. Never throws.
+  ///
+  /// Gates routine-instrumentation tags via [verboseEnabled]: when off
+  /// (default), messages starting with [_verboseTags] are dropped so the
+  /// persisted log keeps only meaningful events (errors, lifecycle).
+  /// Lines like "[Pull] download failed: …" still bypass the gate when
+  /// they contain " failed" / " error" — a tagged routine line that
+  /// reports an error is too important to silence.
   static Future<void> append(String message) async {
     final file = _logFile;
     if (file == null) return;
+    if (!verboseEnabled && _isVerboseRoutine(message)) return;
     try {
       final stamp = DateTime.now().toIso8601String();
       await file.writeAsString(
@@ -77,6 +104,30 @@ class CrashLogger {
     } catch (_) {
       // Never let logging failures propagate.
     }
+  }
+
+  /// True if [message] is routine instrumentation that should be
+  /// silenced when [verboseEnabled] is false. Messages that look like
+  /// errors (failed / error / abort / crash / exception) always pass
+  /// the gate even when their tag is in [_verboseTags].
+  static bool _isVerboseRoutine(String message) {
+    bool startsWithVerboseTag = false;
+    for (final tag in _verboseTags) {
+      if (message.startsWith(tag)) {
+        startsWithVerboseTag = true;
+        break;
+      }
+    }
+    if (!startsWithVerboseTag) return false;
+    final lower = message.toLowerCase();
+    if (lower.contains(' failed') ||
+        lower.contains(' error') ||
+        lower.contains(' abort') ||
+        lower.contains(' crash') ||
+        lower.contains(' exception')) {
+      return false; // tagged but reporting a real problem → keep
+    }
+    return true;
   }
 
   /// Returns the entire log contents or an empty string if nothing logged.
