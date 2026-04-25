@@ -547,6 +547,11 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
   }
 
   Future<void> _promptJumpToPage(BuildContext ctx, CanvasState s) async {
+    // Respect chapter filter: when a chapter is active, the user types a
+    // number 1..filtered.length and we remap to the absolute page index.
+    final filtered = s.filteredPageIndices;
+    final maxN = filtered.isEmpty ? s.pageCount : filtered.length;
+    if (maxN <= 0) return;
     final controller = TextEditingController();
     final result = await showDialog<int>(
       context: ctx,
@@ -557,7 +562,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
           autofocus: true,
           keyboardType: TextInputType.number,
           decoration: InputDecoration(
-            hintText: '1–${s.pageCount}',
+            hintText: '1–$maxN',
           ),
           onSubmitted: (v) {
             final n = int.tryParse(v);
@@ -577,7 +582,8 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
       ),
     );
     if (result == null) return;
-    final target = (result - 1).clamp(0, s.pageCount - 1);
+    final clamped = (result - 1).clamp(0, maxN - 1);
+    final target = filtered.isEmpty ? clamped : filtered[clamped];
     ref.read(canvasProvider.notifier).goToPage(target);
     if (ctx.mounted) Navigator.pop(ctx);
   }
