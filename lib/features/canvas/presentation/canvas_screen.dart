@@ -93,6 +93,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   DateTime? _strokeEndedAt;
   String _lastStrokeEndReason = 'never';
 
+  // ── Deferred stylus commit (iPad spurious Up→Down protection) ──
+  // On stylus PointerUp we hold the points for [_deferStylusMs] ms instead
+  // of committing immediately. If a fresh stylus PointerDown arrives in
+  // that window close in space (<= [_deferStylusPx] screen px) and time,
+  // we resume the same stroke — preventing the visible mid-letter break
+  // caused by Apple Pencil sample dropouts / iOS pointer rebatching.
+  static const int _deferStylusMs = 80;
+  static const double _deferStylusPx = 30.0;
+  Timer? _deferredCommitTimer;
+  List<StrokePoint>? _deferredCommitPoints;
+  DateTime? _deferredCommitAt;
+  Offset? _deferredCommitLastScreenPos;
+
   void _strokeDbg(String msg) {
     CrashLogger.append('[StrokeDbg] $msg');
   }
@@ -100,6 +113,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _markStrokeEnded(String reason) {
     _strokeEndedAt = DateTime.now();
     _lastStrokeEndReason = reason;
+  }
+
+  /// Flush a deferred stylus commit immediately (timer fired, or another
+  /// code path needs the stroke to be persisted right now).
+  void _flushDeferredCommit() {
+    final pts = _deferredCommitPoints;
+    if (pts == null) return;
+    _deferredCommitPoints = null;
+    _deferredCommitAt = null;
+    _deferredCommitLastScreenPos = null;
+    _deferredCommitTimer?.cancel();
+    _deferredCommitTimer = null;
+    ref.read(canvasProvider.notifier).commitAndEndStroke(pts);
+    _markStrokeEnded('pointerUp.commit');
   }
 
   // Double-tap detection for element selection
@@ -209,6 +236,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    // Flush any pending deferred stylus commit before tearing down so a
+    // partial stroke isn't lost on screen close. Cancel the timer first
+    // since dispose is the terminal callsite.
+    _deferredCommitTimer?.cancel();
+    _deferredCommitTimer = null;
+    if (_deferredCommitPoints != null) {
+      try {
+        ref.read(canvasProvider.notifier).commitAndEndStroke(_deferredCommitPoints!);
+      } catch (_) {
+        // Provider may already be disposed; swallow.
+      }
+      _deferredCommitPoints = null;
+      _deferredCommitAt = null;
+      _deferredCommitLastScreenPos = null;
+    }
     _activeStrokeNotifier.dispose();
     _lassoPathNotifier.dispose();
     _autoSaveDebounce?.cancel();
@@ -808,6 +850,41 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         'activePointers=$_activePointers'
         '${isBreakSusp ? " BREAK_SUSPECTED" : ""}',
       );
+
+      // ── Continuation check (iPad spurious Up→Down) ──
+      //
+      // If we just deferred a commit, see if this DOWN is close enough in
+      // time and space to be the resumption of the same stroke. If so,
+      // cancel the deferred commit, restore the buffered points into the
+      // active notifier, and skip the rest of the DOWN handling — the
+      // next pointer-move will simply append to the existing stroke.
+      // Without this iPad / Apple Pencil produces visible mid-letter
+      // breaks because the OS occasionally emits a spurious UP+DOWN pair
+      // (sample dropout / pressure threshold / pointer rebatching).
+      final deferredPts = _deferredCommitPoints;
+      if (deferredPts != null && _deferredCommitAt != null && _deferredCommitLastScreenPos != null) {
+        final defGapMs = now.difference(_deferredCommitAt!).inMilliseconds;
+        final defDist = (event.position - _deferredCommitLastScreenPos!).distance;
+        if (defGapMs < 100 && defDist < _deferStylusPx) {
+          _deferredCommitTimer?.cancel();
+          _deferredCommitTimer = null;
+          _deferredCommitPoints = null;
+          _deferredCommitAt = null;
+          _deferredCommitLastScreenPos = null;
+          _activeStrokeNotifier.restoreActive(deferredPts);
+          _strokeDbg(
+            'CONTINUATION p=${event.pointer} '
+            'gap=${defGapMs}ms dist=${defDist.toStringAsFixed(1)}px '
+            'restoredPts=${deferredPts.length}',
+          );
+          _stylusDown = true;
+          _cancelLongPressTimer();
+          return;
+        }
+        // Out of range → flush the pending commit before starting a new one
+        _flushDeferredCommit();
+      }
+
       _stylusDown = true;
       _cancelLongPressTimer(); // kill any pending palm long-press immediately
     }
@@ -1298,8 +1375,35 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     if (_activeStrokeNotifier.isActive && _activeStrokeNotifier.points.isNotEmpty) {
       final points = List<StrokePoint>.from(_activeStrokeNotifier.points);
       _activeStrokeNotifier.clear();
-      ref.read(canvasProvider.notifier).commitAndEndStroke(points);
-      _markStrokeEnded('pointerUp.commit');
+      // ── Stroke break defense ──
+      //
+      // For stylus (Apple Pencil on iPad), defer the commit by
+      // _deferStylusMs. iPad/Apple Pencil occasionally emits a spurious
+      // PointerUp followed by a PointerDown while the user has not
+      // actually lifted the pen. Without defer, each segment would be
+      // committed as a separate stroke and the user sees a mid-letter
+      // break. If a fresh stylus DOWN arrives in the defer window close
+      // to this end position, _onPointerDown resumes the same stroke
+      // (see continuation block there). Otherwise the timer fires and
+      // the commit happens normally.
+      //
+      // For non-stylus (mouse/touchpad/touch) commit immediately as
+      // before — the bug is iPad-specific and adding latency on PC
+      // would be a regression.
+      if (event.kind == PointerDeviceKind.stylus ||
+          event.kind == PointerDeviceKind.invertedStylus) {
+        _deferredCommitPoints = points;
+        _deferredCommitAt = DateTime.now();
+        _deferredCommitLastScreenPos = event.position;
+        _deferredCommitTimer?.cancel();
+        _deferredCommitTimer = Timer(
+          const Duration(milliseconds: _deferStylusMs),
+          _flushDeferredCommit,
+        );
+      } else {
+        ref.read(canvasProvider.notifier).commitAndEndStroke(points);
+        _markStrokeEnded('pointerUp.commit');
+      }
     } else {
       _activeStrokeNotifier.clear();
       ref.read(canvasProvider.notifier).endStroke();
