@@ -99,8 +99,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // that window close in space (<= [_deferStylusPx] screen px) and time,
   // we resume the same stroke — preventing the visible mid-letter break
   // caused by Apple Pencil sample dropouts / iOS pointer rebatching.
+  //
+  // [_deferStylusPx] tuning: spurious Up→Down has dist ≈ 0–3 logical px
+  // (the pen does not move during a hardware sample dropout). Deliberate
+  // strokes like the i-dot are ≥ 5 mm away from the end of the previous
+  // stroke — at the iPad default zoom of 2.0, that's ≥ 30 logical px. A
+  // threshold of 10 px keeps spurious dropouts inside and i-dots outside.
   static const int _deferStylusMs = 80;
-  static const double _deferStylusPx = 30.0;
+  static const double _deferStylusPx = 10.0;
   Timer? _deferredCommitTimer;
   List<StrokePoint>? _deferredCommitPoints;
   DateTime? _deferredCommitAt;
@@ -848,12 +854,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           ? -1
           : now.difference(_strokeEndedAt!).inMilliseconds;
       final isBreakSusp = gapMs >= 0 && gapMs < 200 && _lastStrokeEndReason != 'pointerUp.commit';
+      // Distance from the previous deferred-commit position, if any. Logs
+      // even when no continuation happens — helps tune _deferStylusPx if
+      // a break sneaks past the threshold.
+      String distStr = '';
+      if (_deferredCommitLastScreenPos != null) {
+        final d = (event.position - _deferredCommitLastScreenPos!).distance;
+        distStr = ' deferDist=${d.toStringAsFixed(1)}px';
+      }
       _strokeDbg(
         'DOWN stylus p=${event.pointer} t=${event.timeStamp.inMilliseconds}ms '
         'gap=${gapMs}ms prevEnd=$_lastStrokeEndReason '
         'tool=${state.currentTool.name} '
         'active=${_activeStrokeNotifier.isActive} '
-        'activePointers=$_activePointers'
+        'activePointers=$_activePointers$distStr'
         '${isBreakSusp ? " BREAK_SUSPECTED" : ""}',
       );
 
