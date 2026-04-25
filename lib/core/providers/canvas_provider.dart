@@ -5545,6 +5545,47 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         // a previous partial pull left us with missing data and we need
         // to fetch regardless of what the server says.
         if (s0.pages.length >= s0.document.pages.length) {
+          // ── Ghost-page detection (P1) ──
+          //
+          // The pull is about to skip because state is "self-consistent"
+          // (pages == doc) and meta ETag is unchanged. But if the document
+          // references pages whose ETag the server has NEVER acknowledged
+          // (count(_lastPageEtags) < count(document.pages)), those pages
+          // exist locally without ever having been uploaded — typically
+          // because a previous save() failed mid-upload and reopen rebuilt
+          // _lastSyncedPages from the local zip, hiding the ghost pages
+          // from future dirty-page detection. Result: every subsequent
+          // pull skips here, every save() considers the ghost pages
+          // already-synced, and the notebook is permanently wedged with
+          // local pages > remote pages.
+          //
+          // Repair: rebuild _lastSyncedPages without those ghost entries
+          // (so the next save() detects them as "new pages" via the
+          // !_lastSyncedPages.containsKey(key) branch in _saveInner) and
+          // mark the notebook dirty so the next save cycle actually fires.
+          if (_lastPageEtags.isNotEmpty &&
+              _lastPageEtags.length < s0.document.pages.length) {
+            final ghostFns = s0.document.pages
+                .map((p) => p.fileName)
+                .where((fn) => !_lastPageEtags.containsKey(fn))
+                .toList();
+            if (ghostFns.isNotEmpty) {
+              for (final fn in ghostFns) {
+                _lastSyncedPages.remove(fn);
+              }
+              if (state != null && state!.metadata.id == pullNotebookId) {
+                state = state!.copyWith(isDirty: true);
+              }
+              unawaited(CrashLogger.append(
+                '[Pull] ghost pages detected: ${ghostFns.length} doc entries '
+                'without server ETag (sample: '
+                '${ghostFns.take(3).join(",")}'
+                '${ghostFns.length > 3 ? "..." : ""}) — '
+                'marked dirty so next save() uploads them',
+              ));
+              return;
+            }
+          }
           unawaited(CrashLogger.append(
             '[Pull] skip: meta ETag unchanged (fast=$fastMetaEtag) '
             'and state is consistent (pages=${s0.pages.length}=doc=${s0.document.pages.length}, '
