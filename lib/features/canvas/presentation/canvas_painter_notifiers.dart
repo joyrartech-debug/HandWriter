@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import 'dart:io' as io;
+import 'dart:math' show sqrt;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
@@ -27,6 +28,16 @@ class ActiveStrokeNotifier extends ChangeNotifier {
   /// filtered, 120 Hz coalesced events.
   bool _isDesktop = false;
 
+  /// True when the pointing device reports no pressure (mouse / touchpad /
+  /// some plain touch panels). When set, [addPoint] synthesises a velocity-
+  /// derived pseudo-pressure so the rendered stroke isn't stuck at a flat
+  /// 0.5 fallback. Detected from the first [start] pressure: anything <= 0
+  /// means "no real pressure data", at which point we synth.
+  bool _synthPressure = false;
+  /// EMA state for synth pressure (0..1). Smoothed across points so width
+  /// modulation isn't choppy on irregular sample rates.
+  double _synthEma = 0.6;
+
   List<StrokePoint> get points => _points;
   bool get isActive => _active;
 
@@ -35,7 +46,13 @@ class ActiveStrokeNotifier extends ChangeNotifier {
     _active = true;
     _isDesktop = !kIsWeb &&
         (io.Platform.isWindows || io.Platform.isMacOS || io.Platform.isLinux);
-    _points.add(StrokePoint(x: pos.dx, y: pos.dy, pressure: pressure,
+    // Devices without pressure (mouse, touchpad, plain touch) report 0.
+    // Stylus / Apple Pencil always report > 0, so this check leaves the
+    // pen-input pipeline bit-equivalent.
+    _synthPressure = pressure <= 0.0;
+    _synthEma = 0.6;
+    final p0 = _synthPressure ? 0.6 : pressure;
+    _points.add(StrokePoint(x: pos.dx, y: pos.dy, pressure: p0,
         timestamp: DateTime.now().millisecondsSinceEpoch));
     notifyListeners();
   }
@@ -106,6 +123,24 @@ class ActiveStrokeNotifier extends ChangeNotifier {
         sy = (p1.y + pos.dy * 7) / 8;
         sp = (p1.pressure + pressure * 7) / 8;
       }
+    }
+
+    // Synthesise a velocity-derived pseudo-pressure for devices without real
+    // pressure (mouse / touchpad). Slow movement → high pressure (full body),
+    // fast movement → low pressure (thin), smoothed by an EMA so width
+    // modulation isn't jittery on irregular sample rates. Range [0.30, 0.85]
+    // stays inside the renderer's existing pressureFactor mapping
+    // (0.45 + p*0.60), giving a stroke that breathes 0.63→0.96 of baseWidth
+    // before the velocity factor is applied — very close to a stylus feel.
+    if (_synthPressure && _points.isNotEmpty) {
+      final last = _points.last;
+      final dx2 = pos.dx - last.x;
+      final dy2 = pos.dy - last.y;
+      final v = sqrt(dx2 * dx2 + dy2 * dy2);
+      // Page-units per sample. ~8 page-units/sample = "fast scribble" → thin.
+      final target = (0.85 - (v / 8.0).clamp(0.0, 0.55)).clamp(0.30, 0.85);
+      _synthEma = _synthEma * 0.7 + target * 0.3;
+      sp = _synthEma;
     }
 
     _points.add(StrokePoint(x: sx, y: sy, pressure: sp,

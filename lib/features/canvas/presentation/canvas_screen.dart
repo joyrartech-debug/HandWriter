@@ -1028,9 +1028,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       return;
     }
 
+    // For pen/brush/highlighter only: pass the RAW pressure (incl. 0 for
+    // mouse/touchpad) to the fast notifier. The notifier synthesises a
+    // velocity-derived pseudo-pressure when the device reports no pressure,
+    // restoring stroke modulation that's otherwise stuck at the 0.5
+    // fallback. The provider keeps the 0.5 fallback for its own bookkeeping
+    // (its activeStroke is overwritten on commit by the notifier's points).
+    final rawPressureForPen = event.pressure;
     ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
-    // Also push first point to fast notifier (only for pen/brush/highlighter)
-    _activeStrokeNotifier.start(pagePos, pressure);
+    _activeStrokeNotifier.start(pagePos, rawPressureForPen);
     _lastStrokeActivity = DateTime.now();
     _lastHoldCheckPos = pagePos;
   }
@@ -1085,6 +1091,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
     final pressure = event.pressure > 0 ? event.pressure : 0.5;
+    // Pass raw pressure (incl. 0) to the active-stroke notifier so it can
+    // synth pseudo-pressure from velocity for non-pressure devices
+    // (mouse/touchpad). Stylus events always report > 0 and pass through.
+    final rawPressureForPen = event.pressure;
 
     if (tool == CanvasTool.lasso) {
       _onLassoPointerMove(pagePos);
@@ -1112,7 +1122,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         return;
       }
 
-      _activeStrokeNotifier.addPoint(pagePos, pressure);
+      _activeStrokeNotifier.addPoint(pagePos, rawPressureForPen);
       _lastStrokeActivity = DateTime.now();
 
       // Reset hold-to-recognize timer (GoodNotes-style: recognize when user pauses)
