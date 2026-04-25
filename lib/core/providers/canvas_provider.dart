@@ -155,6 +155,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// again.
   bool _pullHadFailures = false;
 
+  /// Per-page consecutive failure count. Reset to 0 whenever a download
+  /// succeeds. Used by the cooldown logic in [_pullFromDeltaDownload] to
+  /// stop hammering the server with the same dead-end pages every 2 s.
+  final Map<String, int> _pageFailureCount = {};
+
+  /// Cooldown deadline per page. While `now() < deadline` the page is
+  /// excluded from `pagesToPull` so we don't spin the same 8 broken
+  /// downloads forever (~ every 5-10 s) burning battery and bandwidth.
+  /// Cleared once the deadline passes (one more attempt is allowed).
+  final Map<String, DateTime> _pageFailureCooldownUntil = {};
+
 
   /// True while a multi-step bulk operation (e.g. PDF import) is in
   /// progress. Pull cycles are suppressed so an intervening network
@@ -385,6 +396,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (_etagNotebookId != metadata.id) {
       _remoteMetaEtag = null;
       _lastPageEtags = {};
+      _pageFailureCount.clear();
+      _pageFailureCooldownUntil.clear();
       _etagNotebookId = metadata.id;
     }
 
@@ -6005,6 +6018,38 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final completed = <String>[];
     final failedPages = <String>[];
     var completedCount = 0;
+
+    // ── Per-page failure cooldown (P2) ──
+    //
+    // Skip pages that have failed [maxConsecutiveFailures] times in a row
+    // until [pageCooldown] has elapsed since the last failure. Without this
+    // the same 8 broken downloads (e.g. server-side gone, permission glitch,
+    // bad bytes) re-fired every 2 s pull cycle forever, draining battery
+    // and the IOClient connection pool. After the cooldown a single retry
+    // is allowed; if it succeeds counters reset, otherwise the cooldown
+    // is reapplied.
+    const maxConsecutiveFailures = 5;
+    const pageCooldown = Duration(seconds: 60);
+    final now = DateTime.now();
+    final cooledDown = <String>[];
+    pagesToPull.removeWhere((fn) {
+      final until = _pageFailureCooldownUntil[fn];
+      if (until != null && now.isBefore(until)) {
+        cooledDown.add(fn);
+        return true;
+      }
+      return false;
+    });
+    if (cooledDown.isNotEmpty) {
+      _pullHadFailures = true; // keep meta etag stale until they recover
+      unawaited(CrashLogger.append(
+        '[Pull] cooldown skip: ${cooledDown.length} pages '
+        '(sample: ${cooledDown.take(3).join(",")}'
+        '${cooledDown.length > 3 ? "..." : ""}) — '
+        'will retry after cooldown expires',
+      ));
+    }
+    // Refresh totals after cooldown filter so the progress pill is honest.
     pullProgress.value = (done: 0, total: pagesToPull.length);
 
     Future<void> pullOne(String pageFileName) async {
@@ -6020,6 +6065,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           completedCount++;
           pullProgress.value =
               (done: completedCount, total: pagesToPull.length);
+          // Success: reset failure tracking for this page.
+          _pageFailureCount.remove(pageFileName);
+          _pageFailureCooldownUntil.remove(pageFileName);
           return;
         } catch (e) {
           lastError = e;
@@ -6033,6 +6081,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
       failedPages.add(pageFileName);
       _pullHadFailures = true;
+      // Track consecutive failures so we can apply a cooldown next pull.
+      final fc = (_pageFailureCount[pageFileName] ?? 0) + 1;
+      _pageFailureCount[pageFileName] = fc;
+      if (fc >= maxConsecutiveFailures) {
+        _pageFailureCooldownUntil[pageFileName] =
+            DateTime.now().add(pageCooldown);
+        print('[Canvas] Page $pageFileName failed $fc times — '
+            'applying ${pageCooldown.inSeconds}s cooldown');
+      }
       print('[Canvas] Failed to pull page $pageFileName '
           'after $maxAttempts attempts: $lastError');
     }
@@ -6054,14 +6111,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     ));
     // Evict per-page ETags for any download that failed so the next pull
     // re-attempts them; we must NOT advance _lastPageEtags for pages we
-    // didn't actually receive.
-    if (failedPages.isNotEmpty) {
+    // didn't actually receive. Also evict pages we skipped due to the
+    // cooldown — they still haven't been received either.
+    if (failedPages.isNotEmpty || cooledDown.isNotEmpty) {
+      remotePageEtags = Map.of(remotePageEtags);
       for (final fn in failedPages) {
         // Keep the previous ETag we had (if any) so the "changed" comparison
         // still picks this page up next time the ETag actually changes again,
         // but ensure the new remotePageEtags entry for this file does NOT
         // make it into _lastPageEtags below.
-        remotePageEtags = Map.of(remotePageEtags)..remove(fn);
+        remotePageEtags.remove(fn);
+      }
+      for (final fn in cooledDown) {
+        remotePageEtags.remove(fn);
       }
     }
 
