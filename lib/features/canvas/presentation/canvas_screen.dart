@@ -1331,6 +1331,36 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _isDraggingSelection = false;
     _holdRecognizeTimer?.cancel();
     _shapeRecognizedDuringHold = false;
+    // ── Stroke-break defense ──
+    //
+    // If a stylus PointerCancel arrives while we already have meaningful
+    // points buffered, COMMIT the partial stroke instead of discarding it.
+    // This way an unexpected cancel (gesture arena race we didn't catch,
+    // iPadOS palm-rejection misfire on the pen, transient Pencil
+    // disconnect, app briefly losing focus) still leaves the user's mark
+    // on the page rather than producing a visible mid-letter break. The
+    // next pointer event simply starts a fresh stroke. <2 points means
+    // the stroke is effectively a tap and is safe to discard.
+    final isStylusCancel = event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus;
+    if (isStylusCancel &&
+        _activeStrokeNotifier.isActive &&
+        _activeStrokeNotifier.points.length >= 2) {
+      final points = List<StrokePoint>.from(_activeStrokeNotifier.points);
+      _activeStrokeNotifier.clear();
+      ref.read(canvasProvider.notifier).commitAndEndStroke(points);
+      _markStrokeEnded('pointerCancel.committedStylus');
+      _strokeDbg('CANCEL_RESCUED kind=${event.kind.name} pts=${points.length}');
+      // Restore barrel button state if needed before returning
+      if (_barrelButtonErasing) {
+        _barrelButtonErasing = false;
+        if (_barrelButtonPreviousTool != null) {
+          ref.read(canvasProvider.notifier).setTool(_barrelButtonPreviousTool!);
+          _barrelButtonPreviousTool = null;
+        }
+      }
+      return;
+    }
     // Cancel any in-progress stroke or lasso
     if (_activeStrokeNotifier.isActive) {
       _activeStrokeNotifier.clear();
