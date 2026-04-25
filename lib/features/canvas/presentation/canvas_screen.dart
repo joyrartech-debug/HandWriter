@@ -116,7 +116,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   /// Flush a deferred stylus commit immediately (timer fired, or another
-  /// code path needs the stroke to be persisted right now).
+  /// code path needs the stroke to be persisted right now). Commits to
+  /// provider state THEN clears the live notifier so the rendered stroke
+  /// transitions seamlessly from "live (notifier)" to "committed (state
+  /// strokes)" inside the same frame — no flicker.
   void _flushDeferredCommit() {
     final pts = _deferredCommitPoints;
     if (pts == null) return;
@@ -126,6 +129,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _deferredCommitTimer?.cancel();
     _deferredCommitTimer = null;
     ref.read(canvasProvider.notifier).commitAndEndStroke(pts);
+    _activeStrokeNotifier.clear();
     _markStrokeEnded('pointerUp.commit');
   }
 
@@ -238,7 +242,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     WidgetsBinding.instance.removeObserver(this);
     // Flush any pending deferred stylus commit before tearing down so a
     // partial stroke isn't lost on screen close. Cancel the timer first
-    // since dispose is the terminal callsite.
+    // since dispose is the terminal callsite. Notifier clear happens in
+    // the dispose() call below regardless, so we just need to push the
+    // points into provider state.
     _deferredCommitTimer?.cancel();
     _deferredCommitTimer = null;
     if (_deferredCommitPoints != null) {
@@ -855,12 +861,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       //
       // If we just deferred a commit, see if this DOWN is close enough in
       // time and space to be the resumption of the same stroke. If so,
-      // cancel the deferred commit, restore the buffered points into the
-      // active notifier, and skip the rest of the DOWN handling — the
-      // next pointer-move will simply append to the existing stroke.
-      // Without this iPad / Apple Pencil produces visible mid-letter
-      // breaks because the OS occasionally emits a spurious UP+DOWN pair
-      // (sample dropout / pressure threshold / pointer rebatching).
+      // cancel the deferred commit and skip the rest of the DOWN handling
+      // — the notifier is already active with the buffered points (we
+      // intentionally never cleared it on PointerUp), so the next move
+      // event simply appends to the existing live stroke. Without this
+      // iPad / Apple Pencil produces visible mid-letter breaks because
+      // the OS occasionally emits a spurious UP+DOWN pair (sample
+      // dropout / pressure threshold / pointer rebatching).
       final deferredPts = _deferredCommitPoints;
       if (deferredPts != null && _deferredCommitAt != null && _deferredCommitLastScreenPos != null) {
         final defGapMs = now.difference(_deferredCommitAt!).inMilliseconds;
@@ -871,11 +878,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           _deferredCommitPoints = null;
           _deferredCommitAt = null;
           _deferredCommitLastScreenPos = null;
-          _activeStrokeNotifier.restoreActive(deferredPts);
           _strokeDbg(
             'CONTINUATION p=${event.pointer} '
             'gap=${defGapMs}ms dist=${defDist.toStringAsFixed(1)}px '
-            'restoredPts=${deferredPts.length}',
+            'liveStrokePts=${_activeStrokeNotifier.points.length}',
           );
           _stylusDown = true;
           _cancelLongPressTimer();
@@ -1373,8 +1379,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // Commit fast notifier points and finalize in one go to avoid
     // an intermediate render frame showing the raw points (line stretching).
     if (_activeStrokeNotifier.isActive && _activeStrokeNotifier.points.isNotEmpty) {
-      final points = List<StrokePoint>.from(_activeStrokeNotifier.points);
-      _activeStrokeNotifier.clear();
       // ── Stroke break defense ──
       //
       // For stylus (Apple Pencil on iPad), defer the commit by
@@ -1384,15 +1388,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       // committed as a separate stroke and the user sees a mid-letter
       // break. If a fresh stylus DOWN arrives in the defer window close
       // to this end position, _onPointerDown resumes the same stroke
-      // (see continuation block there). Otherwise the timer fires and
-      // the commit happens normally.
+      // (notifier is kept active during defer; continuation just cancels
+      // the timer). Otherwise the timer fires and commits normally
+      // (notifier is cleared inside _flushDeferredCommit, in the same
+      // frame as the commit so the rendered stroke does not blink).
       //
       // For non-stylus (mouse/touchpad/touch) commit immediately as
       // before — the bug is iPad-specific and adding latency on PC
       // would be a regression.
       if (event.kind == PointerDeviceKind.stylus ||
           event.kind == PointerDeviceKind.invertedStylus) {
-        _deferredCommitPoints = points;
+        // Snapshot points (notifier stays active so the rendered live
+        // stroke remains on screen during the defer window).
+        _deferredCommitPoints = List<StrokePoint>.from(_activeStrokeNotifier.points);
         _deferredCommitAt = DateTime.now();
         _deferredCommitLastScreenPos = event.position;
         _deferredCommitTimer?.cancel();
@@ -1401,6 +1409,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           _flushDeferredCommit,
         );
       } else {
+        final points = List<StrokePoint>.from(_activeStrokeNotifier.points);
+        _activeStrokeNotifier.clear();
         ref.read(canvasProvider.notifier).commitAndEndStroke(points);
         _markStrokeEnded('pointerUp.commit');
       }
