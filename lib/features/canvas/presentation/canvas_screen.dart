@@ -2260,6 +2260,31 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                     }
                   },
                   child: GestureDetector(
+                    // ── Stroke-break fix ──
+                    //
+                    // Restrict the inner ScaleGestureRecognizer (and DoubleTap)
+                    // to non-stylus pointers. With stylus included, the
+                    // recognizer joins Flutter's gesture arena for every pen
+                    // pointer; once the cumulative pen movement exceeds the
+                    // pan slop (~36 logical px for stylus), the recognizer
+                    // resolves `accepted` even with a single pointer, which
+                    // sends `PointerCancel(stylus)` to the surrounding
+                    // Listener. _onPointerCancel then tears down the active
+                    // stroke mid-letter — the user perceives this as the pen
+                    // suddenly "lifting" and a new stroke starting at the
+                    // same place ("stroke break mid-pen-down" on iPad).
+                    //
+                    // Pinch-to-zoom on iPad still works (touch+touch), and
+                    // trackpad pinch on desktop still works (trackpad). The
+                    // _onScale* callbacks already early-return on `_stylusDown`
+                    // for safety, but that guard only suppresses the callback
+                    // body — not the arena claim. supportedDevices is the
+                    // only way to keep the pen out of the arena entirely.
+                    supportedDevices: const {
+                      PointerDeviceKind.touch,
+                      PointerDeviceKind.mouse,
+                      PointerDeviceKind.trackpad,
+                    },
                     onScaleStart: _onScaleStart,
                     onScaleUpdate: _onScaleUpdate,
                     // Double-tap toggles zoom-to-fit <-> default 2.0x zoom.
