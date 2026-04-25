@@ -84,6 +84,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // Track whether the stylus is physically touching the screen right now
   bool _stylusDown = false;
 
+  // ── Stroke break debug ──
+  // Records when the previous stroke finalized (commit / end / cancel).
+  // On next stylus DOWN, gap < 200 ms is flagged as a likely break event
+  // so the iPad-side log can pinpoint who is tearing strokes mid-pen-down.
+  // Helper [_strokeDbg] writes a tagged line to CrashLogger; only DOWN /
+  // UP / CANCEL are logged (not MOVE) to keep the log readable.
+  DateTime? _strokeEndedAt;
+  String _lastStrokeEndReason = 'never';
+
+  void _strokeDbg(String msg) {
+    CrashLogger.append('[StrokeDbg] $msg');
+  }
+
+  void _markStrokeEnded(String reason) {
+    _strokeEndedAt = DateTime.now();
+    _lastStrokeEndReason = reason;
+  }
+
   // Double-tap detection for element selection
   DateTime _lastTapTime = DateTime(0);
   Offset _lastTapPos = Offset.zero;
@@ -774,6 +792,22 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Track stylus presence so we can suppress palm-triggered long-press
     if (event.kind == PointerDeviceKind.stylus || event.kind == PointerDeviceKind.invertedStylus) {
+      // Debug: log every stylus-down with the gap from the previous stroke
+      // end. A short gap (<200 ms) right after a non-UP end (cancel / commit
+      // mid-stroke) is the smoking gun for a "stroke break".
+      final now = DateTime.now();
+      final gapMs = _strokeEndedAt == null
+          ? -1
+          : now.difference(_strokeEndedAt!).inMilliseconds;
+      final isBreakSusp = gapMs >= 0 && gapMs < 200 && _lastStrokeEndReason != 'pointerUp.commit';
+      _strokeDbg(
+        'DOWN stylus p=${event.pointer} t=${event.timeStamp.inMilliseconds}ms '
+        'gap=${gapMs}ms prevEnd=$_lastStrokeEndReason '
+        'tool=${state.currentTool.name} '
+        'active=${_activeStrokeNotifier.isActive} '
+        'activePointers=$_activePointers'
+        '${isBreakSusp ? " BREAK_SUSPECTED" : ""}',
+      );
       _stylusDown = true;
       _cancelLongPressTimer(); // kill any pending palm long-press immediately
     }
@@ -1178,6 +1212,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Clear stylus tracking when stylus lifts
     if (event.kind == PointerDeviceKind.stylus || event.kind == PointerDeviceKind.invertedStylus) {
+      _strokeDbg(
+        'UP stylus p=${event.pointer} t=${event.timeStamp.inMilliseconds}ms '
+        'active=${_activeStrokeNotifier.isActive} '
+        'pts=${_activeStrokeNotifier.points.length} '
+        'multiTouch=$wasMultiTouch '
+        'activePointers=$_activePointers',
+      );
       _stylusDown = false;
     }
 
@@ -1188,6 +1229,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     if (_barrelButtonErasing) {
       _barrelButtonErasing = false;
       ref.read(canvasProvider.notifier).endStroke();
+      _markStrokeEnded('pointerUp.barrelEnd');
       if (_barrelButtonPreviousTool != null) {
         ref.read(canvasProvider.notifier).setTool(_barrelButtonPreviousTool!);
         _barrelButtonPreviousTool = null;
@@ -1225,6 +1267,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       _shapeRecognizedDuringHold = false;
       _activeStrokeNotifier.clear();
       ref.read(canvasProvider.notifier).commitRecognizedShape();
+      _markStrokeEnded('pointerUp.shapeCommit');
       return;
     }
     _shapeRecognizedDuringHold = false;
@@ -1232,6 +1275,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // Shape adjustment mode: commit the adjusted shape
     if (state.isAdjustingRecognized && state.recognizedShape != null) {
       ref.read(canvasProvider.notifier).commitRecognizedShape();
+      _markStrokeEnded('pointerUp.shapeAdjust');
       return;
     }
 
@@ -1255,14 +1299,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final points = List<StrokePoint>.from(_activeStrokeNotifier.points);
       _activeStrokeNotifier.clear();
       ref.read(canvasProvider.notifier).commitAndEndStroke(points);
+      _markStrokeEnded('pointerUp.commit');
     } else {
       _activeStrokeNotifier.clear();
       ref.read(canvasProvider.notifier).endStroke();
+      _markStrokeEnded('pointerUp.endEmpty');
     }
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
     _activePointers = max(0, _activePointers - 1);
+    _strokeDbg(
+      'CANCEL kind=${event.kind.name} p=${event.pointer} '
+      't=${event.timeStamp.inMilliseconds}ms '
+      'stylusDown=$_stylusDown active=${_activeStrokeNotifier.isActive} '
+      'pts=${_activeStrokeNotifier.points.length} '
+      'activePointers=$_activePointers',
+    );
     // If iOS palm-rejection cancels a touch pointer while the stylus is
     // actively drawing, DO NOT tear down the stylus stroke — the pen is
     // still making a valid mark. Only reset touch-specific gesture state
@@ -1282,6 +1335,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     if (_activeStrokeNotifier.isActive) {
       _activeStrokeNotifier.clear();
       ref.read(canvasProvider.notifier).cancelStroke();
+      _markStrokeEnded('pointerCancel.stroke');
     }
     if (_lassoPathNotifier.isActive) {
       _lassoPathNotifier.clear();
