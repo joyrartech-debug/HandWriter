@@ -1918,7 +1918,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           final t = j / (count - 1);
           final raw = Offset(p1.dx + (p2.dx - p1.dx) * t, p1.dy + (p2.dy - p1.dy) * t);
           final rotated = rotatePoint(raw);
-          sampled.add(StrokePoint(x: rotated.dx, y: rotated.dy, pressure: 0.5));
+          sampled.add(StrokePoint(x: rotated.dx, y: rotated.dy, pressure: 1.0));
         }
       }
       if (sampled.length >= 2) result.add(sampled);
@@ -2088,7 +2088,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
                   zIndex: sh.zIndex,
                   data: StrokeData(
                     points: seg,
-                    toolType: 'pen',
+                    toolType: 'ballpoint',
                     color: sh.data.strokeColor,
                     baseWidth: sh.data.strokeWidth,
                     isHighlighter: false,
@@ -3669,7 +3669,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   // ── Image insertion ──
 
-  void addImageElement(Offset position, String fileName, Uint8List bytes, double width, double height) {
+  void addImageElement(Offset position, String fileName, Uint8List bytes, double width, double height, {bool locked = false}) {
     if (state == null) return;
     final s = state!;
     final page = s.currentPage;
@@ -3686,6 +3686,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         x: position.dx, y: position.dy,
         width: width, height: height,
         assetPath: assetId,
+        locked: locked,
       ),
     );
 
@@ -7100,7 +7101,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     return result;
   }
 
-  static const int _encodeYieldBatch = 25;
+  static const int _encodeYieldBatch = 3;
 }
 
 /// Parameters for the isolate packaging function.
