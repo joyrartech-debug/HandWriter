@@ -1962,6 +1962,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           png,
           imgW,
           imgH,
+          locked: true,
         );
 
         processed++;
