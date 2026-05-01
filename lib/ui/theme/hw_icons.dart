@@ -396,6 +396,9 @@ Path _parsePath(String d) {
   final tokens = RegExp(r'([a-zA-Z])|(-?\d*\.?\d+)').allMatches(d);
   final list = tokens.map((m) => m.group(0)!).toList();
   double cx = 0, cy = 0;
+  // Last cubic control point absolute coords — used by smooth cubic (S/s)
+  // to reflect the previous control point. Null until the first C/c/S/s.
+  double? lastCx2, lastCy2;
   String cmd = '';
   int i = 0;
   double next() => double.parse(list[i++]);
@@ -474,8 +477,53 @@ Path _parsePath(String d) {
         final x1 = next(), y1 = next(), x2 = next(), y2 = next(),
             x = next(), y = next();
         path.cubicTo(x1, y1, x2, y2, x, y);
+        lastCx2 = x2;
+        lastCy2 = y2;
         cx = x;
         cy = y;
+        break;
+      case 'c':
+        // Relative cubic: all 6 params are deltas from current point.
+        final x1 = cx + next(), y1 = cy + next();
+        final x2 = cx + next(), y2 = cy + next();
+        final nx = cx + next(), ny = cy + next();
+        path.cubicTo(x1, y1, x2, y2, nx, ny);
+        lastCx2 = x2;
+        lastCy2 = y2;
+        cx = nx;
+        cy = ny;
+        break;
+      case 'S':
+        // Smooth cubic absolute: first ctrl point is reflection of
+        // previous (lastCx2, lastCy2) around current point.
+        {
+          final x2 = next(), y2 = next(), x = next(), y = next();
+          final lcx = lastCx2;
+          final lcy = lastCy2;
+          final x1 = lcx != null ? 2 * cx - lcx : cx;
+          final y1 = lcy != null ? 2 * cy - lcy : cy;
+          path.cubicTo(x1, y1, x2, y2, x, y);
+          lastCx2 = x2;
+          lastCy2 = y2;
+          cx = x;
+          cy = y;
+        }
+        break;
+      case 's':
+        // Smooth cubic relative.
+        {
+          final x2 = cx + next(), y2 = cy + next();
+          final nx = cx + next(), ny = cy + next();
+          final lcx = lastCx2;
+          final lcy = lastCy2;
+          final x1 = lcx != null ? 2 * cx - lcx : cx;
+          final y1 = lcy != null ? 2 * cy - lcy : cy;
+          path.cubicTo(x1, y1, x2, y2, nx, ny);
+          lastCx2 = x2;
+          lastCy2 = y2;
+          cx = nx;
+          cy = ny;
+        }
         break;
       case 'A':
         // 7 params: rx, ry, rot, large, sweep, x, y. Approximate with arcTo.
@@ -490,10 +538,31 @@ Path _parsePath(String d) {
             clockwise: sweep);
         cx = x;
         cy = y;
+        // Arcs reset the smooth-cubic anchor.
+        lastCx2 = null;
+        lastCy2 = null;
+        break;
+      case 'a':
+        // Relative arc: same 7 params but x,y are deltas.
+        final rx = next(), ry = next();
+        next(); // x-axis-rotation, ignored
+        final large = next() != 0;
+        final sweep = next() != 0;
+        final dx = next(), dy = next();
+        cx += dx;
+        cy += dy;
+        path.arcToPoint(Offset(cx, cy),
+            radius: Radius.elliptical(rx, ry),
+            largeArc: large,
+            clockwise: sweep);
+        lastCx2 = null;
+        lastCy2 = null;
         break;
       case 'Z':
       case 'z':
         path.close();
+        lastCx2 = null;
+        lastCy2 = null;
         break;
       default:
         i++;

@@ -624,9 +624,15 @@ class _StrokePreviewPainter extends CustomPainter {
 }
 
 /// Bottom strip with chapter label + horizontally scrolling page thumbnails.
-class HwBottomPageStrip extends StatelessWidget {
+///
+/// Shows ALL pages of the notebook (lazy via builder), auto-scrolls to keep
+/// the current page roughly centered, and renders each thumbnail with a
+/// mini sketch (3 ruled lines) so it actually reads as a "page" instead of
+/// an empty box. Real rendered thumbnails (via ThumbnailService) can be
+/// plugged in later by passing a thumbnail-builder callback.
+class HwBottomPageStrip extends StatefulWidget {
   final String? chapterLabel;
-  final int currentPage;
+  final int currentPage; // 1-based
   final int totalPages;
   final ValueChanged<int> onPageTap;
   final VoidCallback onAllPagesTap;
@@ -641,28 +647,79 @@ class HwBottomPageStrip extends StatelessWidget {
   });
 
   @override
+  State<HwBottomPageStrip> createState() => _HwBottomPageStripState();
+}
+
+class _HwBottomPageStripState extends State<HwBottomPageStrip> {
+  static const double _itemWidth = 50;
+  static const double _itemSpacing = 8;
+  static const double _stride = _itemWidth + _itemSpacing;
+
+  final ScrollController _ctrl = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToCurrent());
+  }
+
+  @override
+  void didUpdateWidget(covariant HwBottomPageStrip old) {
+    super.didUpdateWidget(old);
+    if (old.currentPage != widget.currentPage ||
+        old.totalPages != widget.totalPages) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToCurrent());
+    }
+  }
+
+  void _scrollToCurrent() {
+    if (!_ctrl.hasClients) return;
+    final viewport = _ctrl.position.viewportDimension;
+    if (viewport <= 0) return;
+    // Center the current page within the viewport when possible.
+    final desired =
+        (widget.currentPage - 1) * _stride - (viewport - _itemWidth) / 2;
+    final clamped =
+        desired.clamp(0.0, _ctrl.position.maxScrollExtent).toDouble();
+    _ctrl.animateTo(
+      clamped,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final p = HwThemeScope.of(context);
-    final visibleStart = (currentPage - 6).clamp(1, totalPages);
-    final count = (totalPages - visibleStart + 1).clamp(0, 18);
-
     return Container(
-      height: 76,
+      height: 84,
       decoration: BoxDecoration(
         color: p.paper0,
         border: Border(top: BorderSide(color: p.paper3)),
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
       child: Row(
         children: [
-          if (chapterLabel != null && chapterLabel!.isNotEmpty) ...[
-            Text(
-              chapterLabel!.toUpperCase(),
-              style: TextStyle(
-                fontSize: 11,
-                color: p.ink2,
-                letterSpacing: 0.6,
-                fontWeight: FontWeight.w600,
+          if (widget.chapterLabel != null &&
+              widget.chapterLabel!.isNotEmpty) ...[
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 160),
+              child: Text(
+                widget.chapterLabel!.toUpperCase(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: p.ink2,
+                  letterSpacing: 0.6,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
             const SizedBox(width: 12),
@@ -670,53 +727,125 @@ class HwBottomPageStrip extends StatelessWidget {
             const SizedBox(width: 12),
           ],
           Expanded(
-            child: ListView.separated(
-              scrollDirection: Axis.horizontal,
-              itemCount: count,
-              separatorBuilder: (_, __) => const SizedBox(width: 6),
-              itemBuilder: (_, i) {
-                final n = visibleStart + i;
-                final selected = n == currentPage;
-                return MouseRegion(
-                  cursor: SystemMouseCursors.click,
-                  child: GestureDetector(
-                    onTap: () => onPageTap(n),
-                    child: Container(
-                      width: 38,
-                      decoration: BoxDecoration(
-                        color: p.paper1,
-                        border: Border.all(
-                          color: selected ? p.accent : p.paper3,
-                          width: selected ? 2 : 1,
-                        ),
-                        borderRadius: BorderRadius.circular(3),
-                        boxShadow:
-                            selected ? hwShadow1(p.brightness) : null,
-                      ),
-                      alignment: Alignment.bottomCenter,
-                      padding: const EdgeInsets.only(bottom: 2),
-                      child: Text(
-                        n.toString(),
-                        style: TextStyle(
-                          fontSize: 9,
-                          color: selected ? p.accent : p.ink3,
-                          fontFamily: HwTheme.fontMono,
-                        ),
-                      ),
-                    ),
+            child: widget.totalPages <= 0
+                ? Center(
+                    child: Text('Nessuna pagina',
+                        style:
+                            TextStyle(fontSize: 12, color: p.ink2)))
+                : ListView.separated(
+                    controller: _ctrl,
+                    scrollDirection: Axis.horizontal,
+                    itemCount: widget.totalPages,
+                    separatorBuilder: (_, __) =>
+                        const SizedBox(width: _itemSpacing),
+                    itemBuilder: (_, i) {
+                      final n = i + 1;
+                      final selected = n == widget.currentPage;
+                      return _PageThumb(
+                        number: n,
+                        selected: selected,
+                        onTap: () => widget.onPageTap(n),
+                      );
+                    },
                   ),
-                );
-              },
-            ),
           ),
           const SizedBox(width: 12),
           HwButton(
             leading: const HwIcon('grid', size: 14),
             label: 'Tutte le pagine',
-            onPressed: onAllPagesTap,
+            onPressed: widget.onAllPagesTap,
           ),
         ],
       ),
     );
   }
+}
+
+/// Single thumbnail in the bottom strip — renders a mini ruled "page" so the
+/// strip reads as content rather than empty boxes.
+class _PageThumb extends StatelessWidget {
+  final int number;
+  final bool selected;
+  final VoidCallback onTap;
+  const _PageThumb({
+    required this.number,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 140),
+          width: 50,
+          decoration: BoxDecoration(
+            color: p.paper0,
+            border: Border.all(
+              color: selected ? p.accent : p.paper3,
+              width: selected ? 1.8 : 1,
+            ),
+            borderRadius: BorderRadius.circular(3),
+            boxShadow: selected ? hwShadow1(p.brightness) : null,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(5, 5, 5, 2),
+                  child: CustomPaint(
+                    painter: _MiniPagePainter(
+                      lineColor: p.ink3.withValues(alpha: 0.5),
+                    ),
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(vertical: 1),
+                alignment: Alignment.center,
+                color: selected ? p.accent : Colors.transparent,
+                child: Text(
+                  number.toString(),
+                  style: TextStyle(
+                    fontSize: 9,
+                    color: selected ? p.paper0 : p.ink3,
+                    fontFamily: HwTheme.fontMono,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniPagePainter extends CustomPainter {
+  final Color lineColor;
+  _MiniPagePainter({required this.lineColor});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = lineColor
+      ..strokeWidth = 1
+      ..strokeCap = StrokeCap.round;
+    // 4 short ruled lines of decreasing length — mimics a written page.
+    final lengths = [size.width * 0.95, size.width * 0.8, size.width * 0.6, size.width * 0.4];
+    final ySpacing = size.height / (lengths.length + 1);
+    for (int i = 0; i < lengths.length; i++) {
+      final y = ySpacing * (i + 1);
+      canvas.drawLine(Offset(0, y), Offset(lengths[i], y), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_MiniPagePainter old) => old.lineColor != lineColor;
 }
