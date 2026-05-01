@@ -20,7 +20,6 @@ import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart
 import 'package:handwriter/core/providers/pending_import_provider.dart';
 import 'package:handwriter/core/providers/preset_colors_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
-import 'package:handwriter/features/canvas/presentation/canvas_toolbar.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
 import 'package:handwriter/features/canvas/presentation/remote_changes_banner.dart';
 import 'package:handwriter/features/canvas/presentation/conflict_resolution_screen.dart';
@@ -32,6 +31,9 @@ import 'package:share_plus/share_plus.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_painter_notifiers.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_crop_dialog.dart';
 import 'package:handwriter/features/canvas/presentation/page_manager_sheet.dart';
+import 'package:handwriter/ui/editor/hw_editor_chrome.dart';
+import 'package:handwriter/ui/primitives/sync_badge.dart';
+import 'package:handwriter/ui/theme/hw_theme.dart';
 
 enum _ExportScope { currentPage, currentChapter, entireNotebook }
 
@@ -72,6 +74,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // Stylus barrel button temporary eraser
   bool _barrelButtonErasing = false;
   CanvasTool? _barrelButtonPreviousTool;
+
+  // ── New chrome state (warm-paper redesign) ─────────────────────
+  bool _popupOpen = false;
+  final DockPosition _dockPosition = DockPosition.floating;
 
   // Long-press context menu for touch
   Timer? _longPressTimer;
@@ -2175,6 +2181,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       );
     }
 
+    final palette = HwThemeScope.of(context);
+    final notifier = ref.read(canvasProvider.notifier);
+    final presetColors = ref.watch(presetColorsProvider);
+    final activeColor = Color(canvasState.toolSettings.color);
+
     return PopScope(
       canPop: false,
       onPopInvokedWithResult: (didPop, _) async {
@@ -2188,71 +2199,113 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         autofocus: true,
         onKeyEvent: _handleKeyEvent,
         child: Scaffold(
-          backgroundColor: const Color(0xFFE8E8E8),
+          backgroundColor: palette.paper1,
           body: Stack(
             children: [
               Column(
                 children: [
-                  _buildTopBar(canvasState),
-                  CanvasToolbar(
-                currentTool: canvasState.currentTool,
-                toolSettings: canvasState.toolSettings,
-                canUndo: ref.read(canvasProvider.notifier).canUndo,
-                canRedo: ref.read(canvasProvider.notifier).canRedo,
-                showToolOptions: canvasState.showToolOptions,
-                currentPaperType: canvasState.currentPaperType,
-                lassoSelection: canvasState.lassoSelection,
-                onToolChanged: (tool) => ref.read(canvasProvider.notifier).setTool(tool),
-                onSettingsChanged: (s) => ref.read(canvasProvider.notifier).setToolSettings(s),
-                onUndo: () => ref.read(canvasProvider.notifier).undo(),
-                onRedo: () => ref.read(canvasProvider.notifier).redo(),
-                onToggleOptions: () => ref.read(canvasProvider.notifier).toggleToolOptions(),
-                onPaperTypeChanged: (t) => ref.read(canvasProvider.notifier).setPaperType(t),
-                onDeleteSelection: () => ref.read(canvasProvider.notifier).deleteSelection(),
-                onClearSelection: () => ref.read(canvasProvider.notifier).clearSelection(),
-                onInsertImage: () => _pickAndInsertImage(const Offset(100, 100)),
-                onCopySelection: () {
-                  ref.read(canvasProvider.notifier).copySelection();
-                  _toast('Selezione copiata');
-                },
-                onCutSelection: () {
-                  ref.read(canvasProvider.notifier).cutSelection();
-                  _toast('Selezione tagliata');
-                },
-                onPasteSelection: canvasState.clipboard != null ? () => ref.read(canvasProvider.notifier).paste() : null,
-                onDuplicateSelection: () {
-                  ref.read(canvasProvider.notifier).duplicateSelection();
-                  _toast('Selezione duplicata');
-                },
-                onChangeSelectionColor: (color) => ref.read(canvasProvider.notifier).changeSelectionColor(color),
-                onOpenSymbols: () {
-                  // Insert at page center (visible area)
-                  final pageW = canvasState.currentPage?.width ?? 595;
-                  final pageH = canvasState.currentPage?.height ?? 842;
-                  final visibleCenter = _toPageCoords(
-                    Offset(MediaQuery.of(context).size.width / 2, MediaQuery.of(context).size.height / 2),
-                    canvasState,
-                    MediaQuery.of(context).size,
-                  );
-                  // Clamp to page bounds
-                  final insertPos = Offset(
-                    visibleCenter.dx.clamp(50, pageW - 50),
-                    visibleCenter.dy.clamp(50, pageH - 50),
-                  );
-                  _showSymbolsDialog(insertPos);
-                },
-                onCreateSymbol: canvasState.lassoSelection != null ? () => _promptCreateSymbolFromSelection() : null,
-                symbolCount: canvasState.symbolLibraries.fold(0, (sum, l) => sum + l.symbols.length),
-                presetColors: ref.watch(presetColorsProvider),
-                onEditColorSlot: (idx, newColor) =>
-                    ref.read(presetColorsProvider.notifier).setColor(idx, newColor),
-                onMoveColorSlot: (from, to) =>
-                    ref.read(presetColorsProvider.notifier).swap(from, to),
+                  HwEditorTopBar(
+                    notebookTitle: canvasState.metadata.title,
+                    coverColor: Color(canvasState.metadata.coverColor),
+                    currentPage: canvasState.currentPageIndex + 1,
+                    totalPages: canvasState.document.pages.length,
+                    dirty: canvasState.isDirty,
+                    canUndo: notifier.canUndo,
+                    canRedo: notifier.canRedo,
+                    syncState: canvasState.isDirty
+                        ? HwSyncState.pending
+                        : HwSyncState.ok,
+                    onBack: () async {
+                      await _onWillPop();
+                    },
+                    onUndo: () => notifier.undo(),
+                    onRedo: () => notifier.redo(),
+                    onPagesTap: () => _showPageManager(canvasState),
+                    onSymbolsTap: () =>
+                        _showSymbolsDialog(_visibleCenterPagePos(canvasState)),
+                    onExportTap: () => _showExportSheet(),
+                    onMoreTap: () => _showMoreSheet(canvasState),
+                  ),
+                  Expanded(
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap: () {
+                        if (_popupOpen) setState(() => _popupOpen = false);
+                      },
+                      child: _buildCanvas(canvasState, currentPage),
+                    ),
+                  ),
+                  HwBottomPageStrip(
+                    chapterLabel: _currentChapterLabel(canvasState),
+                    currentPage: canvasState.currentPageIndex + 1,
+                    totalPages: canvasState.document.pages.length,
+                    onPageTap: (n) => notifier.goToPage(n - 1),
+                    onAllPagesTap: () => _showPageManager(canvasState),
+                  ),
+                ],
               ),
-              Expanded(child: _buildCanvas(canvasState, currentPage)),
-              _buildPageNav(canvasState),
-            ],
-          ),
+              // Floating tool dock
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 110,
+                child: Center(
+                  child: HwFloatingDock(
+                    currentTool: canvasState.currentTool,
+                    activeInkColor: activeColor,
+                    shapeGuess: canvasState.toolSettings.shapeRecognition,
+                    onShapeGuessChanged: (v) {
+                      notifier.setToolSettings(canvasState.toolSettings
+                          .copyWith(shapeRecognition: v));
+                    },
+                    onToolChanged: (t) {
+                      notifier.setTool(t);
+                      setState(() => _popupOpen = true);
+                    },
+                    onActiveTap: () =>
+                        setState(() => _popupOpen = !_popupOpen),
+                    position: _dockPosition,
+                  ),
+                ),
+              ),
+              // Tool option popup
+              if (_popupOpen)
+                Positioned(
+                  left: 0,
+                  right: 0,
+                  bottom: 170,
+                  child: Center(
+                    child: HwToolPopup(
+                      tool: canvasState.currentTool,
+                      color: activeColor,
+                      onColorChanged: (c) {
+                        notifier.setToolSettings(canvasState.toolSettings
+                            .copyWith(color: c.toARGB32()));
+                      },
+                      thickness: canvasState.toolSettings.strokeWidth,
+                      onThicknessChanged: (v) {
+                        notifier.setToolSettings(canvasState.toolSettings
+                            .copyWith(strokeWidth: v));
+                      },
+                      presetColors: presetColors
+                          .map((c) => Color(c))
+                          .toList(),
+                      eraserSize: canvasState.toolSettings.eraserSize,
+                      onEraserSizeChanged: (s) {
+                        notifier.setToolSettings(
+                            canvasState.toolSettings.copyWith(eraserSize: s));
+                      },
+                      eraserPerStroke:
+                          canvasState.currentTool == CanvasTool.eraserStroke,
+                      onEraserPerStrokeChanged: (perStroke) {
+                        notifier.setTool(perStroke
+                            ? CanvasTool.eraserStroke
+                            : CanvasTool.eraserStandard);
+                      },
+                      onClose: () => setState(() => _popupOpen = false),
+                    ),
+                  ),
+                ),
               const RemoteChangesBanner(),
               // Subtle "Sincronizzazione…" pill while a remote pull is in
               // flight — lets the user know the notebook may update shortly
@@ -2320,6 +2373,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     );
   }
 
+  // ignore: unused_element
   Widget _buildTopBar(CanvasState canvasState) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     final fg = isDark
@@ -3971,6 +4025,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     return '${ch.title} ($count ${count == 1 ? "pagina" : "pagine"})';
   }
 
+  // ignore: unused_element
   Widget _buildPageNav(CanvasState canvasState) {
     final filteredPos = canvasState.currentFilteredIndex;
     final filteredCount = canvasState.filteredPageCount;
@@ -4170,6 +4225,139 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) => PageManagerSheet(initialState: canvasState),
+    );
+  }
+
+  /// Center of the visible viewport mapped to page coordinates.
+  Offset _visibleCenterPagePos(CanvasState state) {
+    final size = MediaQuery.of(context).size;
+    final center = Offset(size.width / 2, size.height / 2);
+    final p = _toPageCoords(center, state, size);
+    final pageW = state.currentPage?.width ?? 595;
+    final pageH = state.currentPage?.height ?? 842;
+    return Offset(p.dx.clamp(50, pageW - 50), p.dy.clamp(50, pageH - 50));
+  }
+
+  /// Export bottom sheet with PDF / PNG choices.
+  void _showExportSheet() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: HwThemeScope.of(context).paper0,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Text('Esporta',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            ListTile(
+              leading: const Icon(Icons.picture_as_pdf_outlined),
+              title: const Text('Esporta come PDF'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _exportAsPdf();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.image_outlined),
+              title: const Text('Esporta come PNG'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _exportAsPng();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Misc actions: insert image / change paper / save now.
+  void _showMoreSheet(CanvasState state) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: HwThemeScope.of(context).paper0,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Text('Altro',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            ListTile(
+              leading: const Icon(Icons.image_outlined),
+              title: const Text('Inserisci immagine…'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _pickAndInsertImage(_visibleCenterPagePos(state));
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.dashboard_customize_outlined),
+              title: const Text('Cambia tipo di carta'),
+              subtitle: Text(paperTypeLabel(state.currentPaperType)),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _showPaperTypePicker(state);
+              },
+            ),
+            if (state.isDirty)
+              ListTile(
+                leading: const Icon(Icons.save_outlined),
+                title: const Text('Salva ora'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _save();
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showPaperTypePicker(CanvasState state) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: HwThemeScope.of(context).paper0,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            Text('Tipo di carta',
+                style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            for (final t in PaperType.values)
+              ListTile(
+                leading: Icon(
+                  state.currentPaperType == t
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  color: state.currentPaperType == t
+                      ? Theme.of(ctx).colorScheme.primary
+                      : null,
+                ),
+                title: Text(paperTypeLabel(t)),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  ref.read(canvasProvider.notifier).setPaperType(t);
+                },
+              ),
+          ],
+        ),
+      ),
     );
   }
   String _toolTypeString(CanvasTool tool) {

@@ -1,0 +1,722 @@
+import 'package:flutter/material.dart';
+import 'package:handwriter/core/providers/canvas_state.dart';
+import 'package:handwriter/ui/primitives/hw_button.dart';
+import 'package:handwriter/ui/primitives/sync_badge.dart';
+import 'package:handwriter/ui/theme/hw_icons.dart';
+import 'package:handwriter/ui/theme/hw_theme.dart';
+
+/// Top bar for the editor: Library back button, notebook title (with cover
+/// chip + sync badge), undo/redo, page indicator, symbols, export, more.
+class HwEditorTopBar extends StatelessWidget {
+  final String notebookTitle;
+  final Color coverColor;
+  final int currentPage;
+  final int totalPages;
+  final bool dirty;
+  final bool canUndo;
+  final bool canRedo;
+  final HwSyncState syncState;
+  final VoidCallback? onBack;
+  final VoidCallback? onUndo;
+  final VoidCallback? onRedo;
+  final VoidCallback? onPagesTap;
+  final VoidCallback? onSymbolsTap;
+  final VoidCallback? onExportTap;
+  final VoidCallback? onMoreTap;
+
+  const HwEditorTopBar({
+    super.key,
+    required this.notebookTitle,
+    required this.coverColor,
+    required this.currentPage,
+    required this.totalPages,
+    required this.dirty,
+    required this.canUndo,
+    required this.canRedo,
+    required this.syncState,
+    this.onBack,
+    this.onUndo,
+    this.onRedo,
+    this.onPagesTap,
+    this.onSymbolsTap,
+    this.onExportTap,
+    this.onMoreTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    return Container(
+      height: 52,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: BoxDecoration(
+        color: p.paper0,
+        border: Border(bottom: BorderSide(color: p.paper3)),
+      ),
+      child: Row(
+        children: [
+          HwButton(
+            leading: const HwIcon('chevron-left', size: 16),
+            label: 'Libreria',
+            onPressed: onBack,
+            tooltip: 'Torna alla libreria',
+          ),
+          const SizedBox(width: 8),
+          const HwDivider(),
+          const SizedBox(width: 12),
+          // Cover chip + title
+          Container(
+            width: 14,
+            height: 18,
+            decoration: BoxDecoration(
+              color: coverColor,
+              borderRadius: const BorderRadius.only(
+                topLeft: Radius.circular(1),
+                bottomLeft: Radius.circular(1),
+                topRight: Radius.circular(3),
+                bottomRight: Radius.circular(3),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              notebookTitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: p.ink0,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SyncBadge(state: syncState),
+          if (dirty) ...[
+            const SizedBox(width: 8),
+            const HwPill(
+              label: 'Non salvato',
+              background: Color(0x33B68A2D),
+              foreground: Color(0xFF7C5E1F),
+            ),
+          ],
+          const Spacer(),
+          HwButton.icon(
+            icon: const HwIcon('undo', size: 16),
+            tooltip: 'Annulla',
+            onPressed: canUndo ? onUndo : null,
+          ),
+          HwButton.icon(
+            icon: const HwIcon('redo', size: 16),
+            tooltip: 'Ripeti',
+            onPressed: canRedo ? onRedo : null,
+          ),
+          const SizedBox(width: 8),
+          const HwDivider(),
+          const SizedBox(width: 8),
+          HwButton(
+            leading: const HwIcon('pages', size: 16),
+            label:
+                '${currentPage.toString().padLeft(2, '0')} / $totalPages',
+            onPressed: onPagesTap,
+            tooltip: 'Tutte le pagine',
+          ),
+          const SizedBox(width: 8),
+          const HwDivider(),
+          const SizedBox(width: 8),
+          HwButton.icon(
+              icon: const HwIcon('symbol', size: 16),
+              tooltip: 'Simboli',
+              onPressed: onSymbolsTap),
+          HwButton.icon(
+              icon: const HwIcon('export', size: 16),
+              tooltip: 'Esporta',
+              onPressed: onExportTap),
+          HwButton.icon(
+              icon: const HwIcon('more', size: 16),
+              tooltip: 'Altro',
+              onPressed: onMoreTap),
+        ],
+      ),
+    );
+  }
+}
+
+enum DockPosition { floating, left, right, top }
+
+/// Floating tool dock — circular pill with all tools + shape-guess toggle.
+/// Tap a tool to select; tap again (or popOpen=true) opens the tool popup.
+class HwFloatingDock extends StatelessWidget {
+  final CanvasTool currentTool;
+  final ValueChanged<CanvasTool> onToolChanged;
+  final VoidCallback onActiveTap;
+  final Color activeInkColor;
+  final DockPosition position;
+  final bool shapeGuess;
+  final ValueChanged<bool> onShapeGuessChanged;
+
+  const HwFloatingDock({
+    super.key,
+    required this.currentTool,
+    required this.onToolChanged,
+    required this.onActiveTap,
+    required this.activeInkColor,
+    required this.shapeGuess,
+    required this.onShapeGuessChanged,
+    this.position = DockPosition.floating,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isVert =
+        position == DockPosition.left || position == DockPosition.right;
+    return Container(
+      padding: const EdgeInsets.all(6),
+      decoration: BoxDecoration(
+        color: HwThemeScope.of(context).paper0,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: HwThemeScope.of(context).paper3),
+        boxShadow: hwShadow2(HwThemeScope.of(context).brightness),
+      ),
+      child: Flex(
+        direction: isVert ? Axis.vertical : Axis.horizontal,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _toolBtn(context, CanvasTool.pen, 'pen', 'Penna · P'),
+          _toolBtn(context, CanvasTool.ballpoint, 'ballpoint', 'Ballpoint'),
+          _toolBtn(context, CanvasTool.brush, 'brush', 'Pennello · B'),
+          _toolBtn(
+              context, CanvasTool.calligraphy, 'calligraphy', 'Calligrafia'),
+          _toolBtn(context, CanvasTool.highlighter, 'highlighter',
+              'Evidenziatore'),
+          _gap(isVert, context),
+          _toolBtn(
+              context, CanvasTool.eraserStandard, 'eraser', 'Gomma · E'),
+          _toolBtn(context, CanvasTool.lasso, 'lasso', 'Lasso · L'),
+          _toolBtn(context, CanvasTool.text, 'text', 'Testo · T'),
+          _toolBtn(context, CanvasTool.shape, 'shape', 'Forma · S'),
+          _toolBtn(context, CanvasTool.pan, 'hand', 'Mano · H'),
+          _gap(isVert, context),
+          _shapeGuessBtn(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _gap(bool isVert, BuildContext context) {
+    final p = HwThemeScope.of(context);
+    return Padding(
+      padding: isVert
+          ? const EdgeInsets.symmetric(vertical: 4)
+          : const EdgeInsets.symmetric(horizontal: 4),
+      child: Container(
+        width: isVert ? 20 : 1,
+        height: isVert ? 1 : 20,
+        color: p.paper3,
+      ),
+    );
+  }
+
+  Widget _toolBtn(
+      BuildContext context, CanvasTool tool, String icon, String tooltip) {
+    final active = currentTool == tool;
+    final p = HwThemeScope.of(context);
+    final isInkTool = const {
+      CanvasTool.pen,
+      CanvasTool.ballpoint,
+      CanvasTool.brush,
+      CanvasTool.calligraphy,
+      CanvasTool.highlighter,
+    }.contains(tool);
+
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 400),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () {
+            if (active) {
+              onActiveTap();
+            } else {
+              onToolChanged(tool);
+            }
+          },
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: active ? p.ink0 : Colors.transparent,
+              shape: BoxShape.circle,
+            ),
+            child: Stack(
+              alignment: Alignment.center,
+              children: [
+                HwIcon(icon,
+                    size: 18, color: active ? p.paper0 : p.ink1),
+                // Color stripe under active ink tool
+                if (active && isInkTool)
+                  Positioned(
+                    bottom: 6,
+                    child: Container(
+                      width: 14,
+                      height: 3,
+                      decoration: BoxDecoration(
+                        color: activeInkColor,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _shapeGuessBtn(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    return Tooltip(
+      message: 'Auto-forma · ${shapeGuess ? "attivo" : "spento"}',
+      waitDuration: const Duration(milliseconds: 400),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: GestureDetector(
+          onTap: () => onShapeGuessChanged(!shapeGuess),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: shapeGuess ? p.accentSoft : Colors.transparent,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: HwIcon('shape-guess',
+                  size: 18,
+                  color: shapeGuess ? p.accentDeep : p.ink1),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Popup with color preset + thickness slider + per-tool extras.
+class HwToolPopup extends StatelessWidget {
+  final CanvasTool tool;
+  final Color color;
+  final ValueChanged<Color> onColorChanged;
+  final double thickness;
+  final ValueChanged<double> onThicknessChanged;
+  final List<Color> presetColors;
+  final EraserSize? eraserSize;
+  final ValueChanged<EraserSize>? onEraserSizeChanged;
+  final bool? eraserPerStroke;
+  final ValueChanged<bool>? onEraserPerStrokeChanged;
+  final VoidCallback onClose;
+
+  const HwToolPopup({
+    super.key,
+    required this.tool,
+    required this.color,
+    required this.onColorChanged,
+    required this.thickness,
+    required this.onThicknessChanged,
+    required this.presetColors,
+    required this.onClose,
+    this.eraserSize,
+    this.onEraserSizeChanged,
+    this.eraserPerStroke,
+    this.onEraserPerStrokeChanged,
+  });
+
+  bool get _showColor => !{
+        CanvasTool.eraserStandard,
+        CanvasTool.eraserStroke,
+        CanvasTool.lasso,
+        CanvasTool.pan,
+      }.contains(tool);
+
+  bool get _showThickness => !{
+        CanvasTool.lasso,
+        CanvasTool.pan,
+        CanvasTool.text,
+      }.contains(tool);
+
+  bool get _isEraser =>
+      tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke;
+
+  String get _label {
+    switch (tool) {
+      case CanvasTool.pen:
+        return 'Penna';
+      case CanvasTool.ballpoint:
+        return 'Ballpoint';
+      case CanvasTool.brush:
+        return 'Pennello';
+      case CanvasTool.calligraphy:
+        return 'Calligrafia';
+      case CanvasTool.highlighter:
+        return 'Evidenziatore';
+      case CanvasTool.eraserStandard:
+      case CanvasTool.eraserStroke:
+        return 'Gomma';
+      case CanvasTool.lasso:
+        return 'Lasso';
+      case CanvasTool.text:
+        return 'Testo';
+      case CanvasTool.shape:
+        return 'Forma';
+      case CanvasTool.image:
+        return 'Immagine';
+      case CanvasTool.pan:
+        return 'Mano';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    return Container(
+      width: 300,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: p.paper0,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: p.paper3),
+        boxShadow: hwShadow3(p.brightness),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(_label,
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: p.ink0)),
+              const Spacer(),
+              HwButton.icon(
+                  icon: const HwIcon('x', size: 14), onPressed: onClose),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (_showColor) ...[
+            _section('Colore', p),
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: [
+                for (final c in presetColors)
+                  _colorChip(c, p),
+                _customColorChip(p),
+              ],
+            ),
+            const SizedBox(height: 14),
+          ],
+          if (_showThickness) ...[
+            Row(
+              children: [
+                _section('Spessore', p),
+                const Spacer(),
+                Text('${thickness.toStringAsFixed(1)} px',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: p.ink1,
+                      fontFamily: HwTheme.fontMono,
+                    )),
+              ],
+            ),
+            const SizedBox(height: 6),
+            SliderTheme(
+              data: SliderThemeData(
+                trackHeight: 4,
+                thumbShape: const RoundSliderThumbShape(
+                    enabledThumbRadius: 8, elevation: 1),
+                activeTrackColor: p.ink0,
+                inactiveTrackColor: p.paper3,
+                thumbColor: p.ink0,
+              ),
+              child: Slider(
+                min: 0.5,
+                max: 20.0,
+                divisions: 39,
+                value: thickness.clamp(0.5, 20.0),
+                onChanged: onThicknessChanged,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Container(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              decoration: BoxDecoration(
+                border: Border(top: BorderSide(color: p.paper2)),
+              ),
+              child: Row(
+                children: [
+                  Text('Anteprima',
+                      style: TextStyle(fontSize: 12, color: p.ink2)),
+                  const Spacer(),
+                  CustomPaint(
+                    size: const Size(160, 20),
+                    painter: _StrokePreviewPainter(
+                        color: color, width: thickness),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+          if (_isEraser) ...[
+            _section('Modalità', p),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: _modeBtn(p, 'Per area', !(eraserPerStroke ?? false),
+                      () => onEraserPerStrokeChanged?.call(false)),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _modeBtn(p, 'Per tratto', eraserPerStroke ?? false,
+                      () => onEraserPerStrokeChanged?.call(true)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _section('Dimensione', p),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                for (final s in EraserSize.values) ...[
+                  Expanded(
+                    child: _modeBtn(
+                        p,
+                        switch (s) {
+                          EraserSize.small => 'S',
+                          EraserSize.medium => 'M',
+                          EraserSize.large => 'L',
+                        },
+                        eraserSize == s,
+                        () => onEraserSizeChanged?.call(s)),
+                  ),
+                  if (s != EraserSize.large) const SizedBox(width: 6),
+                ],
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _section(String label, HwPalette p) => Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          color: p.ink2,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.6,
+        ),
+      );
+
+  Widget _colorChip(Color c, HwPalette p) {
+    final selected = c.toARGB32() == color.toARGB32();
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () => onColorChanged(c),
+        child: Container(
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            color: c,
+            shape: BoxShape.circle,
+            border: selected
+                ? Border.all(color: p.paper0, width: 2)
+                : Border.all(color: const Color(0x1A000000), width: 1),
+            boxShadow: selected
+                ? [
+                    BoxShadow(
+                        color: c, blurRadius: 0, spreadRadius: 2),
+                  ]
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _customColorChip(HwPalette p) {
+    return Container(
+      width: 26,
+      height: 26,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        border: Border.all(color: p.paper3),
+        gradient: const SweepGradient(colors: [
+          Colors.red,
+          Colors.yellow,
+          Colors.green,
+          Colors.cyan,
+          Colors.blue,
+          Colors.purple,
+          Colors.red,
+        ]),
+      ),
+    );
+  }
+
+  Widget _modeBtn(HwPalette p, String label, bool active, VoidCallback onTap) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? p.ink0 : p.paper2,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Center(
+            child: Text(label,
+                style: TextStyle(
+                    color: active ? p.paper0 : p.ink0,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500)),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StrokePreviewPainter extends CustomPainter {
+  final Color color;
+  final double width;
+  _StrokePreviewPainter({required this.color, required this.width});
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = width.clamp(0.5, size.height)
+      ..strokeCap = StrokeCap.round;
+    final path = Path()
+      ..moveTo(0, size.height / 2)
+      ..quadraticBezierTo(
+          size.width * 0.25, 4, size.width * 0.5, size.height / 2)
+      ..quadraticBezierTo(size.width * 0.75, size.height - 4, size.width,
+          size.height / 2);
+    canvas.drawPath(path, paint);
+  }
+
+  @override
+  bool shouldRepaint(_StrokePreviewPainter old) =>
+      old.color != color || old.width != width;
+}
+
+/// Bottom strip with chapter label + horizontally scrolling page thumbnails.
+class HwBottomPageStrip extends StatelessWidget {
+  final String? chapterLabel;
+  final int currentPage;
+  final int totalPages;
+  final ValueChanged<int> onPageTap;
+  final VoidCallback onAllPagesTap;
+
+  const HwBottomPageStrip({
+    super.key,
+    this.chapterLabel,
+    required this.currentPage,
+    required this.totalPages,
+    required this.onPageTap,
+    required this.onAllPagesTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    final visibleStart = (currentPage - 6).clamp(1, totalPages);
+    final count = (totalPages - visibleStart + 1).clamp(0, 18);
+
+    return Container(
+      height: 76,
+      decoration: BoxDecoration(
+        color: p.paper0,
+        border: Border(top: BorderSide(color: p.paper3)),
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+      child: Row(
+        children: [
+          if (chapterLabel != null && chapterLabel!.isNotEmpty) ...[
+            Text(
+              chapterLabel!.toUpperCase(),
+              style: TextStyle(
+                fontSize: 11,
+                color: p.ink2,
+                letterSpacing: 0.6,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Container(width: 1, height: 18, color: p.paper3),
+            const SizedBox(width: 12),
+          ],
+          Expanded(
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: count,
+              separatorBuilder: (_, __) => const SizedBox(width: 6),
+              itemBuilder: (_, i) {
+                final n = visibleStart + i;
+                final selected = n == currentPage;
+                return MouseRegion(
+                  cursor: SystemMouseCursors.click,
+                  child: GestureDetector(
+                    onTap: () => onPageTap(n),
+                    child: Container(
+                      width: 38,
+                      decoration: BoxDecoration(
+                        color: p.paper1,
+                        border: Border.all(
+                          color: selected ? p.accent : p.paper3,
+                          width: selected ? 2 : 1,
+                        ),
+                        borderRadius: BorderRadius.circular(3),
+                        boxShadow:
+                            selected ? hwShadow1(p.brightness) : null,
+                      ),
+                      alignment: Alignment.bottomCenter,
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text(
+                        n.toString(),
+                        style: TextStyle(
+                          fontSize: 9,
+                          color: selected ? p.accent : p.ink3,
+                          fontFamily: HwTheme.fontMono,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+          const SizedBox(width: 12),
+          HwButton(
+            leading: const HwIcon('grid', size: 14),
+            label: 'Tutte le pagine',
+            onPressed: onAllPagesTap,
+          ),
+        ],
+      ),
+    );
+  }
+}
