@@ -599,13 +599,9 @@ class CanvasRenderEngine extends CustomPainter {
         ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
       final interpolated = _catmullRomInterpolate(stroke.points, zoom);
-      for (int i = 0; i < interpolated.length - 1; i++) {
-        final p0 = interpolated[i];
-        final p1 = interpolated[i + 1];
-        final avgP = (p0.pressure + p1.pressure) / 2;
-        paint.strokeWidth = stroke.baseWidth * (0.6 + avgP * 0.4);
-        canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
-      }
+      _drawBucketedSegments(canvas, paint, interpolated,
+          (p0, p1) => stroke.baseWidth *
+              (0.6 + ((p0.pressure + p1.pressure) / 2) * 0.4));
       return;
     }
 
@@ -621,13 +617,10 @@ class CanvasRenderEngine extends CustomPainter {
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true;
-        for (int i = 0; i < interpolated.length - 1; i++) {
-          final p0 = interpolated[i];
-          final p1 = interpolated[i + 1];
-          final avgP = (p0.pressure + p1.pressure) / 2;
-          paint.strokeWidth = stroke.baseWidth * widthMul * (0.2 + avgP * 0.8);
-          canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
-        }
+        _drawBucketedSegments(canvas, paint, interpolated,
+            (p0, p1) => stroke.baseWidth *
+                widthMul *
+                (0.2 + ((p0.pressure + p1.pressure) / 2) * 0.8));
       }
       return;
     }
@@ -732,20 +725,27 @@ class CanvasRenderEngine extends CustomPainter {
     final interpolated = _catmullRomAdaptiveWithWidth(stroke.points, rawWidths, zoom);
     if (interpolated.length < 2) return;
 
-    // ── Render as overlapping round-capped line segments ──
+    // ── Render as bucketed Path runs ──
     //
-    // The previous implementation built a filled polygon ribbon with per-
-    // point perpendicular normals. At sharp peaks (e.g. the top of a
-    // cursive U) the chord between i-1 and i+1 collapsed to nearly zero,
-    // the normal vector became degenerate, and the polygon either pinched
-    // to zero width — visible as a "detached" gap mid-stroke — or self-
-    // intersected into a rectangle-shaped artifact at the peak.
+    // The previous implementation issued ONE `canvas.drawLine` per
+    // interpolated segment with a per-segment `strokeWidth`. For an
+    // 80-point stroke that adaptive Catmull-Rom blew up to ~1.9 k
+    // segments → 1.9 k drawLine + 1.9 k strokeWidth state changes.
+    // A page with 100 strokes = ~190 k drawLine commands recorded
+    // into the Picture, and Skia couldn't batch them because every
+    // call had a different paint width. **THIS was why pages with
+    // dense ink were ~100× slower than pages with images** even with
+    // the Picture cache hitting (the cache stored the bloated command
+    // list verbatim).
     //
-    // Drawing short line segments with strokeCap=round and strokeJoin=round
-    // sidesteps both problems: round caps blend consecutive segments
-    // smoothly even when the direction reverses, and there's no polygon
-    // edge to misalign. The width still varies smoothly because each
-    // segment uses its own strokeWidth from the interpolated widths.
+    // Group consecutive segments whose width quantises to the same
+    // 0.5 px bucket and emit ONE `drawPath` per bucket. A typical
+    // pen stroke has width range 1.5–3.0 → 3-4 buckets → 3-4 drawPath
+    // commands per stroke instead of 1.9 k. The visual is
+    // indistinguishable: a 0.5 px width step is invisible at 1× zoom
+    // and the round stroke caps blend the bucket boundaries seamlessly
+    // (same trick that made the original drawLine implementation work
+    // around the polygon-ribbon pinching issue).
     final paint = Paint()
       ..color = color.withValues(alpha: stroke.opacity)
       ..style = PaintingStyle.stroke
@@ -753,12 +753,67 @@ class CanvasRenderEngine extends CustomPainter {
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
     final count = interpolated.length;
+    if (count < 2) return;
+    const widthQuantum = 0.5;
+    Path? currentPath;
+    double currentBucket = double.nan;
     for (int i = 0; i < count - 1; i++) {
       final p0 = interpolated[i];
       final p1 = interpolated[i + 1];
       final w = ((p0.w + p1.w) * 0.5).clamp(0.4, 999.0);
-      paint.strokeWidth = w;
-      canvas.drawLine(Offset(p0.x, p0.y), Offset(p1.x, p1.y), paint);
+      final bucket = (w / widthQuantum).round() * widthQuantum;
+      if (bucket != currentBucket) {
+        // Flush previous bucket as one drawPath.
+        if (currentPath != null) {
+          paint.strokeWidth = currentBucket;
+          canvas.drawPath(currentPath, paint);
+        }
+        currentPath = Path()..moveTo(p0.x, p0.y);
+        currentBucket = bucket;
+      }
+      currentPath!.lineTo(p1.x, p1.y);
+    }
+    // Flush the final bucket.
+    if (currentPath != null) {
+      paint.strokeWidth = currentBucket;
+      canvas.drawPath(currentPath, paint);
+    }
+  }
+
+  /// Same width-bucketing trick used in [_paintStroke] for the fountain
+  /// pen path, but adapted to plain `StrokePoint`s (used by ballpoint,
+  /// brush). Groups consecutive segments whose width quantises to the
+  /// same 0.5 px bucket and emits ONE drawPath per bucket — typically
+  /// 3-5 drawPath per stroke instead of N drawLine.
+  void _drawBucketedSegments(
+    Canvas canvas,
+    Paint paint,
+    List<StrokePoint> pts,
+    double Function(StrokePoint p0, StrokePoint p1) widthFn,
+  ) {
+    final n = pts.length;
+    if (n < 2) return;
+    const widthQuantum = 0.5;
+    Path? currentPath;
+    double currentBucket = double.nan;
+    for (int i = 0; i < n - 1; i++) {
+      final p0 = pts[i];
+      final p1 = pts[i + 1];
+      final w = widthFn(p0, p1).clamp(0.4, 999.0);
+      final bucket = (w / widthQuantum).round() * widthQuantum;
+      if (bucket != currentBucket) {
+        if (currentPath != null) {
+          paint.strokeWidth = currentBucket;
+          canvas.drawPath(currentPath, paint);
+        }
+        currentPath = Path()..moveTo(p0.x, p0.y);
+        currentBucket = bucket;
+      }
+      currentPath!.lineTo(p1.x, p1.y);
+    }
+    if (currentPath != null) {
+      paint.strokeWidth = currentBucket;
+      canvas.drawPath(currentPath, paint);
     }
   }
 
