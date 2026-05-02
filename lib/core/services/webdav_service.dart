@@ -301,34 +301,106 @@ class WebDavService {
   /// Carica un file sul server. Crea o sovrascrive.
   /// Ritorna l'ETag della nuova versione.
   /// [timeoutSeconds] overrides the default timeout for this call.
+  ///
+  /// Post-PUT integrity check: after every successful PUT we re-read the
+  /// remote `getcontentlength` via PROPFIND and compare it against
+  /// `data.length`. This catches the silent-truncation scenario where the
+  /// HTTP layer reports 201/204 but the server actually committed a
+  /// partial body (observed: large stroke pages frozen at 256 KB or
+  /// other 1024-byte aligned offsets after an interrupted iOS background
+  /// PUT or a Tailscale stall). On mismatch we retry the upload with
+  /// exponential backoff; if every attempt produces a short body we
+  /// throw [WebDavSizeMismatchException] so the caller knows the server
+  /// state is poisoned and can heal it (or surface the error) — this is
+  /// strictly better than silently leaving truncated bytes on the
+  /// server, which causes downstream clients to fail forever with
+  /// `FormatException` while pulling.
+  ///
+  /// The verification is skipped only for files small enough that no
+  /// real-world HTTP buffer/proxy would truncate them ([_uploadVerifyMin]).
   Future<String?> uploadFile(String remotePath, Uint8List data,
       {int? timeoutSeconds}) async {
-    try {
-      final response = await _client.put(
-        Uri.parse(_fullUrl(remotePath)),
-        headers: {
-          ..._authHeaders,
-          'Content-Type': 'application/octet-stream',
-        },
-        body: data,
-      ).timeout(Duration(seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
+    Object? lastError;
+    for (var attempt = 0; attempt < _uploadMaxAttempts; attempt++) {
+      try {
+        final response = await _client.put(
+          Uri.parse(_fullUrl(remotePath)),
+          headers: {
+            ..._authHeaders,
+            'Content-Type': 'application/octet-stream',
+          },
+          body: data,
+        ).timeout(Duration(seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
 
-      if (response.statusCode != 201 && response.statusCode != 204) {
-        _recordFailure('uploadFile', 'status ${response.statusCode}');
-        throw WebDavException(
-          'PUT failed: ${response.statusCode}',
-          response.statusCode,
-        );
+        if (response.statusCode != 201 && response.statusCode != 204) {
+          _recordFailure('uploadFile', 'status ${response.statusCode}');
+          throw WebDavException(
+            'PUT failed: ${response.statusCode}',
+            response.statusCode,
+          );
+        }
+
+        // Post-PUT size verification. PROPFIND (not HEAD) so we read the
+        // uncompressed on-disk byte count regardless of mod_deflate.
+        if (data.length >= _uploadVerifyMin) {
+          int? remoteSize;
+          try {
+            remoteSize = await getContentLength(remotePath)
+                .timeout(const Duration(seconds: 8));
+          } catch (e) {
+            // Verification itself failed (network blip on the PROPFIND).
+            // Treat as a soft warning and trust the PUT — re-running the
+            // PROPFIND on the next pull's PROPFIND batch will surface any
+            // real corruption. Do NOT retry the upload here; a successful
+            // PUT followed by a flaky PROPFIND is a far more common case
+            // than a silent truncation, and re-PUTting wastes bandwidth.
+            // ignore: avoid_print
+            print('[WebDAV] uploadFile verify: PROPFIND failed for '
+                '$remotePath: $e — trusting PUT');
+            _recordSuccess();
+            return response.headers['etag'];
+          }
+          if (remoteSize != null && remoteSize != data.length) {
+            // ignore: avoid_print
+            print('[WebDAV] uploadFile SIZE MISMATCH on $remotePath: '
+                'sent ${data.length}B, server has ${remoteSize}B '
+                '(diff ${data.length - remoteSize}B) — retry attempt '
+                '${attempt + 1}/$_uploadMaxAttempts');
+            _recordFailure('uploadFile',
+                'size mismatch ${data.length} vs $remoteSize');
+            lastError = WebDavSizeMismatchException(
+              remotePath, data.length, remoteSize);
+            // Backoff before retry: 400ms, 1.2s.
+            if (attempt < _uploadMaxAttempts - 1) {
+              await Future.delayed(
+                  Duration(milliseconds: 400 * (1 << attempt)));
+              continue;
+            }
+            throw lastError as WebDavSizeMismatchException;
+          }
+        }
+
+        _recordSuccess();
+        return response.headers['etag'];
+      } on WebDavSizeMismatchException {
+        rethrow;
+      } on WebDavException {
+        rethrow;
+      } catch (e) {
+        _recordFailure('uploadFile', e);
+        rethrow;
       }
-      _recordSuccess();
-      return response.headers['etag'];
-    } on WebDavException {
-      rethrow;
-    } catch (e) {
-      _recordFailure('uploadFile', e);
-      rethrow;
     }
+    // Unreachable: loop either returns or throws.
+    throw lastError ?? StateError('uploadFile: exhausted attempts');
   }
+
+  /// Skip post-PUT verification under this size — too small to truncate
+  /// in any realistic HTTP/proxy chain, and the PROPFIND round-trip would
+  /// double the cost of metadata.json/document.json commits which fire on
+  /// every save.
+  static const int _uploadVerifyMin = 64 * 1024;
+  static const int _uploadMaxAttempts = 3;
 
   /// Crea una cartella remota.
   Future<void> createDirectory(String remotePath) async {
@@ -655,6 +727,25 @@ class WebDavException implements Exception {
 
   @override
   String toString() => 'WebDavException($statusCode): $message';
+}
+
+/// Thrown when a PUT appears to succeed (201/204) but a follow-up
+/// PROPFIND shows the server stored a body whose size does not match
+/// what we sent. Indicates a silent truncation somewhere in the HTTP
+/// chain (proxy buffer, NSURLSession suspension, Tailscale stall) that
+/// the PUT response did not surface as an error. Callers should treat
+/// the remote file as poisoned and either retry or escalate.
+class WebDavSizeMismatchException implements Exception {
+  final String remotePath;
+  final int sentBytes;
+  final int storedBytes;
+
+  WebDavSizeMismatchException(this.remotePath, this.sentBytes, this.storedBytes);
+
+  @override
+  String toString() =>
+      'WebDavSizeMismatchException($remotePath): sent ${sentBytes}B but '
+      'server stored ${storedBytes}B';
 }
 
 /// Parsa date HTTP (RFC 1123: "Sun, 06 Nov 1994 08:49:37 GMT").

@@ -166,6 +166,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Cleared once the deadline passes (one more attempt is allowed).
   final Map<String, DateTime> _pageFailureCooldownUntil = {};
 
+  /// Server ETags that have already been confirmed corrupt (truncated
+  /// JSON / invalid UTF-8). Once a download produced FormatException
+  /// for a given (fileName, etag) tuple, every subsequent pull cycle
+  /// would hit the SAME bad bytes — there's no point re-issuing the GET
+  /// until either (a) save() finishes uploading the local-good copy and
+  /// the server returns a fresh ETag, or (b) some other device pushes a
+  /// different version. This map is the dedup: if the current remote
+  /// ETag for a page matches what we know is corrupt, skip the download
+  /// attempt and re-flag for heal directly. Entries are cleared after a
+  /// successful save() (server now has a new ETag for those pages) or
+  /// when the page disappears from the server listing.
+  final Map<String, String> _knownCorruptEtags = {};
+
 
   /// True while a multi-step bulk operation (e.g. PDF import) is in
   /// progress. Pull cycles are suppressed so an intervening network
@@ -398,6 +411,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       _lastPageEtags = {};
       _pageFailureCount.clear();
       _pageFailureCooldownUntil.clear();
+      _knownCorruptEtags.clear();
       _etagNotebookId = metadata.id;
     }
 
@@ -5342,6 +5356,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
 
     _remoteMetaEtag = result.metaEtag;
+    // Clear corrupt-ETag dedup entries for any page we just uploaded:
+    // the server now has fresh bytes (with verified size — see
+    // WebDavService.uploadFile), so the OLD truncated ETag we cached as
+    // "skip the GET" is no longer authoritative. If the post-PUT
+    // verification ever lets a bad upload slip through (it shouldn't,
+    // but defensively), the next pull will FormatException again and
+    // re-populate the dedup with the new ETag.
+    for (final fn in result.pageEtags.keys) {
+      _knownCorruptEtags.remove(fn);
+    }
     // MERGE (not replace) the per-page ETags we just uploaded into the cache.
     //
     // Using a full PROPFIND here — the old behaviour — is racy: between our
@@ -5813,10 +5837,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // s.pages directly ensures every page the server has is materialised
     // locally, regardless of whether the ETag cache looks up-to-date.
     final pagesToPull = <String>[];
+    final preKnownCorrupt = <String>[];
     for (final entry in remotePageEtags.entries) {
       final etagChanged = _lastPageEtags[entry.key] != entry.value;
       final missingLocally = !s.pages.containsKey(entry.key);
       if (etagChanged || missingLocally) {
+        // Dedup: if we've already confirmed the server bytes for this exact
+        // ETag are corrupt, re-issuing the GET will hit the same bad bytes.
+        // Skip the network round-trip and let the heal path handle it
+        // directly — the upcoming save() will replace the corrupt server
+        // file and produce a fresh ETag, at which point this skip no
+        // longer matches and the next pull will re-fetch normally.
+        if (_knownCorruptEtags[entry.key] == entry.value) {
+          preKnownCorrupt.add(entry.key);
+          continue;
+        }
         pagesToPull.add(entry.key);
       }
     }
@@ -5891,7 +5926,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
-    if (pagesToPull.isEmpty && deletedRemotelyByEtag.isEmpty) {
+    // Edge case: every "changed" page on the server was already known to
+    // be corrupt at this very ETag. Nothing to network-fetch, but we still
+    // need to push the heal save so the server gets fresh bytes — fall
+    // through to the download path so the heal scheduling fires.
+    if (pagesToPull.isEmpty && deletedRemotelyByEtag.isEmpty && preKnownCorrupt.isEmpty) {
       // ── Metadata-only change check ───────────────────────────────────
       // We're here because the meta-ETag moved (slow path was triggered)
       // but no per-page ETag changed. The most common cause is a metadata-
@@ -5981,6 +6020,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     try {
       return await _pullFromDeltaDownload(
         s, syncService, remotePageEtags, pagesToPull, deletedRemotelyByEtag,
+        preKnownCorrupt,
       );
     } finally {
       isPullingFromRemote.value = false;
@@ -5994,6 +6034,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, String> remotePageEtags,
     List<String> pagesToPull,
     Set<String> deletedRemotelyByEtag,
+    List<String> preKnownCorrupt,
   ) async {
     // Download metadata + changed pages in parallel (one round-trip)
     late final ({NotebookMetadata metadata, DocumentStructure document}) remoteMeta;
@@ -6018,6 +6059,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // "Sincronizzazione 23/100" instead of a generic spinner.
     final completed = <String>[];
     final failedPages = <String>[];
+    // Pages whose server-side bytes are CORRUPT (e.g. JSON truncated mid-
+    // stroke at a 1024-byte boundary, observed when an interrupted PUT
+    // from another device left a partial body on Nextcloud). These do
+    // NOT count as transient failures: re-downloading will hit the same
+    // bad bytes forever, so we must NOT block the meta-ETag advance and
+    // MUST NOT apply the per-page cooldown — that combination is exactly
+    // what produced the every-2-second pull-loop hammering the server.
+    // Instead we hand the page back to save() with the local-good copy
+    // re-flagged as dirty, so the next save heals the server.
+    //
+    // Seeded with pages whose current server ETag matches an entry in
+    // [_knownCorruptEtags] — those were already proven corrupt this
+    // session, so we skip the redundant GET entirely.
+    final corruptedPages = <String>[...preKnownCorrupt];
+    if (preKnownCorrupt.isNotEmpty) {
+      print('[Canvas] Pull: skipping ${preKnownCorrupt.length} GET(s) for '
+          'pages already known corrupt at their current server ETag '
+          '(sample: ${preKnownCorrupt.take(3).join(",")}'
+          '${preKnownCorrupt.length > 3 ? "..." : ""}) — heal via save '
+          'will run');
+    }
     var completedCount = 0;
 
     // ── Per-page failure cooldown (P2) ──
@@ -6072,6 +6134,38 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           return;
         } catch (e) {
           lastError = e;
+          // ── Server-side corruption short-circuit ──
+          // FormatException from `jsonDecode(utf8.decode(bytes))` means
+          // the bytes the server gave us are not valid JSON — typically
+          // truncated mid-stroke at a 1024-byte boundary because an
+          // earlier PUT from some device only partially committed.
+          // Re-trying the download won't help (the bad bytes are stable
+          // on the server), and the FormatException is wrapped as a
+          // bare Exception by the http path, so we sniff the message
+          // too. We bail out of the retry loop immediately and let the
+          // outer code reroute this page through the heal-via-reupload
+          // path instead of the network-failure path.
+          final isCorruption = e is FormatException ||
+              e.toString().contains('FormatException');
+          if (isCorruption) {
+            corruptedPages.add(pageFileName);
+            // Reset any prior cooldown — corruption is a one-shot
+            // categorisation, not a flaky-network counter.
+            _pageFailureCount.remove(pageFileName);
+            _pageFailureCooldownUntil.remove(pageFileName);
+            // Remember the exact server ETag we just confirmed corrupt
+            // so subsequent pull cycles before save() lands skip the
+            // GET entirely (the bad bytes are stable; re-downloading
+            // them just burns bandwidth).
+            final corruptEtag = remotePageEtags[pageFileName];
+            if (corruptEtag != null) {
+              _knownCorruptEtags[pageFileName] = corruptEtag;
+            }
+            print('[Canvas] Page $pageFileName: server-side JSON '
+                'corruption detected ($e) — scheduling heal via '
+                're-upload from local copy');
+            return;
+          }
           if (attempt == maxAttempts - 1) break;
           // Exponential backoff: 200 ms, 600 ms, 1.8 s.
           await Future.delayed(
@@ -6103,18 +6197,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     if (anyPageChanged) {
       print('[Canvas] Pulled ${completed.length}/${pagesToPull.length} pages '
-          '(${failedPages.length} failed)');
+          '(${failedPages.length} failed, ${corruptedPages.length} corrupt → reupload)');
     }
     unawaited(CrashLogger.append(
       '[Pull] download done: ok=${completed.length}/${pagesToPull.length} '
       'failed=${failedPages.length}'
-      '${failedPages.isEmpty ? "" : " (${failedPages.take(3).join(",")})"}',
+      '${failedPages.isEmpty ? "" : " (${failedPages.take(3).join(",")})"} '
+      'corrupt=${corruptedPages.length}'
+      '${corruptedPages.isEmpty ? "" : " (${corruptedPages.take(3).join(",")})"}',
     ));
     // Evict per-page ETags for any download that failed so the next pull
     // re-attempts them; we must NOT advance _lastPageEtags for pages we
     // didn't actually receive. Also evict pages we skipped due to the
-    // cooldown — they still haven't been received either.
-    if (failedPages.isNotEmpty || cooledDown.isNotEmpty) {
+    // cooldown — they still haven't been received either. And evict
+    // corrupt-on-server pages so the next save() (which uploads the
+    // local-good copy) is followed by a pull that DOES re-fetch the
+    // freshly-correct bytes — leaving the corrupt etag in our cache
+    // would make the post-heal pull skip them.
+    if (failedPages.isNotEmpty || cooledDown.isNotEmpty || corruptedPages.isNotEmpty) {
       remotePageEtags = Map.of(remotePageEtags);
       for (final fn in failedPages) {
         // Keep the previous ETag we had (if any) so the "changed" comparison
@@ -6124,6 +6224,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         remotePageEtags.remove(fn);
       }
       for (final fn in cooledDown) {
+        remotePageEtags.remove(fn);
+      }
+      for (final fn in corruptedPages) {
         remotePageEtags.remove(fn);
       }
     }
@@ -6555,11 +6658,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // detected, the in-memory state still needs to pick up the repaired
       // document so the subsequent save() uploads it back to the server.
       final needsHeal = orphanSynthEntries.isNotEmpty;
+      // ALSO trigger when at least one page was found corrupt on the server —
+      // we need to push the local-good copy back up to overwrite the bad
+      // bytes, otherwise the next pull will hit the same FormatException.
+      final needsCorruptionHeal = corruptedPages.isNotEmpty;
       if (conflicts.isNotEmpty ||
           details.isNotEmpty ||
           safeDeleteCount > 0 ||
-          needsHeal) {
-        final pending = (details.isNotEmpty || safeDeleteCount > 0 || needsHeal)
+          needsHeal ||
+          needsCorruptionHeal) {
+        final pending = (details.isNotEmpty || safeDeleteCount > 0 || needsHeal || needsCorruptionHeal)
             ? PendingRemoteChanges(
                 metadata: remoteMeta.metadata,
                 document: mergedDocument,
@@ -6579,7 +6687,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         if (conflicts.isEmpty && pending != null) {
           print('[Canvas] Auto-accepting ${pending.totalChanges} remote '
               'changes ($newCount new, $modCount modified'
-              '${needsHeal ? ", ${orphanSynthEntries.length} healed orphans" : ""})');
+              '${needsHeal ? ", ${orphanSynthEntries.length} healed orphans" : ""}'
+              '${needsCorruptionHeal ? ", ${corruptedPages.length} corrupt-page reuploads" : ""})');
           state = state!.copyWith(
             pendingRemoteChanges: pending,
             clearPendingConflicts: true,
@@ -6596,6 +6705,36 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           // needed to break the cycle).
           if (needsHeal && state != null) {
             state = state!.copyWith(isDirty: true);
+          }
+          // Corrupt-page heal: acceptRemoteChanges just rebuilt
+          // _lastSyncedPages from the merged map (which contains the
+          // LOCAL bytes for these pages, since updatedPages was seeded
+          // from s.pages and we never overwrote them). To make the next
+          // save() actually re-upload, we must evict their entries so
+          // _saveInner's `!_lastSyncedPages.containsKey(key)` branch
+          // detects them as fresh. Then mark dirty + schedule a save:
+          // the local copies overwrite the truncated server bytes, and
+          // a subsequent pull picks up the freshly-written ETag without
+          // FormatException.
+          if (needsCorruptionHeal && state != null) {
+            for (final fn in corruptedPages) {
+              _lastSyncedPages.remove(fn);
+            }
+            state = state!.copyWith(isDirty: true);
+            print('[Canvas] HEAL: ${corruptedPages.length} pages corrupt on '
+                'server (sample: ${corruptedPages.take(3).join(",")}'
+                '${corruptedPages.length > 3 ? "..." : ""}) — will re-upload '
+                'from local on the next save (auto-scheduled)');
+            // Schedule save just after the current pull releases its sync
+            // lock. 500ms gives the in-flight _savePulledChangesLocally
+            // time to land; save() acquires the lock cooperatively so a
+            // race here just queues behind the local persist instead of
+            // being dropped.
+            Timer(const Duration(milliseconds: 500), () {
+              if (_disposed) return;
+              if (state == null || state!.metadata.id != s.metadata.id) return;
+              unawaited(save());
+            });
           }
         } else {
           state = state!.copyWith(
