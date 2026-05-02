@@ -221,17 +221,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   /// Waits for the notebook to finish loading, then runs any pending share
   /// import (files dropped in via the Android/iOS share sheet). Fires once.
+  ///
+  /// Listens to a narrow select (`s != null`) instead of the full state so
+  /// the callback doesn't run 60×/s during pan/zoom.
   void _watchForPendingImport() {
     bool handled = false;
-    ref.listenManual<CanvasState?>(canvasProvider, (prev, next) {
-      if (handled) return;
-      if (next == null) return;
-      final pending = ref.read(pendingImportProvider);
-      if (pending == null) return;
-      handled = true;
-      ref.read(pendingImportProvider.notifier).state = null;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _runPendingImport(pending));
-    });
+    ref.listenManual<bool>(
+      canvasProvider.select((s) => s != null),
+      (_, hasState) {
+        if (handled) return;
+        if (!hasState) return;
+        final pending = ref.read(pendingImportProvider);
+        if (pending == null) return;
+        handled = true;
+        ref.read(pendingImportProvider.notifier).state = null;
+        WidgetsBinding.instance
+            .addPostFrameCallback((_) => _runPendingImport(pending));
+      },
+    );
   }
 
   Future<void> _runPendingImport(PendingImport pending) async {
@@ -305,24 +312,32 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // Listen to canvas state: every transition into `isDirty=true` bumps the
     // debounce timer. This saves after [_autoSaveIdle] of inactivity, with a
     // cap of [_autoSaveMaxDelay] per burst.
-    ref.listenManual<CanvasState?>(canvasProvider, (_, next) {
-      if (next == null) return;
-      if (!next.isDirty) {
-        // Clean state; cancel any pending save.
-        _wasDirty = false;
+    //
+    // Subscribes to `isDirty` only — not the whole state — so the callback
+    // doesn't get invoked 60×/s during pan/zoom (each panOffset state.copyWith
+    // would otherwise fire the listener even though dirty was unchanged,
+    // costing real CPU on a 215-page notebook just to cancel + recreate
+    // Timers that nobody needed touched).
+    ref.listenManual<bool>(
+      canvasProvider.select((s) => s?.isDirty ?? false),
+      (_, isDirty) {
+        if (!isDirty) {
+          // Clean state; cancel any pending save.
+          _wasDirty = false;
+          _autoSaveDebounce?.cancel();
+          _autoSaveMaxWait?.cancel();
+          return;
+        }
+        // Dirty: restart idle timer, start max-wait on first dirty of burst.
         _autoSaveDebounce?.cancel();
-        _autoSaveMaxWait?.cancel();
-        return;
-      }
-      // Dirty: restart idle timer, start max-wait on first dirty of the burst.
-      _autoSaveDebounce?.cancel();
-      _autoSaveDebounce = Timer(_autoSaveIdle, _triggerAutoSave);
-      if (!_wasDirty) {
-        _autoSaveMaxWait?.cancel();
-        _autoSaveMaxWait = Timer(_autoSaveMaxDelay, _triggerAutoSave);
-      }
-      _wasDirty = true;
-    });
+        _autoSaveDebounce = Timer(_autoSaveIdle, _triggerAutoSave);
+        if (!_wasDirty) {
+          _autoSaveMaxWait?.cancel();
+          _autoSaveMaxWait = Timer(_autoSaveMaxDelay, _triggerAutoSave);
+        }
+        _wasDirty = true;
+      },
+    );
   }
 
   void _triggerAutoSave() {
@@ -690,17 +705,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   // ── Drag-left/right page navigation ──
 
-  void _checkPageDrag(CanvasState state, Size canvasSize) {
+  /// [panOverride] lets the caller pass the post-update pan without
+  /// allocating a `state.copyWith(panOffset: ...)` per pointer-move
+  /// just to read it back. CanvasState's copyWith touches every field
+  /// (215 PageData refs, lists, etc.) which is real GC pressure at the
+  /// 60–120 Hz pan rate.
+  void _checkPageDrag(CanvasState state, Size canvasSize,
+      {Offset? panOverride}) {
     final pageW = state.currentPage?.width ?? 595;
     final pageH = state.currentPage?.height ?? 842;
     final renderScale = min(canvasSize.width / pageW, canvasSize.height / pageH);
     final scaledW = pageW * renderScale;
     final centerOffsetX = (canvasSize.width - scaledW) / 2;
 
+    final pan = panOverride ?? state.panOffset;
     // Right edge of the page in screen coords
-    final pageRightScreen = (scaledW * state.zoom) + state.panOffset.dx + (centerOffsetX * state.zoom);
+    final pageRightScreen = (scaledW * state.zoom) + pan.dx + (centerOffsetX * state.zoom);
     // Left edge of the page in screen coords
-    final pageLeftScreen = state.panOffset.dx + (centerOffsetX * state.zoom);
+    final pageLeftScreen = pan.dx + (centerOffsetX * state.zoom);
 
     final filtered = state.filteredPageIndices;
     final pos = filtered.indexOf(state.currentPageIndex);
@@ -1214,7 +1236,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final latest = ref.read(canvasProvider);
       if (latest != null) {
         ref.read(canvasProvider.notifier).setPanOffset(latest.panOffset + delta);
-        _checkPageDrag(latest.copyWith(panOffset: latest.panOffset + delta), canvasSize);
+        _checkPageDrag(latest, canvasSize,
+            panOverride: latest.panOffset + delta);
       }
       return;
     }
@@ -1234,7 +1257,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final latest = ref.read(canvasProvider);
       if (latest != null) {
         ref.read(canvasProvider.notifier).setPanOffset(latest.panOffset + delta);
-        _checkPageDrag(latest.copyWith(panOffset: latest.panOffset + delta), canvasSize);
+        _checkPageDrag(latest, canvasSize,
+            panOverride: latest.panOffset + delta);
       }
       return;
     }
@@ -2097,13 +2121,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         shapeEndPos: s.shapeEndPos,
         recognizedShape: s.recognizedShape,
         selectedElementId: s.selectedElementId,
-        imageCache: s.imageCache,
-        assetBytes: s.assetBytes,
         currentTool: s.currentTool,
         undoStack: s.undoStack,
         redoStack: s.redoStack,
         symbolLibraries: s.symbolLibraries,
-        // panOffset, zoom, eraserCursorPos intentionally OMITTED.
       );
     }));
     // After the select-based subscription decides we should rebuild,
@@ -2592,20 +2613,34 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
                   onPointerSignal: (event) {
+                    // Read live state — `canvasState` from the build
+                    // closure is intentionally STALE on pan/zoom/cursor
+                    // because the parent's select excludes those fields,
+                    // so using it here would feed back the OLD zoom/pan
+                    // into every wheel calculation and snap the canvas
+                    // back to the centre. ref.read returns current.
+                    final live = ref.read(canvasProvider);
+                    if (live == null) return;
                     if (event is PointerScrollEvent) {
-                      final oldZoom = canvasState.zoom;
+                      final oldZoom = live.zoom;
                       final zoomDelta = event.scrollDelta.dy > 0 ? 0.9 : 1.1;
                       final newZoom = (oldZoom * zoomDelta).clamp(0.3, 5.0);
                       final cursorPos = event.localPosition;
-                      final newPan = canvasState.panOffset + (cursorPos - canvasState.panOffset) * (1 - (newZoom / oldZoom));
-                      ref.read(canvasProvider.notifier).setZoomAndPan(newZoom, newPan);
+                      final newPan = live.panOffset +
+                          (cursorPos - live.panOffset) * (1 - (newZoom / oldZoom));
+                      ref
+                          .read(canvasProvider.notifier)
+                          .setZoomAndPan(newZoom, newPan);
                     } else if (event is PointerScaleEvent) {
                       // Trackpad pinch-to-zoom (may not fire on all platforms)
-                      final oldZoom = canvasState.zoom;
+                      final oldZoom = live.zoom;
                       final newZoom = (oldZoom * event.scale).clamp(0.3, 5.0);
                       final cursorPos = event.localPosition;
-                      final newPan = canvasState.panOffset + (cursorPos - canvasState.panOffset) * (1 - (newZoom / oldZoom));
-                      ref.read(canvasProvider.notifier).setZoomAndPan(newZoom, newPan);
+                      final newPan = live.panOffset +
+                          (cursorPos - live.panOffset) * (1 - (newZoom / oldZoom));
+                      ref
+                          .read(canvasProvider.notifier)
+                          .setZoomAndPan(newZoom, newPan);
                     }
                   },
                   child: GestureDetector(
@@ -2629,9 +2664,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                     // for safety, but that guard only suppresses the callback
                     // body — not the arena claim. supportedDevices is the
                     // only way to keep the pen out of the arena entirely.
+                    // Exclude `mouse` from supportedDevices: middle-
+                    // mouse pan is handled directly by the outer
+                    // Listener, and including mouse here put every
+                    // PointerMoveEvent into the gesture arena. The
+                    // ScaleGestureRecognizer holds the move events
+                    // until the arena resolves (5–50 ms variable
+                    // latency), turning continuous panning into
+                    // bursty 6-11 ev/s — the "scattante" the user
+                    // reported even with cache hits at 100 %.
                     supportedDevices: const {
                       PointerDeviceKind.touch,
-                      PointerDeviceKind.mouse,
                       PointerDeviceKind.trackpad,
                     },
                     onScaleStart: _onScaleStart,
@@ -2665,43 +2708,66 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                         // untouched.
                         child: Consumer(
                           builder: (context, ref, _) {
-                            final viewport = ref.watch(canvasProvider.select(
-                                (s) => s == null
+                            // Watch viewport + imageCache so the painter
+                            // rebuilds on pan/zoom AND when a new asset
+                            // image is decoded (so it appears on canvas).
+                            // The chrome's parent select excludes both,
+                            // so this Consumer is the *only* widget that
+                            // rebuilds for those changes.
+                            ref.watch(canvasProvider.select((s) =>
+                                s == null
                                     ? const (zoom: 1.0, panOffset: Offset.zero)
                                     : (zoom: s.zoom, panOffset: s.panOffset)));
+                            ref.watch(canvasProvider.select(
+                                (s) => s?.imageCache));
+                            // Read full state fresh — the parent's
+                            // canvasState (closure) has stale viewport/
+                            // imageCache because parent didn't rebuild.
+                            final s = ref.read(canvasProvider) ?? canvasState;
                             return CustomPaint(
                               painter: CanvasRenderEngine(
                                 pageData: currentPage,
                                 activeStroke: _activeStrokeNotifier.points.isNotEmpty
                                     ? _activeStrokeNotifier.points
-                                    : (canvasState.activeStroke.isNotEmpty ? canvasState.activeStroke : null),
-                                activeToolType: _toolTypeString(canvasState.currentTool),
-                                activeColor: canvasState.toolSettings.color,
-                                activeWidth: canvasState.toolSettings.strokeWidth,
-                                lassoSelection: canvasState.lassoSelection,
+                                    : (s.activeStroke.isNotEmpty ? s.activeStroke : null),
+                                activeToolType: _toolTypeString(s.currentTool),
+                                activeColor: s.toolSettings.color,
+                                activeWidth: s.toolSettings.strokeWidth,
+                                lassoSelection: s.lassoSelection,
                                 lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
                                     ? _lassoPathNotifier.points
-                                    : (canvasState.lassoPath.isNotEmpty ? canvasState.lassoPath : null),
+                                    : (s.lassoPath.isNotEmpty ? s.lassoPath : null),
                                 lassoPathGetter: _lassoPathNotifier.isActive
                                     ? () => _lassoPathNotifier.points
                                     : null,
-                                shapePreview: (canvasState.shapeStartPos != null && canvasState.shapeEndPos != null)
-                                    ? (canvasState.shapeStartPos!, canvasState.shapeEndPos!, canvasState.toolSettings.shapeType)
+                                shapePreview: (s.shapeStartPos != null && s.shapeEndPos != null)
+                                    ? (s.shapeStartPos!, s.shapeEndPos!, s.toolSettings.shapeType)
                                     : null,
-                                recognizedShapePreview: canvasState.recognizedShape,
-                                zoom: viewport.zoom,
-                                panOffset: viewport.panOffset,
-                                imageCache: canvasState.imageCache,
+                                recognizedShapePreview: s.recognizedShape,
+                                zoom: s.zoom,
+                                panOffset: s.panOffset,
+                                imageCache: s.imageCache,
                                 repaintNotifier: _repaintNotifier,
                               ),
-                              isComplex: true,
-                              // willChange:false lets Skia keep the
-                              // rastered page content in its raster
-                              // cache between frames. The painter's
-                              // `repaintNotifier` and `shouldRepaint`
-                              // already invalidate correctly when
-                              // content actually changes.
-                              willChange: false,
+                              // willChange: true tells Skia "do NOT
+                              // bother rasterizing this layer to a
+                              // GPU texture cache between frames" —
+                              // ESSENTIAL during pan. With
+                              // willChange:false + shouldRepaint=true
+                              // (panOffset changes every frame),
+                              // Flutter would create+invalidate the
+                              // texture cache on every paint, paying
+                              // GPU upload cost for nothing. Our
+                              // own ui.Picture cache (in render_engine)
+                              // already memoises the drawing commands
+                              // at the right granularity (per
+                              // pageData/zoom-bucket) — Skia's
+                              // post-transform raster cache is
+                              // counterproductive on a panning canvas.
+                              // isComplex:true was hinting Skia to
+                              // cache, which doubled down on the same
+                              // mistake — also removed.
+                              willChange: true,
                               size: canvasSize,
                             );
                           },

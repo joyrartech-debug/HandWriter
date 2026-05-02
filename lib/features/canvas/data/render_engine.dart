@@ -92,10 +92,6 @@ class CanvasRenderEngine extends CustomPainter {
 
     // While the lasso is being dragged/rotated/scaled, the selected
     // strokes move every frame — bypass the cache and draw inline.
-    // The cost during drag is acceptable because (a) it's user-driven,
-    // and (b) only the SELECTED subset transforms (the bulk of the
-    // page is unchanged math-wise but Skia still has to redraw — that
-    // is the trade-off, livedrag accuracy over cache hit).
     if (hasTransform) {
       _paintStaticLayers(
         canvas,
@@ -107,11 +103,14 @@ class CanvasRenderEngine extends CustomPainter {
         hasTransform,
       );
     } else {
-      // Idle / non-drag path: cache or rebuild a Picture and replay it.
+      // Idle / non-drag path: cache or rebuild the strokes-and-shapes
+      // Picture and replay it. Images are NOT in the picture (they're
+      // drawn inline via _paintImagesOnly below) so the cache key
+      // doesn't include imageCache, and asset decodes don't invalidate
+      // it.
       final cached = _staticPictureCache.lookup(
         pageData: pageData,
         zoom: zoom,
-        imageCache: imageCache,
         lassoSelection: lassoSel,
       );
       if (cached != null) {
@@ -127,17 +126,27 @@ class CanvasRenderEngine extends CustomPainter {
           selScale,
           selCenter,
           hasTransform,
+          includeImages: false,
         );
         final pic = recorder.endRecording();
         canvas.drawPicture(pic);
         _staticPictureCache.store(
           pageData: pageData,
           zoom: zoom,
-          imageCache: imageCache,
           lassoSelection: lassoSel,
           picture: pic,
         );
       }
+      // Draw images inline (cheap GPU op, uses live imageCache).
+      _paintImagesOnly(
+        canvas,
+        selectedIdsSet,
+        selDragOffset,
+        selRotation,
+        selScale,
+        selCenter,
+        hasTransform,
+      );
     }
 
     // 4. Active stroke being drawn
@@ -175,9 +184,17 @@ class CanvasRenderEngine extends CustomPainter {
   }
 
   /// Layers 0-3 of [paint]: shadow, background, border, content. Recorded
-  /// into a `ui.Picture` once per (pageData, zoom-bucket, imageCache,
-  /// lassoSelection) and replayed by subsequent paint calls — see
-  /// [_staticPictureCache].
+  /// into a `ui.Picture` once per (pageData, zoom-bucket, lassoSelection)
+  /// and replayed by subsequent paint calls — see [_staticPictureCache].
+  ///
+  /// IMPORTANT: when [includeImages] is false, image elements are
+  /// SKIPPED. Images are rendered inline in [paint] (see
+  /// [_paintImagesOnly]) every frame using the live [imageCache], so
+  /// the picture cache key does not need to include [imageCache] —
+  /// asset decodes don't invalidate the strokes/text/shapes that
+  /// dominate paint cost. Drawing a `ui.Image` is a cheap GPU op
+  /// (`canvas.drawImageRect`), so doing it inline costs essentially
+  /// nothing while letting strokes stay cached across decodes.
   void _paintStaticLayers(
     Canvas canvas,
     Set<String> selectedIdsSet,
@@ -185,8 +202,9 @@ class CanvasRenderEngine extends CustomPainter {
     double selRotation,
     double selScale,
     Offset selCenter,
-    bool hasTransform,
-  ) {
+    bool hasTransform, {
+    bool includeImages = true,
+  }) {
     // 0. Page shadow (behind the page)
     final shadowPaint = Paint()
       ..color = const Color(0x33000000)
@@ -208,6 +226,10 @@ class CanvasRenderEngine extends CustomPainter {
     for (final element in sortedContent) {
       final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
       final isSelected = selectedIdsSet.contains(id);
+      // Skip images when this draw is going into the cached Picture —
+      // they're handled by _paintImagesOnly with the live imageCache.
+      final isImage = element.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false);
+      if (!includeImages && isImage) continue;
 
       // If this element is being moved/rotated/scaled via lasso, apply transform
       if (isSelected && hasTransform) {
@@ -233,6 +255,51 @@ class CanvasRenderEngine extends CustomPainter {
       if (isSelected && hasTransform) {
         canvas.restore();
       }
+    }
+  }
+
+  /// Walk image elements only and draw them inline. Cheap (each call is
+  /// `canvas.drawImageRect`), and crucially uses the LIVE [imageCache] —
+  /// so image asset decodes don't have to invalidate the strokes/text/
+  /// shapes Picture cache. See [_paintStaticLayers] for the rationale.
+  void _paintImagesOnly(
+    Canvas canvas,
+    Set<String> selectedIdsSet,
+    Offset selDragOffset,
+    double selRotation,
+    double selScale,
+    Offset selCenter,
+    bool hasTransform,
+  ) {
+    // Fast path: most pages have 0 images. Avoid the sort + walk
+    // entirely on those pages. Two `.any` checks are O(N) with early
+    // exit, vs the full `_getSortedContent` walk + per-element
+    // `.map(...)` closure allocation.
+    final hasAnyImage = pageData.layers.content.any((e) =>
+        e.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false));
+    if (!hasAnyImage) return;
+    final sortedContent = _getSortedContent(pageData.layers.content);
+    for (final element in sortedContent) {
+      final isImage = element.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false);
+      if (!isImage) continue;
+      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      final isSelected = selectedIdsSet.contains(id);
+
+      if (isSelected && hasTransform) {
+        canvas.save();
+        canvas.translate(selDragOffset.dx, selDragOffset.dy);
+        canvas.translate(selCenter.dx, selCenter.dy);
+        if (selScale != 1.0) canvas.scale(selScale);
+        if (selRotation != 0.0) canvas.rotate(selRotation);
+        canvas.translate(-selCenter.dx, -selCenter.dy);
+      }
+      element.map(
+        stroke: (_) {},
+        text: (_) {},
+        image: (e) => _paintImage(canvas, e.data),
+        shape: (_) {},
+      );
+      if (isSelected && hasTransform) canvas.restore();
     }
   }
 
@@ -1268,14 +1335,20 @@ class _InterpolatedPoint {
 ///     and replaying a low-zoom picture at high zoom looks polygonal.
 class _StaticPictureCache {
   static const int _maxEntries = 6;
-  static const double _zoomQuantum = 0.1;
+  // Was 0.1 → mouse-wheel zoom (which moves zoom by ~10% per tick) crossed a
+  // bucket on every event and invalidated the Picture cache continuously.
+  // 0.5 means strokes interpolated for zoom 1.0 are reused up to ~1.49 and
+  // again for 1.5–1.99 etc. — a few buckets in the typical 0.3–5.0 range
+  // instead of dozens. The Catmull-Rom segment density at record time is
+  // sufficient that replaying within a 50 % zoom window stays visually
+  // smooth.
+  static const double _zoomQuantum = 0.5;
 
   final List<_StaticPictureEntry> _entries = [];
 
   ui.Picture? lookup({
     required PageData pageData,
     required double zoom,
-    required Map<String, ui.Image> imageCache,
     required LassoSelection? lassoSelection,
   }) {
     final zoomBucket = (zoom / _zoomQuantum).round();
@@ -1284,8 +1357,7 @@ class _StaticPictureCache {
       final e = _entries[i];
       if (identical(e.pageData, pageData) &&
           e.zoomBucket == zoomBucket &&
-          e.lassoKey == lassoKey &&
-          _imageCacheKeysetEqual(e.imageCacheSnapshot, imageCache)) {
+          e.lassoKey == lassoKey) {
         // Move to MRU end
         _entries.removeAt(i);
         _entries.add(e);
@@ -1298,7 +1370,6 @@ class _StaticPictureCache {
   void store({
     required PageData pageData,
     required double zoom,
-    required Map<String, ui.Image> imageCache,
     required LassoSelection? lassoSelection,
     required ui.Picture picture,
   }) {
@@ -1307,7 +1378,6 @@ class _StaticPictureCache {
     _entries.add(_StaticPictureEntry(
       pageData: pageData,
       zoomBucket: zoomBucket,
-      imageCacheSnapshot: Map.unmodifiable(imageCache),
       lassoKey: lassoKey,
       picture: picture,
     ));
@@ -1328,28 +1398,17 @@ class _StaticPictureCache {
     return ids.join(',');
   }
 
-  static bool _imageCacheKeysetEqual(
-      Map<String, ui.Image> a, Map<String, ui.Image> b) {
-    if (identical(a, b)) return true;
-    if (a.length != b.length) return false;
-    for (final entry in a.entries) {
-      if (!identical(b[entry.key], entry.value)) return false;
-    }
-    return true;
-  }
 }
 
 class _StaticPictureEntry {
   final PageData pageData;
   final int zoomBucket;
-  final Map<String, ui.Image> imageCacheSnapshot;
   final String lassoKey;
   final ui.Picture picture;
 
   _StaticPictureEntry({
     required this.pageData,
     required this.zoomBucket,
-    required this.imageCacheSnapshot,
     required this.lassoKey,
     required this.picture,
   });
