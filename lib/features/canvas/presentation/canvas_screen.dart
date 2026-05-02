@@ -37,6 +37,23 @@ import 'package:handwriter/ui/theme/hw_theme.dart';
 
 enum _ExportScope { currentPage, currentChapter, entireNotebook }
 
+/// Full export selection — scope + scope-specific options.
+class _ExportSelection {
+  final _ExportScope scope;
+  // currentChapter only: 1-based inclusive range within the chapter's pages
+  final int? rangeStart;
+  final int? rangeEnd;
+  // entireNotebook only: insert a divider page before each chapter
+  final bool chapterSeparators;
+
+  const _ExportSelection({
+    required this.scope,
+    this.rangeStart,
+    this.rangeEnd,
+    this.chapterSeparators = false,
+  });
+}
+
 class CanvasScreen extends ConsumerStatefulWidget {
   const CanvasScreen({super.key});
 
@@ -3641,9 +3658,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
   }
 
-  /// Collect the pages to export based on user-chosen [scope].
-  List<PageData> _collectExportPages(CanvasState state, _ExportScope scope) {
-    switch (scope) {
+  /// Collect the pages to export based on user-chosen [selection].
+  /// For currentChapter, applies the optional 1-based inclusive range.
+  /// For entireNotebook with chapterSeparators, see [_collectExportPagesWithSeparators].
+  List<PageData> _collectExportPages(
+      CanvasState state, _ExportSelection selection) {
+    switch (selection.scope) {
       case _ExportScope.currentPage:
         final p = state.currentPage;
         return p != null ? [p] : [];
@@ -3656,16 +3676,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           return p != null ? [p] : [];
         }
         final entries = _chapterPageEntries(state, chapter);
-        final result = entries
+        final all = entries
             .map((e) => state.pages[e.fileName])
             .whereType<PageData>()
             .toList();
+        // Apply range slice if provided (1-based, inclusive on both ends)
+        final start = (selection.rangeStart ?? 1).clamp(1, all.length);
+        final end = (selection.rangeEnd ?? all.length).clamp(start, all.length);
+        final result = all.sublist(start - 1, end);
         debugPrint('[Export] currentChapter ${chapter.id}: '
-            'document match=${entries.length}, '
-            'page data resolved=${result.length}, '
-            'chapter.pageIds=${chapter.pageIds.length}, '
-            'activeChapterFilter=${state.activeChapterId}, '
-            'navigatorFilteredCount=${state.filteredPageCount}');
+            'pages=${all.length}, range=$start..$end, exporting=${result.length}');
         return result;
       case _ExportScope.entireNotebook:
         return state.document.pages
@@ -3673,6 +3693,37 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             .whereType<PageData>()
             .toList();
     }
+  }
+
+  /// Group every page of the notebook by chapter, in document order.
+  /// Returns a list of (chapterTitle, pages) — chapterTitle is null for
+  /// pages with no chapter assigned.
+  List<({String? chapterTitle, List<PageData> pages})>
+      _groupPagesByChapter(CanvasState state) {
+    final chaptersById = {
+      for (final c in state.metadata.chapters) c.id: c,
+    };
+    final groups = <({String? chapterTitle, List<PageData> pages})>[];
+    String? currentTitle;
+    List<PageData> bucket = [];
+    void flush() {
+      if (bucket.isNotEmpty) {
+        groups.add((chapterTitle: currentTitle, pages: bucket));
+      }
+    }
+    for (final entry in state.document.pages) {
+      final pageData = state.pages[entry.fileName];
+      if (pageData == null) continue;
+      final chTitle = chaptersById[entry.chapterId]?.title;
+      if (chTitle != currentTitle) {
+        flush();
+        bucket = [];
+        currentTitle = chTitle;
+      }
+      bucket.add(pageData);
+    }
+    flush();
+    return groups;
   }
 
   /// Save or share a file cross-platform.
@@ -3709,14 +3760,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     final state = ref.read(canvasProvider);
     if (state == null) return;
 
-    final scope = await _showExportScopeDialog(
+    final selection = await _showExportScopeDialog(
       singlePageLabel: 'Pagina corrente (PNG)',
       chapterLabel: 'Capitolo corrente',
       notebookLabel: 'Quaderno intero',
     );
-    if (scope == null) return;
+    if (selection == null) return;
 
-    final pages = _collectExportPages(state, scope);
+    final pages = _collectExportPages(state, selection);
     if (pages.isEmpty) return;
 
     try {
@@ -3777,28 +3828,78 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     final state = ref.read(canvasProvider);
     if (state == null) return;
 
-    final scope = await _showExportScopeDialog(
+    final selection = await _showExportScopeDialog(
       singlePageLabel: 'Pagina corrente',
       chapterLabel: 'Capitolo corrente',
       notebookLabel: 'Quaderno intero',
     );
-    if (scope == null) return;
+    if (selection == null) return;
 
-    final pages = _collectExportPages(state, scope);
-    if (pages.isEmpty) return;
+    // Build the actual page list. For "entireNotebook + chapterSeparators"
+    // we interleave a synthetic separator page before every chapter group.
+    final pagePayload = <_PdfPagePayload>[];
+    const scale = 2.0;
+    int pageCountForSnack = 0;
 
-    try {
+    if (selection.scope == _ExportScope.entireNotebook &&
+        selection.chapterSeparators) {
+      final groups = _groupPagesByChapter(state);
+      pageCountForSnack = groups.fold(
+          0, (sum, g) => sum + g.pages.length + (g.chapterTitle != null ? 1 : 0));
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Generazione PDF ($pageCountForSnack pagine)...')),
+        );
+      }
+
+      try {
+        for (final group in groups) {
+          // Use the FIRST page of the group as the size template
+          final w = group.pages.isNotEmpty ? group.pages.first.width : 595.0;
+          final h = group.pages.isNotEmpty ? group.pages.first.height : 842.0;
+          if (group.chapterTitle != null) {
+            final sepPng =
+                await _renderChapterSeparatorPng(group.chapterTitle!, w, h, scale);
+            if (sepPng != null) {
+              pagePayload.add(_PdfPagePayload(
+                width: w,
+                height: h,
+                pngBytes: sepPng,
+              ));
+            }
+          }
+          for (final page in group.pages) {
+            final pngBytes =
+                await _renderPageToPng(page, state.imageCache, scale: scale);
+            if (pngBytes == null) continue;
+            pagePayload.add(_PdfPagePayload(
+              width: page.width,
+              height: page.height,
+              pngBytes: pngBytes,
+            ));
+          }
+        }
+        if (pagePayload.isEmpty) return;
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).clearSnackBars();
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Errore export PDF: $e')));
+        }
+        return;
+      }
+    } else {
+      final pages = _collectExportPages(state, selection);
+      if (pages.isEmpty) return;
+      pageCountForSnack = pages.length;
+
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Generazione PDF (${pages.length} ${pages.length == 1 ? "pagina" : "pagine"})...')),
         );
       }
 
-      const scale = 2.0;
-      // Render every page to PNG on the main isolate (Flutter UI APIs must
-      // run here), then build+save the PDF on a worker isolate so the UI
-      // stays responsive for large exports.
-      final pagePayload = <_PdfPagePayload>[];
       for (final page in pages) {
         final pngBytes = await _renderPageToPng(page, state.imageCache, scale: scale);
         if (pngBytes == null) continue;
@@ -3809,15 +3910,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         ));
       }
       if (pagePayload.isEmpty) return;
+    }
+
+    try {
 
       final pdfBytes = await compute(_buildPdfOnIsolate, pagePayload);
-      final fileName = _exportFilename(state, scope, 'pdf');
+      final fileName = _exportFilename(state, selection.scope, 'pdf');
       await _saveOrShare(fileName, pdfBytes, 'application/pdf');
 
       if (mounted) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('PDF esportato: ${pages.length} ${pages.length == 1 ? "pagina" : "pagine"}')),
+          SnackBar(
+              content: Text(
+                  'PDF esportato: $pageCountForSnack ${pageCountForSnack == 1 ? "pagina" : "pagine"}')),
         );
       }
     } catch (e) {
@@ -3825,6 +3931,89 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Errore export PDF: $e')));
       }
+    }
+  }
+
+  /// Render a "Capitolo: TITOLO" cover page for a chapter group.
+  Future<Uint8List?> _renderChapterSeparatorPng(
+      String chapterTitle, double pageWidth, double pageHeight, double scale) async {
+    try {
+      final renderW = (pageWidth * scale).round();
+      final renderH = (pageHeight * scale).round();
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(
+          recorder, Rect.fromLTWH(0, 0, renderW.toDouble(), renderH.toDouble()));
+      // Soft warm-paper background
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, renderW.toDouble(), renderH.toDouble()),
+        Paint()..color = const Color(0xFFFAF7F1),
+      );
+      // Top accent bar
+      canvas.drawRect(
+        Rect.fromLTWH(0, 0, renderW.toDouble(), 8 * scale),
+        Paint()..color = const Color(0xFFB66744),
+      );
+      // "CAPITOLO" eyebrow
+      final eyebrow = TextPainter(
+        text: TextSpan(
+          text: 'CAPITOLO',
+          style: TextStyle(
+            color: const Color(0xFF6B6358),
+            fontSize: 18 * scale,
+            fontWeight: FontWeight.w600,
+            letterSpacing: 4 * scale,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      eyebrow.paint(
+        canvas,
+        Offset(
+          (renderW - eyebrow.width) / 2,
+          renderH * 0.42,
+        ),
+      );
+      // Chapter title
+      final title = TextPainter(
+        text: TextSpan(
+          text: chapterTitle,
+          style: TextStyle(
+            color: const Color(0xFF1C1916),
+            fontSize: 56 * scale,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.5,
+            height: 1.15,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        textAlign: TextAlign.center,
+        maxLines: 3,
+      )..layout(maxWidth: renderW * 0.8);
+      title.paint(
+        canvas,
+        Offset(
+          (renderW - title.width) / 2,
+          renderH * 0.46,
+        ),
+      );
+      // Decorative underline
+      final underlineY = renderH * 0.46 + title.height + 24 * scale;
+      final underlineW = 80 * scale;
+      canvas.drawRect(
+        Rect.fromLTWH(
+            (renderW - underlineW) / 2, underlineY, underlineW, 3 * scale),
+        Paint()..color = const Color(0xFFB66744),
+      );
+
+      final picture = recorder.endRecording();
+      final image = await picture.toImage(renderW, renderH);
+      final byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      return byteData?.buffer.asUint8List();
+    } catch (e) {
+      debugPrint('[Export] Failed to render chapter separator: $e');
+      return null;
     }
   }
 
@@ -3975,7 +4164,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   /// Show a dialog for choosing export scope.
-  Future<_ExportScope?> _showExportScopeDialog({
+  Future<_ExportSelection?> _showExportScopeDialog({
     required String singlePageLabel,
     required String chapterLabel,
     required String notebookLabel,
@@ -3985,9 +4174,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     final hasMultiplePages = state != null && state.document.pages.length > 1;
 
     // If only 1 page, skip dialog
-    if (!hasMultiplePages) return _ExportScope.currentPage;
+    if (!hasMultiplePages) {
+      return const _ExportSelection(scope: _ExportScope.currentPage);
+    }
 
-    return showDialog<_ExportScope>(
+    final scope = await showDialog<_ExportScope>(
       context: context,
       builder: (ctx) => SimpleDialog(
         title: const Text('Esporta'),
@@ -4019,6 +4210,157 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               subtitle: Text('${state.document.pages.length} pagine'),
               contentPadding: EdgeInsets.zero,
             ),
+          ),
+        ],
+      ),
+    );
+    if (scope == null) return null;
+
+    // Scope-specific extra prompts
+    switch (scope) {
+      case _ExportScope.currentPage:
+        return const _ExportSelection(scope: _ExportScope.currentPage);
+
+      case _ExportScope.currentChapter:
+        // Ask range start/end if the chapter has more than 1 page
+        final chapter = _resolveActiveChapter(state);
+        final chPagesCount = chapter == null
+            ? 1
+            : _chapterPageEntries(state, chapter).length;
+        if (chPagesCount <= 1) {
+          return const _ExportSelection(scope: _ExportScope.currentChapter);
+        }
+        if (!mounted) return null;
+        final range = await _promptPageRange(
+          title: 'Esporta capitolo',
+          subtitle: chapter?.title ?? 'Capitolo corrente',
+          totalPages: chPagesCount,
+        );
+        if (range == null) return null;
+        return _ExportSelection(
+          scope: _ExportScope.currentChapter,
+          rangeStart: range.$1,
+          rangeEnd: range.$2,
+        );
+
+      case _ExportScope.entireNotebook:
+        // If the notebook actually has chapters, offer the separator toggle
+        if (!hasChapters) {
+          return const _ExportSelection(scope: _ExportScope.entireNotebook);
+        }
+        if (!mounted) return null;
+        final addSep = await _promptYesNo(
+          title: 'Esporta quaderno intero',
+          message: 'Inserire una pagina separatore prima di ogni capitolo?',
+          yesLabel: 'Sì, con separatori',
+          noLabel: 'No, solo le pagine',
+          initialValue: true,
+        );
+        if (addSep == null) return null;
+        return _ExportSelection(
+          scope: _ExportScope.entireNotebook,
+          chapterSeparators: addSep,
+        );
+    }
+  }
+
+  /// Page-range picker dialog: returns (start, end) inclusive 1-based or null.
+  Future<(int, int)?> _promptPageRange({
+    required String title,
+    String? subtitle,
+    required int totalPages,
+  }) async {
+    int start = 1;
+    int end = totalPages;
+    return showDialog<(int, int)>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSt) {
+          return AlertDialog(
+            title: Text(title),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (subtitle != null) ...[
+                  Text(subtitle, style: Theme.of(ctx).textTheme.bodyMedium),
+                  const SizedBox(height: 8),
+                ],
+                Text('Pagine totali: $totalPages',
+                    style: Theme.of(ctx).textTheme.bodySmall),
+                const SizedBox(height: 16),
+                Text('Da pagina: $start',
+                    style: Theme.of(ctx).textTheme.bodyMedium),
+                Slider(
+                  value: start.toDouble(),
+                  min: 1,
+                  max: totalPages.toDouble(),
+                  divisions: totalPages - 1,
+                  label: '$start',
+                  onChanged: (v) => setSt(() {
+                    start = v.round();
+                    if (start > end) end = start;
+                  }),
+                ),
+                Text('A pagina: $end',
+                    style: Theme.of(ctx).textTheme.bodyMedium),
+                Slider(
+                  value: end.toDouble(),
+                  min: 1,
+                  max: totalPages.toDouble(),
+                  divisions: totalPages - 1,
+                  label: '$end',
+                  onChanged: (v) => setSt(() {
+                    end = v.round();
+                    if (end < start) start = end;
+                  }),
+                ),
+                const SizedBox(height: 8),
+                Text('Saranno esportate ${end - start + 1} pagine ($start–$end)',
+                    style: Theme.of(ctx).textTheme.bodySmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                        )),
+              ],
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Annulla')),
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx, (start, end)),
+                child: const Text('Esporta'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// Yes/No picker — returns true/false or null on cancel.
+  Future<bool?> _promptYesNo({
+    required String title,
+    required String message,
+    required String yesLabel,
+    required String noLabel,
+    bool initialValue = true,
+  }) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Annulla')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: Text(noLabel),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: Text(yesLabel),
           ),
         ],
       ),
