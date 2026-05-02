@@ -2629,7 +2629,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             repaintNotifier: _repaintNotifier,
                           ),
                           isComplex: true,
-                          willChange: true,
+                          // willChange:false lets Skia keep the rastered
+                          // page content in its raster cache between
+                          // frames. The painter's `repaintNotifier` (an
+                          // active-stroke / lasso Listenable) and
+                          // `shouldRepaint` already correctly invalidate
+                          // when content actually changes, so we DON'T
+                          // need to rasterize from scratch every frame —
+                          // doing that on a 100-stroke page burns a
+                          // whole CPU core for no reason.
+                          willChange: false,
                           size: canvasSize,
                         ),
                       ),

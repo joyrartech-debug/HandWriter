@@ -6397,9 +6397,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         }
       }
 
-      // Background pass: fire-and-forget. Updates state.assetBytes as bytes
-      // arrive and marks the notebook dirty when complete so the next save
-      // flushes them to the .ncnote zip. Aborts if the user switches notebooks.
+      // Background pass: fire-and-forget. Aborts if the user switches notebooks.
+      //
+      // Previously this `state = state!.copyWith(assetBytes: merged)` ran
+      // PER-BATCH — and `merged` was a fresh `Map<String, Uint8List>.from(50MB)`
+      // every iteration, plus every state mutation cascaded into a full
+      // rebuild of the canvas widget tree (which `ref.watch(canvasProvider)`s
+      // the entire state). On a 60-asset notebook the rebuild storm + Map
+      // re-allocations alone burned a CPU core for the whole download
+      // window. Now we accumulate every batch into a local map and commit
+      // ONCE at the end of the pass — image decoding still streams in
+      // (each batch fires `_decodeAndCacheImage` so the canvas can show
+      // them as soon as they're decoded).
+      //
+      // We also no longer flip `isDirty=true`: the assets are reachable
+      // from `_pageJsonCache` lookups and will be flushed by the NEXT
+      // user-driven save, which is enough — flipping dirty here triggered
+      // a full-notebook 50 MB ZIP rebuild + remote sync just because some
+      // bytes arrived from the server, which is exactly the work we want
+      // to avoid.
       if (backgroundList.isNotEmpty) {
         unawaited(() async {
           final bgDownloaded = <String, Uint8List>{};
@@ -6412,42 +6428,31 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             final batch =
                 backgroundList.skip(i).take(maxAssetConcurrency);
             final batchResults = await Future.wait(batch.map(pullOneAsset));
-            final batchAssets = <String, Uint8List>{};
             for (final (ref, data, err) in batchResults) {
               if (data != null) {
-                batchAssets[ref] = data;
                 bgDownloaded[ref] = data;
                 bgOk++;
+                // Decode now so the canvas paints the asset as soon as
+                // each batch resolves — _decodeAndCacheImage updates
+                // state.imageCache atomically and is independent of the
+                // assetBytes commit below.
+                unawaited(_decodeAndCacheImage(ref, data));
               } else if (err != null) {
                 bgFailed++;
                 print('[Canvas] Failed to pull bg asset $ref: $err '
                     '(will retry next pull)');
               }
             }
-            // Merge this batch into state so the canvas can render any new
-            // images without waiting for the entire background pass.
-            if (batchAssets.isNotEmpty &&
-                state != null &&
-                state!.metadata.id == notebookId) {
-              final merged =
-                  Map<String, Uint8List>.from(state!.assetBytes)
-                    ..addAll(batchAssets);
-              state = state!.copyWith(assetBytes: merged);
-              for (final entry in batchAssets.entries) {
-                unawaited(_decodeAndCacheImage(entry.key, entry.value));
-              }
-            }
           }
           print('[Canvas] Background asset pull done: '
               '$bgOk/${backgroundList.length} ok, $bgFailed failed');
-          // Mark notebook dirty so the next save persists the new bytes to
-          // the .ncnote zip. Without this, a kill before the next user edit
-          // would leave the bytes only in memory; on next open the
-          // missingAssets scan would re-download them — correct but wasteful.
+          // Single commit at the end. Skip if the notebook closed mid-pass.
           if (bgDownloaded.isNotEmpty &&
               state != null &&
               state!.metadata.id == notebookId) {
-            state = state!.copyWith(isDirty: true);
+            final merged = Map<String, Uint8List>.from(state!.assetBytes)
+              ..addAll(bgDownloaded);
+            state = state!.copyWith(assetBytes: merged);
           }
         }());
       }
