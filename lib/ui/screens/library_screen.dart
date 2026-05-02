@@ -1,15 +1,20 @@
 import 'dart:async';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/app_settings_provider.dart';
 import 'package:handwriter/core/providers/notebook_provider.dart';
+import 'package:handwriter/core/providers/offline_providers.dart';
+import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/ui/screens/settings_screen.dart';
 import 'package:handwriter/ui/services/notebook_opener.dart';
 import 'package:handwriter/ui/theme/hw_icons.dart';
 import 'package:handwriter/ui/theme/hw_theme.dart';
 import 'package:handwriter/ui/primitives/hw_button.dart';
 import 'package:handwriter/ui/primitives/sync_badge.dart';
+import 'package:uuid/uuid.dart';
 
 /// HandWriter library screen, "warm paper" redesign.
 class LibraryScreenV2 extends ConsumerStatefulWidget {
@@ -67,6 +72,7 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
               onViewToggle: (v) => setState(() => _gridView = v),
               onSortTap: _showSortSheet,
               onSettingsTap: _openSettings,
+              onImportTap: _importNcnote,
               sortLabel: settings.sortMode.label,
             ),
             Expanded(
@@ -141,6 +147,138 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => const SettingsScreenV2(),
     ));
+  }
+
+  /// Import a .ncnote archive from disk: validates, optionally renames on
+  /// title collision, registers a new notebook and refreshes the library.
+  Future<void> _importNcnote() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['ncnote', 'zip'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null) {
+      _toast('Impossibile leggere il file');
+      return;
+    }
+    if (!mounted) return;
+
+    // Show progress
+    final ctx = context;
+    showDialog(
+      // ignore: use_build_context_synchronously
+      context: ctx,
+      barrierDismissible: false,
+      builder: (_) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Importazione in corso…'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    try {
+      // Validate ZIP integrity first
+      SyncService.validateNcnoteArchive(bytes,
+          context: 'import ${file.name}');
+
+      final syncService = ref.read(syncServiceProvider);
+      final fileService = ref.read(fileServiceProvider);
+      if (syncService == null) {
+        throw Exception('Servizio non disponibile');
+      }
+
+      // Parse to read metadata, document, pages, assets, symbols
+      final parsed = syncService.parseNcnoteMetadata(bytes);
+      final pages = syncService.extractAllPages(bytes);
+      final assets = syncService.extractAllAssets(bytes);
+      final symbols = syncService.extractSymbolLibraries(bytes);
+
+      // Always assign a fresh ID so two devices/users importing the same
+      // .ncnote don't end up sharing/colliding the notebook id (and so
+      // the importer can keep their original alongside).
+      final newId = const Uuid().v4();
+      final originalTitle = parsed.metadata.title;
+      // If a notebook with the same title already exists locally, mark
+      // the import with a "(importato)" suffix so they're distinguishable
+      // in the library list.
+      final existingTitles = (ref.read(notebookListProvider).valueOrNull ?? const [])
+          .map((e) => e.metadata.title.toLowerCase())
+          .toSet();
+      String newTitle = originalTitle;
+      if (existingTitles.contains(originalTitle.toLowerCase())) {
+        newTitle = '$originalTitle (importato)';
+      }
+
+      final newMeta = parsed.metadata.copyWith(
+        id: newId,
+        title: newTitle,
+        modifiedAt: DateTime.now(),
+      );
+
+      // Re-pack with the new id/title so the on-disk file matches the
+      // library entry. We reuse the existing builder to keep zip layout
+      // identical to the rest of the app.
+      final repacked = SyncService.buildPackageBytes(
+        metadata: newMeta,
+        document: parsed.document,
+        pages: pages,
+        assets: assets.isNotEmpty ? assets : null,
+        symbolLibraries: symbols.isNotEmpty ? symbols : null,
+      );
+
+      // Build a remote path so subsequent sync can upload it.
+      final safeName = newTitle
+          .replaceAll(RegExp(r'[^\w\s\-]'), '')
+          .replaceAll(RegExp(r'\s+'), '_')
+          .toLowerCase();
+      final remotePath =
+          '${AppConfig.defaultRemotePath}${safeName}_$newId${AppConfig.fileExtension}';
+
+      await fileService.saveNotebookFile(newId, repacked);
+      await fileService.upsertNotebookMeta(
+        id: newId,
+        title: newTitle,
+        remotePath: remotePath,
+        localModifiedAt: newMeta.modifiedAt,
+        // 'modified' so the next background sync uploads it.
+        syncStatus: 'modified',
+        fileSize: repacked.length,
+        coverColor: newMeta.coverColor,
+        paperType: newMeta.paperType,
+        pageCount: newMeta.pageCount,
+        createdAt: newMeta.createdAt,
+      );
+
+      if (!mounted) return;
+      // ignore: use_build_context_synchronously
+      Navigator.of(ctx).pop(); // dismiss spinner
+      ref.read(notebookListProvider.notifier).refresh();
+      _toast(
+          'Importato: "$newTitle" (${pages.length} ${pages.length == 1 ? "pagina" : "pagine"})');
+    } catch (e) {
+      if (!mounted) return;
+      // ignore: use_build_context_synchronously
+      Navigator.of(ctx).pop();
+      _toast('Errore importazione: $e');
+    }
+  }
+
+  void _toast(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   Future<void> _createNotebook() async {
@@ -347,6 +485,7 @@ class _TopBar extends StatelessWidget {
   final ValueChanged<bool> onViewToggle;
   final VoidCallback onSortTap;
   final VoidCallback onSettingsTap;
+  final VoidCallback onImportTap;
   final String sortLabel;
 
   const _TopBar({
@@ -356,6 +495,7 @@ class _TopBar extends StatelessWidget {
     required this.onViewToggle,
     required this.onSortTap,
     required this.onSettingsTap,
+    required this.onImportTap,
     required this.sortLabel,
   });
 
@@ -417,6 +557,13 @@ class _TopBar extends StatelessWidget {
           const SizedBox(width: 12),
           const HwDivider(),
           const SizedBox(width: 12),
+          HwButton(
+            leading: const HwIcon('export', size: 16),
+            label: 'Importa',
+            tooltip: 'Importa un file .ncnote',
+            onPressed: onImportTap,
+          ),
+          const SizedBox(width: 4),
           HwButton.icon(
               icon: const HwIcon('settings', size: 16),
               tooltip: 'Impostazioni',
