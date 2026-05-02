@@ -6431,7 +6431,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       return false;
     }
 
-    if ((anyPageChanged || deletionConflicts.isNotEmpty) && state != null) {
+    // Enter the merge/accept block when ANY of the following is true:
+    //   - we successfully pulled at least one page (anyPageChanged)
+    //   - we detected a remote deletion that needs reconciling
+    //   - we detected at least one page that's corrupt on the server
+    //     (heal-via-reupload path; needs to land in pendingRemoteChanges
+    //     so acceptRemoteChanges + the corruption-heal post-step run and
+    //     the auto-save Timer is scheduled). Without this third guard,
+    //     a pull where ALL changed pages are corrupt skips the entire
+    //     block, never schedules the save, and the loop continues
+    //     forever.
+    if ((anyPageChanged ||
+            deletionConflicts.isNotEmpty ||
+            corruptedPages.isNotEmpty) &&
+        state != null) {
       // ── Detect conflicts: pages changed both locally AND remotely ──
       final conflicts = <PageConflict>[...deletionConflicts];
       final safePages = <String>{}; // non-conflicting remote pages
