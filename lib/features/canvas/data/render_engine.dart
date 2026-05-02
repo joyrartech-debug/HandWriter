@@ -60,65 +60,83 @@ class CanvasRenderEngine extends CustomPainter {
     );
     canvas.scale(zoom * baseScale);
 
-    // 0. Page shadow (behind the page)
-    final shadowPaint = Paint()
-      ..color = const Color(0x33000000)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
-    canvas.drawRect(
-      Rect.fromLTWH(3, 3, pageData.width, pageData.height),
-      shadowPaint,
-    );
-
-    // 1. Page background (white rect)
-    _paintBackground(canvas, pageData.layers.background);
-
-    // 2. Page border
-    _paintPageBorder(canvas);
-
-    // 3. Content elements (cached sort to avoid O(n log n) per frame)
-    final sortedContent = _getSortedContent(pageData.layers.content);
-
-    // Use a Set for selectedIds so isSelected lookup is O(1) per element
-    // instead of O(m) over the List. At large selections (100+ elements
-    // from a big lasso) this changes the inner loop from O(n*m) to O(n).
-    final selectedIdsSet = lassoSelection != null
-        ? lassoSelection!.selectedIds.toSet()
+    // ── Static-content Picture cache ──
+    //
+    // Layers 0-3 (shadow, background, border, content) are *static* per
+    // page — they never depend on activeStroke / lassoPath / preview /
+    // selection drag, so the same drawing commands run identically on
+    // every frame the user is at rest. With 200 strokes × ~80 points ×
+    // adaptive Catmull-Rom interpolation (up to 24 segments), that's
+    // ~400k drawLine calls per paint. Even a single repaint per second
+    // saturates a CPU core.
+    //
+    // Cache the layered draw commands into a `ui.Picture` keyed on
+    // (pageData identity, zoom-bucket, imageCache identity-set,
+    // lassoSelection identity) and replay it. PictureRecorder builds
+    // an opaque GPU command stream that drawPicture re-issues in
+    // microseconds. Cache miss only happens when the page or zoom
+    // changes meaningfully (zoom bucketed to 0.1 because the
+    // adaptive-interpolation segment count is zoom-dependent —
+    // recording at 1× and replaying at 4× would look polygonal).
+    final lassoSel = lassoSelection;
+    final selectedIdsSet = lassoSel != null
+        ? lassoSel.selectedIds.toSet()
         : const <String>{};
-    final selDragOffset = lassoSelection?.dragOffset ?? Offset.zero;
-    final selRotation = lassoSelection?.rotation ?? 0.0;
-    final selScale = lassoSelection?.scale ?? 1.0;
-    final selCenter = lassoSelection != null
-        ? lassoSelection!.bounds.center
-        : Offset.zero;
-    final hasTransform = selDragOffset != Offset.zero || selRotation != 0.0 || selScale != 1.0;
+    final selDragOffset = lassoSel?.dragOffset ?? Offset.zero;
+    final selRotation = lassoSel?.rotation ?? 0.0;
+    final selScale = lassoSel?.scale ?? 1.0;
+    final selCenter = lassoSel?.bounds.center ?? Offset.zero;
+    final hasTransform = selDragOffset != Offset.zero ||
+        selRotation != 0.0 ||
+        selScale != 1.0;
 
-    for (final element in sortedContent) {
-      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
-      final isSelected = selectedIdsSet.contains(id);
-
-      // If this element is being moved/rotated/scaled via lasso, apply transform
-      if (isSelected && hasTransform) {
-        canvas.save();
-        canvas.translate(selDragOffset.dx, selDragOffset.dy);
-        canvas.translate(selCenter.dx, selCenter.dy);
-        if (selScale != 1.0) {
-          canvas.scale(selScale);
-        }
-        if (selRotation != 0.0) {
-          canvas.rotate(selRotation);
-        }
-        canvas.translate(-selCenter.dx, -selCenter.dy);
-      }
-
-      element.map(
-        stroke: (e) => _paintStroke(canvas, e.data),
-        text: (e) => _paintText(canvas, e.data),
-        image: (e) => _paintImage(canvas, e.data),
-        shape: (e) => _paintShape(canvas, e.data),
+    // While the lasso is being dragged/rotated/scaled, the selected
+    // strokes move every frame — bypass the cache and draw inline.
+    // The cost during drag is acceptable because (a) it's user-driven,
+    // and (b) only the SELECTED subset transforms (the bulk of the
+    // page is unchanged math-wise but Skia still has to redraw — that
+    // is the trade-off, livedrag accuracy over cache hit).
+    if (hasTransform) {
+      _paintStaticLayers(
+        canvas,
+        selectedIdsSet,
+        selDragOffset,
+        selRotation,
+        selScale,
+        selCenter,
+        hasTransform,
       );
-
-      if (isSelected && hasTransform) {
-        canvas.restore();
+    } else {
+      // Idle / non-drag path: cache or rebuild a Picture and replay it.
+      final cached = _staticPictureCache.lookup(
+        pageData: pageData,
+        zoom: zoom,
+        imageCache: imageCache,
+        lassoSelection: lassoSel,
+      );
+      if (cached != null) {
+        canvas.drawPicture(cached);
+      } else {
+        final recorder = ui.PictureRecorder();
+        final pictureCanvas = Canvas(recorder);
+        _paintStaticLayers(
+          pictureCanvas,
+          selectedIdsSet,
+          selDragOffset,
+          selRotation,
+          selScale,
+          selCenter,
+          hasTransform,
+        );
+        final pic = recorder.endRecording();
+        canvas.drawPicture(pic);
+        _staticPictureCache.store(
+          pageData: pageData,
+          zoom: zoom,
+          imageCache: imageCache,
+          lassoSelection: lassoSel,
+          picture: pic,
+        );
       }
     }
 
@@ -154,6 +172,68 @@ class CanvasRenderEngine extends CustomPainter {
     }
 
     canvas.restore();
+  }
+
+  /// Layers 0-3 of [paint]: shadow, background, border, content. Recorded
+  /// into a `ui.Picture` once per (pageData, zoom-bucket, imageCache,
+  /// lassoSelection) and replayed by subsequent paint calls — see
+  /// [_staticPictureCache].
+  void _paintStaticLayers(
+    Canvas canvas,
+    Set<String> selectedIdsSet,
+    Offset selDragOffset,
+    double selRotation,
+    double selScale,
+    Offset selCenter,
+    bool hasTransform,
+  ) {
+    // 0. Page shadow (behind the page)
+    final shadowPaint = Paint()
+      ..color = const Color(0x33000000)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
+    canvas.drawRect(
+      Rect.fromLTWH(3, 3, pageData.width, pageData.height),
+      shadowPaint,
+    );
+
+    // 1. Page background (white rect)
+    _paintBackground(canvas, pageData.layers.background);
+
+    // 2. Page border
+    _paintPageBorder(canvas);
+
+    // 3. Content elements (cached sort to avoid O(n log n) per frame)
+    final sortedContent = _getSortedContent(pageData.layers.content);
+
+    for (final element in sortedContent) {
+      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      final isSelected = selectedIdsSet.contains(id);
+
+      // If this element is being moved/rotated/scaled via lasso, apply transform
+      if (isSelected && hasTransform) {
+        canvas.save();
+        canvas.translate(selDragOffset.dx, selDragOffset.dy);
+        canvas.translate(selCenter.dx, selCenter.dy);
+        if (selScale != 1.0) {
+          canvas.scale(selScale);
+        }
+        if (selRotation != 0.0) {
+          canvas.rotate(selRotation);
+        }
+        canvas.translate(-selCenter.dx, -selCenter.dy);
+      }
+
+      element.map(
+        stroke: (e) => _paintStroke(canvas, e.data),
+        text: (e) => _paintText(canvas, e.data),
+        image: (e) => _paintImage(canvas, e.data),
+        shape: (e) => _paintShape(canvas, e.data),
+      );
+
+      if (isSelected && hasTransform) {
+        canvas.restore();
+      }
+    }
   }
 
   /// Paint the page content without zoom/pan transform.
@@ -1160,10 +1240,117 @@ class CanvasRenderEngine extends CustomPainter {
     }
     return true;
   }
+
+  /// Process-wide picture cache for the static page-content layer.
+  /// Bounded LRU so memory doesn't grow unboundedly as the user flips
+  /// through pages.
+  static final _staticPictureCache = _StaticPictureCache();
 }
 
 /// Lightweight struct for Catmull-Rom interpolated points with pre-computed width.
 class _InterpolatedPoint {
   final double x, y, pressure, w;
   const _InterpolatedPoint(this.x, this.y, this.pressure, this.w);
+}
+
+/// LRU cache of the static-content `ui.Picture` keyed by page identity +
+/// quantised zoom (and the asset-cache+selection state, since both can
+/// affect the rendered output). Bounded so a notebook with hundreds of
+/// pages doesn't pile up retained pictures across page flips.
+///
+/// Cache miss conditions (any one of these triggers a rebuild):
+///   - Different `pageData` reference (page edited or different page)
+///   - Different `imageCache` key/value identity set
+///   - Different lasso-selection (which IDs are highlighted shifts the
+///     drawing because selected ids may be transformed)
+///   - Zoom moved beyond the quantisation bucket — needed because
+///     adaptive Catmull-Rom interpolates more densely at higher zoom,
+///     and replaying a low-zoom picture at high zoom looks polygonal.
+class _StaticPictureCache {
+  static const int _maxEntries = 6;
+  static const double _zoomQuantum = 0.1;
+
+  final List<_StaticPictureEntry> _entries = [];
+
+  ui.Picture? lookup({
+    required PageData pageData,
+    required double zoom,
+    required Map<String, ui.Image> imageCache,
+    required LassoSelection? lassoSelection,
+  }) {
+    final zoomBucket = (zoom / _zoomQuantum).round();
+    final lassoKey = _lassoKey(lassoSelection);
+    for (var i = _entries.length - 1; i >= 0; i--) {
+      final e = _entries[i];
+      if (identical(e.pageData, pageData) &&
+          e.zoomBucket == zoomBucket &&
+          e.lassoKey == lassoKey &&
+          _imageCacheKeysetEqual(e.imageCacheSnapshot, imageCache)) {
+        // Move to MRU end
+        _entries.removeAt(i);
+        _entries.add(e);
+        return e.picture;
+      }
+    }
+    return null;
+  }
+
+  void store({
+    required PageData pageData,
+    required double zoom,
+    required Map<String, ui.Image> imageCache,
+    required LassoSelection? lassoSelection,
+    required ui.Picture picture,
+  }) {
+    final zoomBucket = (zoom / _zoomQuantum).round();
+    final lassoKey = _lassoKey(lassoSelection);
+    _entries.add(_StaticPictureEntry(
+      pageData: pageData,
+      zoomBucket: zoomBucket,
+      imageCacheSnapshot: Map.unmodifiable(imageCache),
+      lassoKey: lassoKey,
+      picture: picture,
+    ));
+    while (_entries.length > _maxEntries) {
+      // Dispose the LRU picture to release GPU/native memory.
+      final evicted = _entries.removeAt(0);
+      evicted.picture.dispose();
+    }
+  }
+
+  static String _lassoKey(LassoSelection? sel) {
+    if (sel == null) return '';
+    // Selection drag/rotate/scale happens at paint time in the live
+    // canvas, NOT in the cached picture (we record without those
+    // transforms applied — same as the previous inline code path).
+    // So only the SET of selected ids is part of the cache key.
+    final ids = sel.selectedIds.toList()..sort();
+    return ids.join(',');
+  }
+
+  static bool _imageCacheKeysetEqual(
+      Map<String, ui.Image> a, Map<String, ui.Image> b) {
+    if (identical(a, b)) return true;
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      if (!identical(b[entry.key], entry.value)) return false;
+    }
+    return true;
+  }
+}
+
+class _StaticPictureEntry {
+  final PageData pageData;
+  final int zoomBucket;
+  final Map<String, ui.Image> imageCacheSnapshot;
+  final String lassoKey;
+  final ui.Picture picture;
+
+  _StaticPictureEntry({
+    required this.pageData,
+    required this.zoomBucket,
+    required this.imageCacheSnapshot,
+    required this.lassoKey,
+    required this.picture,
+  });
 }
