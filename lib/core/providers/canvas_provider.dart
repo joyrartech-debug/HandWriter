@@ -37,6 +37,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   bool _eraserUndoPushed = false;
   Size? _viewportSize;
 
+  // ── Eraser throttling state ──
+  // Erasing fired `state.copyWith(pages: Map.from(...))` per pointer
+  // event (60-120 Hz), each one cloning the 215-PageData map and
+  // invalidating the Picture cache (pageData reference changes). On a
+  // dense ink page that turned every eraser drag into 60 full Picture
+  // rebuilds per second.
+  //
+  // Now: _eraseAt computes the new page content into [_pendingErasePage]
+  // and only commits to `state` at most every 33 ms, or immediately on
+  // pointer-up via [_flushPendingErase]. Visual feedback at 30 Hz still
+  // feels responsive while the heavy state cascade fires ~3× less.
+  PageData? _pendingErasePage;
+  String? _pendingEraseFileName;
+  Timer? _eraseFlushTimer;
+  DateTime _lastEraseFlushAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _eraseFlushInterval = Duration(milliseconds: 33);
+
   /// Mutex: serializes save() and _pullRemoteChanges() so they never
   /// race each other. Only one can modify state at a time.
   Completer<void>? _syncLock;
@@ -1158,6 +1176,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     if (tool == CanvasTool.lasso) { _endLasso(); return; }
     if (tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke) {
+      // Force-commit any throttled erasures so the pointer-up state
+      // matches what the user saw on screen during the drag.
+      if (_pendingErasePage != null) {
+        _flushPendingErase();
+      }
       state = state!.copyWith(clearEraserCursor: true);
       return;
     }
@@ -1943,11 +1966,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void _eraseAt(Offset position) {
     if (state == null) return;
     final s = state!;
-    final page = s.currentPage;
+    final fileName = s.currentPageFileName;
+    // Use the in-progress pending page as base if we have one — otherwise
+    // each event would re-erase from the original (pre-gesture) page and
+    // wipe out earlier erasures within the throttle window.
+    final page =
+        (_pendingErasePage != null && _pendingEraseFileName == fileName)
+            ? _pendingErasePage!
+            : s.currentPage;
     if (page == null) return;
 
     final eraseRadius = eraserSizeToRadius(s.toolSettings.eraserSize);
-    final fileName = s.currentPageFileName;
     final isStrokeEraser = s.currentTool == CanvasTool.eraserStroke;
 
     final newContent = <ContentElement>[];
@@ -2130,15 +2159,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     if (!changed) return;
 
-    // Only push undo once per eraser gesture
-    List<UndoEntry> undoStack;
-    if (!_eraserUndoPushed) {
-      undoStack = _pushUndo(s, fileName, page);
-      _eraserUndoPushed = true;
-    } else {
-      undoStack = s.undoStack;
-    }
-
     final updatedPage = PageData(
       pageId: page.pageId, pageNumber: page.pageNumber,
       width: page.width, height: page.height,
@@ -2147,12 +2167,69 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       createdAt: page.createdAt, modifiedAt: DateTime.now(),
     );
 
+    // Stash the latest computed page locally; commit to `state` at most
+    // every [_eraseFlushInterval] (or immediately on pointer-up via
+    // [_flushPendingErase]). This drops the ~60-120 Hz state cascade
+    // (Picture rebuild + chrome notify + Map<String,PageData>.from
+    // copy of 215 entries) down to ~30 Hz while keeping erase visually
+    // smooth.
+    _pendingErasePage = updatedPage;
+    _pendingEraseFileName = fileName;
+    final elapsed = DateTime.now().difference(_lastEraseFlushAt);
+    if (elapsed >= _eraseFlushInterval) {
+      _flushPendingErase();
+    } else {
+      _eraseFlushTimer?.cancel();
+      _eraseFlushTimer =
+          Timer(_eraseFlushInterval - elapsed, _flushPendingErase);
+    }
+  }
+
+  /// Apply the buffered eraser changes to `state`. Called from either
+  /// the throttle Timer in [_eraseAt] or directly on pointer-up by
+  /// [endStroke] so the final erase state always lands.
+  void _flushPendingErase() {
+    _eraseFlushTimer?.cancel();
+    _eraseFlushTimer = null;
+    final pending = _pendingErasePage;
+    final fn = _pendingEraseFileName;
+    if (pending == null || fn == null || state == null) {
+      _pendingErasePage = null;
+      _pendingEraseFileName = null;
+      return;
+    }
+    final s = state!;
+    if (s.currentPageFileName != fn) {
+      // User flipped pages mid-erase; drop the buffer.
+      _pendingErasePage = null;
+      _pendingEraseFileName = null;
+      return;
+    }
+
+    // Push undo only once per eraser gesture (first flush of the burst).
+    List<UndoEntry> undoStack;
+    if (!_eraserUndoPushed) {
+      // Use the original pre-gesture page from `s.pages[fn]`, NOT the
+      // pending page (which has erasures already applied).
+      final originalPage = s.pages[fn];
+      undoStack = originalPage == null
+          ? s.undoStack
+          : _pushUndo(s, fn, originalPage);
+      _eraserUndoPushed = true;
+    } else {
+      undoStack = s.undoStack;
+    }
+
     final updatedPages = Map<String, PageData>.from(s.pages);
-    updatedPages[fileName] = updatedPage;
+    updatedPages[fn] = pending;
 
     state = s.copyWith(
       pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true,
     );
+
+    _pendingErasePage = null;
+    _pendingEraseFileName = null;
+    _lastEraseFlushAt = DateTime.now();
   }
 
   // ── Lasso ──
