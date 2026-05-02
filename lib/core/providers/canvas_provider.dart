@@ -2032,45 +2032,43 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final newContent = <ContentElement>[];
     bool changed = false;
 
+    // Avoid `element.map(stroke:_, text:_, image:_, shape:_)` per
+    // element — that's 4 closure allocations per call, twice per
+    // element below = 8 closures × 200 elements × ~30 Hz ≈ 48 k
+    // closure allocs/sec of pure GC pressure during a drag. Replace
+    // with `is` checks on the runtime subtype which is zero-alloc.
     for (final element in page.layers.content) {
       bool shouldRemoveWhole = false;
 
       // Check non-stroke elements (text, symbols, shapes).
       // Per-tratto eraser: remove whole element if within bounding box.
       // Standard eraser: only remove if the eraser touches the actual outline/edge.
-      element.map(
-        stroke: (_) {},
-        text: (t) {
-          final rect = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height);
+      if (element is TextElement) {
+        final t = element.data;
+        final rect = Rect.fromLTWH(t.x, t.y, t.width, t.height);
+        if (isStrokeEraser) {
+          if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+        } else {
+          if (_distToRectEdges(position, rect) < eraseRadius) shouldRemoveWhole = true;
+        }
+      } else if (element is ImageElement) {
+        final img = element.data;
+        if (img.assetPath.startsWith('symbol_')) {
+          final rect = Rect.fromLTWH(img.x, img.y, img.width, img.height);
           if (isStrokeEraser) {
             if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
           } else {
-            // Standard: check proximity to edges of text box
             if (_distToRectEdges(position, rect) < eraseRadius) shouldRemoveWhole = true;
           }
-        },
-        image: (img) {
-          if (img.data.assetPath.startsWith('symbol_')) {
-            final rect = Rect.fromLTWH(img.data.x, img.data.y, img.data.width, img.data.height);
-            if (isStrokeEraser) {
-              if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
-            } else {
-              // Standard: check proximity to edges of symbol bounding box
-              if (_distToRectEdges(position, rect) < eraseRadius) shouldRemoveWhole = true;
-            }
-          }
-        },
-        shape: (sh) {
-          if (isStrokeEraser) {
-            final rect = Rect.fromPoints(
-              Offset(sh.data.x1, sh.data.y1),
-              Offset(sh.data.x2, sh.data.y2),
-            );
-            if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
-          }
-          // Standard eraser is handled below (partial erase, not whole removal)
-        },
-      );
+        }
+      } else if (element is ShapeElement && isStrokeEraser) {
+        final sh = element.data;
+        final rect = Rect.fromPoints(
+          Offset(sh.x1, sh.y1),
+          Offset(sh.x2, sh.y2),
+        );
+        if (rect.inflate(eraseRadius).contains(position)) shouldRemoveWhole = true;
+      }
 
       if (shouldRemoveWhole) {
         changed = true;
@@ -2083,175 +2081,158 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // points and apply the same splitting logic, so only the touched
       // portion is erased.
       bool handled = false;
-      element.map(
-        stroke: (stroke) {
-          handled = true;
+      // Same closure-free pattern: replace `element.map(stroke:_, ...)`
+      // with a typed dispatch.
+      if (element is StrokeElement) {
+        final stroke = element;
+        handled = true;
 
-          // BBOX FAST PATH — most strokes on a dense page are nowhere
-          // near the eraser cursor, so walking all 80 points just to
-          // discover that is wasted work. Cache the stroke's bbox via
-          // Expando the first time we see it; subsequent _eraseAt
-          // calls skip the entire point loop unless the bbox
-          // (inflated by eraseRadius) actually contains `position`.
-          // On a 200-stroke page where the cursor only intersects
-          // ~5 strokes at a time this drops the per-event work from
-          // 200 × 80 = 16k iterations to ~5 × 80 + 195 bbox checks.
-          var bbox = _strokeBboxCache[stroke.data];
-          if (bbox == null) {
-            double minX = double.infinity, minY = double.infinity;
-            double maxX = -double.infinity, maxY = -double.infinity;
-            for (final p in stroke.data.points) {
-              if (p.x < minX) minX = p.x;
-              if (p.x > maxX) maxX = p.x;
-              if (p.y < minY) minY = p.y;
-              if (p.y > maxY) maxY = p.y;
-            }
-            if (minX == double.infinity) {
-              // Empty stroke; treat as untouched.
-              newContent.add(element);
-              return;
-            }
-            bbox = Rect.fromLTRB(minX, minY, maxX, maxY);
-            _strokeBboxCache[stroke.data] = bbox;
+        // BBOX FAST PATH — most strokes on a dense page are nowhere
+        // near the eraser cursor, so walking all 80 points just to
+        // discover that is wasted work. Cache the stroke's bbox via
+        // Expando the first time we see it.
+        var bbox = _strokeBboxCache[stroke.data];
+        if (bbox == null) {
+          double minX = double.infinity, minY = double.infinity;
+          double maxX = -double.infinity, maxY = -double.infinity;
+          for (final p in stroke.data.points) {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (p.y < minY) minY = p.y;
+            if (p.y > maxY) maxY = p.y;
           }
-          if (!bbox.inflate(eraseRadius).contains(position)) {
+          if (minX == double.infinity) {
             newContent.add(element);
-            return;
+            continue;
           }
+          bbox = Rect.fromLTRB(minX, minY, maxX, maxY);
+          _strokeBboxCache[stroke.data] = bbox;
+        }
+        if (!bbox.inflate(eraseRadius).contains(position)) {
+          newContent.add(element);
+          continue;
+        }
 
-          final r2 = eraseRadius * eraseRadius;
-          if (isStrokeEraser) {
-            // Remove entire stroke if any point is within radius
-            for (final point in stroke.data.points) {
-              final dx = point.x - position.dx;
-              final dy = point.y - position.dy;
-              if (dx * dx + dy * dy < r2) {
-                changed = true;
-                return; // skip adding this element
-              }
+        final r2 = eraseRadius * eraseRadius;
+        if (isStrokeEraser) {
+          bool hit = false;
+          for (final point in stroke.data.points) {
+            final dx = point.x - position.dx;
+            final dy = point.y - position.dy;
+            if (dx * dx + dy * dy < r2) {
+              hit = true;
+              break;
             }
-            newContent.add(element);
+          }
+          if (hit) {
+            changed = true;
           } else {
-            // FAST PATH for standard eraser: short-circuit "is any point
-            // touched?" before allocating segments/currentSegment lists.
-            // 95 % of strokes that pass the bbox check still have no
-            // points within the (smaller) eraser circle.
-            bool anyTouched = false;
-            for (final point in stroke.data.points) {
-              final dx = point.x - position.dx;
-              final dy = point.y - position.dy;
-              if (dx * dx + dy * dy < r2) {
-                anyTouched = true;
-                break;
-              }
-            }
-            if (!anyTouched) {
-              newContent.add(element);
-              return;
-            }
-            // Standard eraser: split stroke, keep segments outside eraser
-            final segments = <List<StrokePoint>>[];
-            var currentSegment = <StrokePoint>[];
-
-            for (final point in stroke.data.points) {
-              final dx = point.x - position.dx;
-              final dy = point.y - position.dy;
-              if (dx * dx + dy * dy < r2) {
-                if (currentSegment.length >= 2) {
-                  segments.add(currentSegment);
-                }
-                currentSegment = [];
-                changed = true;
-              } else {
-                currentSegment.add(point);
-              }
-            }
-            if (currentSegment.length >= 2) {
-              segments.add(currentSegment);
-            }
-
-            if (segments.isEmpty) {
-              changed = true;
-              return;
-            }
-
-            if (segments.length == 1 && segments[0].length == stroke.data.points.length) {
-              newContent.add(element);
-              return;
-            }
-
-            for (final seg in segments) {
-              newContent.add(ContentElement.stroke(
-                id: const Uuid().v4(),
-                zIndex: stroke.zIndex,
-                data: StrokeData(
-                  points: seg,
-                  toolType: stroke.data.toolType,
-                  color: stroke.data.color,
-                  baseWidth: stroke.data.baseWidth,
-                  isHighlighter: stroke.data.isHighlighter,
-                  opacity: stroke.data.opacity,
-                  timestamp: stroke.data.timestamp,
-                ),
-              ));
+            newContent.add(element);
+          }
+        } else {
+          bool anyTouched = false;
+          for (final point in stroke.data.points) {
+            final dx = point.x - position.dx;
+            final dy = point.y - position.dy;
+            if (dx * dx + dy * dy < r2) {
+              anyTouched = true;
+              break;
             }
           }
-        },
-        text: (_) {},
-        image: (_) {},
-        shape: (sh) {
-          // Standard eraser: decompose shape outline into sampled points,
-          // then erase only the touched portion (like stroke splitting).
-          // Per-tratto already handled above via shouldRemoveWhole.
-          if (!isStrokeEraser) {
-            handled = true;
-            final sampledEdges = _shapeToSampledEdges(sh.data, eraseRadius * 0.5);
-            bool anyErased = false;
-            final survivingStrokes = <ContentElement>[];
-
-            for (final edgePoints in sampledEdges) {
-              final segments = <List<StrokePoint>>[];
-              var currentSeg = <StrokePoint>[];
-
-              for (final point in edgePoints) {
-                final dx = point.x - position.dx;
-                final dy = point.y - position.dy;
-                if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
-                  if (currentSeg.length >= 2) segments.add(currentSeg);
-                  currentSeg = [];
-                  anyErased = true;
-                } else {
-                  currentSeg.add(point);
-                }
+          if (!anyTouched) {
+            newContent.add(element);
+            continue;
+          }
+          final segments = <List<StrokePoint>>[];
+          var currentSegment = <StrokePoint>[];
+          for (final point in stroke.data.points) {
+            final dx = point.x - position.dx;
+            final dy = point.y - position.dy;
+            if (dx * dx + dy * dy < r2) {
+              if (currentSegment.length >= 2) {
+                segments.add(currentSegment);
               }
-              if (currentSeg.length >= 2) segments.add(currentSeg);
-
-              for (final seg in segments) {
-                survivingStrokes.add(ContentElement.stroke(
-                  id: const Uuid().v4(),
-                  zIndex: sh.zIndex,
-                  data: StrokeData(
-                    points: seg,
-                    toolType: 'ballpoint',
-                    color: sh.data.strokeColor,
-                    baseWidth: sh.data.strokeWidth,
-                    isHighlighter: false,
-                    opacity: 1.0,
-                  ),
-                ));
-              }
-            }
-
-            if (anyErased) {
+              currentSegment = [];
               changed = true;
-              newContent.addAll(survivingStrokes);
             } else {
-              // Nothing was erased, keep original shape
-              newContent.add(element);
+              currentSegment.add(point);
             }
           }
-        },
-      );
+          if (currentSegment.length >= 2) {
+            segments.add(currentSegment);
+          }
+          if (segments.isEmpty) {
+            changed = true;
+            continue;
+          }
+          if (segments.length == 1 &&
+              segments[0].length == stroke.data.points.length) {
+            newContent.add(element);
+            continue;
+          }
+          for (final seg in segments) {
+            newContent.add(ContentElement.stroke(
+              id: const Uuid().v4(),
+              zIndex: stroke.zIndex,
+              data: StrokeData(
+                points: seg,
+                toolType: stroke.data.toolType,
+                color: stroke.data.color,
+                baseWidth: stroke.data.baseWidth,
+                isHighlighter: stroke.data.isHighlighter,
+                opacity: stroke.data.opacity,
+                timestamp: stroke.data.timestamp,
+              ),
+            ));
+          }
+        }
+      } else if (element is ShapeElement && !isStrokeEraser) {
+        final sh = element;
+        handled = true;
+        final sampledEdges = _shapeToSampledEdges(sh.data, eraseRadius * 0.5);
+        bool anyErased = false;
+        final survivingStrokes = <ContentElement>[];
+
+        for (final edgePoints in sampledEdges) {
+          final segments = <List<StrokePoint>>[];
+          var currentSeg = <StrokePoint>[];
+
+          for (final point in edgePoints) {
+            final dx = point.x - position.dx;
+            final dy = point.y - position.dy;
+            if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
+              if (currentSeg.length >= 2) segments.add(currentSeg);
+              currentSeg = [];
+              anyErased = true;
+            } else {
+              currentSeg.add(point);
+            }
+          }
+          if (currentSeg.length >= 2) segments.add(currentSeg);
+
+          for (final seg in segments) {
+            survivingStrokes.add(ContentElement.stroke(
+              id: const Uuid().v4(),
+              zIndex: sh.zIndex,
+              data: StrokeData(
+                points: seg,
+                toolType: 'ballpoint',
+                color: sh.data.strokeColor,
+                baseWidth: sh.data.strokeWidth,
+                isHighlighter: false,
+                opacity: 1.0,
+              ),
+            ));
+          }
+        }
+
+        if (anyErased) {
+          changed = true;
+          newContent.addAll(survivingStrokes);
+        } else {
+          newContent.add(element);
+        }
+      }
 
       if (!handled) {
         newContent.add(element);

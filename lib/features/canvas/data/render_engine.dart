@@ -205,14 +205,18 @@ class CanvasRenderEngine extends CustomPainter {
     bool hasTransform, {
     bool includeImages = true,
   }) {
-    // 0. Page shadow (behind the page)
-    final shadowPaint = Paint()
-      ..color = const Color(0x33000000)
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 8);
-    canvas.drawRect(
-      Rect.fromLTWH(3, 3, pageData.width, pageData.height),
-      shadowPaint,
-    );
+    // 0. Page shadow — three flat offset rects of decreasing alpha.
+    // Replaces a `MaskFilter.blur(sigma:8)` Gaussian which Skia
+    // re-rasterises every layer invalidation (60 Hz during eraser =
+    // ~525 k pixel × kernel ops/frame). Three flat fills look almost
+    // identical at normal zoom but cost ~100× less per frame.
+    final shadowOuter = Paint()..color = const Color(0x14000000);
+    final shadowMid = Paint()..color = const Color(0x1F000000);
+    final shadowInner = Paint()..color = const Color(0x29000000);
+    final w = pageData.width, h = pageData.height;
+    canvas.drawRect(Rect.fromLTWH(5, 5, w, h), shadowOuter);
+    canvas.drawRect(Rect.fromLTWH(3.5, 3.5, w, h), shadowMid);
+    canvas.drawRect(Rect.fromLTWH(2, 2, w, h), shadowInner);
 
     // 1. Page background (white rect)
     _paintBackground(canvas, pageData.layers.background);

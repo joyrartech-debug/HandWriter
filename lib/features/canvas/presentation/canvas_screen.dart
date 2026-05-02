@@ -2791,9 +2791,50 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 ),
               ),
 
-              // Eraser cursor
-              if (_isEraserTool(canvasState.currentTool) && canvasState.eraserCursorPos != null)
-                _buildEraserCursor(canvasState, canvasSize),
+              // Eraser cursor — wrapped via Positioned.fill + inner
+              // Stack so the cursor's `Positioned` (returned by
+              // `_buildEraserCursor`) sits directly under a Stack
+              // ancestor as required (ParentDataWidget invariant).
+              // Without the inner Stack, putting a Positioned inside a
+              // bare Consumer breaks the outer Stack's layout and the
+              // entire canvas subtree fails to render.
+              //
+              // The Consumer watches just (currentTool, eraserCursorPos)
+              // — the parent's record select intentionally omits
+              // eraserCursorPos (would force a chrome rebuild at
+              // pointer rate). Without this Consumer the cursor stays
+              // frozen and "teleports" only when something else
+              // triggers a parent rebuild.
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: Consumer(
+                    builder: (context, ref, _) {
+                      final eraserState =
+                          ref.watch(canvasProvider.select((s) =>
+                              s == null
+                                  ? null
+                                  : (
+                                      tool: s.currentTool,
+                                      pos: s.eraserCursorPos,
+                                    )));
+                      if (eraserState == null ||
+                          !_isEraserTool(eraserState.tool) ||
+                          eraserState.pos == null) {
+                        return const SizedBox.shrink();
+                      }
+                      final fullState = ref.read(canvasProvider);
+                      if (fullState == null) {
+                        return const SizedBox.shrink();
+                      }
+                      return Stack(
+                        children: [
+                          _buildEraserCursor(fullState, canvasSize),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
 
               // Transform handles for selected elements
               ..._buildTransformHandles(canvasState, canvasSize),
