@@ -19,6 +19,7 @@ import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
 import 'package:handwriter/core/providers/pending_import_provider.dart';
 import 'package:handwriter/core/providers/preset_colors_provider.dart';
+import 'package:handwriter/core/services/sync_service.dart' as sync_svc;
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/features/canvas/presentation/image_handle_overlay.dart';
 import 'package:handwriter/features/canvas/presentation/remote_changes_banner.dart';
@@ -4622,10 +4623,63 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 _exportAsPng();
               },
             ),
+            const Divider(height: 8),
+            ListTile(
+              leading: const Icon(Icons.archive_outlined),
+              title: const Text('Esporta come .ncnote (nativo)'),
+              subtitle: const Text(
+                  'Formato nativo, qualità vettoriale piena (per backup o trasferimento)'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _exportAsNcnote();
+              },
+            ),
           ],
         ),
       ),
     );
+  }
+
+  /// Native export: rebuild the .ncnote ZIP from current state and save it.
+  /// Lossless — preserves vector strokes, text, shapes, images, symbols
+  /// exactly as they're stored in memory.
+  Future<void> _exportAsNcnote() async {
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    try {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Generazione .ncnote in corso…')),
+        );
+      }
+      final bytes = sync_svc.SyncService.buildPackageBytes(
+        metadata: state.metadata,
+        document: state.document,
+        pages: state.pages,
+        assets: state.assetBytes.isNotEmpty ? state.assetBytes : null,
+        symbolLibraries: state.symbolLibraries.isNotEmpty
+            ? state.symbolLibraries.map((l) => l.toJson()).toList()
+            : null,
+      );
+      final fileName =
+          '${_sanitiseForFilename(state.metadata.title)}.ncnote';
+      await _saveOrShare(fileName, bytes, 'application/zip');
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+                '.ncnote esportato (${(bytes.length / 1024).toStringAsFixed(1)} KB)'),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Errore export .ncnote: $e')));
+      }
+    }
   }
 
   /// Misc actions: insert image / change paper / save now.
