@@ -5467,10 +5467,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// after its remote upload commits — running a pull against our own
   /// half-committed upload would show the just-saved state as a remote
   /// "conflict").
+  ///
+  /// Adaptive interval: starts at [AppConfig.deltaPullInterval] (2 s) for
+  /// snappy convergence right after a notebook open or a real change.
+  /// After [_idlePullThreshold] consecutive noop pulls we exponentially
+  /// back off up to [_idlePullMaxInterval] so an idle notebook doesn't
+  /// keep PROPFIND'ing the server and parsing a 215-entry XML payload
+  /// every 2 s — that was burning 100 % of one CPU core for no benefit.
+  /// On any real change ([_idlePullCount] reset by [_pullRemoteChanges])
+  /// we drop straight back to the fast cadence.
   void _schedulePullTick() {
     if (_disposed) return;
+    final base = _pullIntervalForIdle();
     final jitterMs = _pullJitterRng.nextInt(AppConfig.deltaPullJitter.inMilliseconds + 1);
-    final next = AppConfig.deltaPullInterval + Duration(milliseconds: jitterMs);
+    final next = base + Duration(milliseconds: jitterMs);
     _pullTimer?.cancel();
     _pullTimer = Timer(next, () {
       if (_disposed) return;
@@ -5483,6 +5493,36 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
       _schedulePullTick();
     });
+  }
+
+  /// Number of consecutive pull cycles that ended in a "nothing changed"
+  /// noop. Used to back off the polling interval (see
+  /// [_pullIntervalForIdle]). Reset to 0 in [_pullRemoteChanges] whenever
+  /// a real change is observed.
+  int _idlePullCount = 0;
+  static const int _idlePullThreshold = 3;
+  static const Duration _idlePullMaxInterval = Duration(seconds: 30);
+
+  /// Counter for the ordered-commit safety-net: every Nth pull does the
+  /// full pages/ PROPFIND even when meta-ETag is unchanged, to catch
+  /// the rare case of pages added on another device that crashed before
+  /// updating metadata.json. Cycle reset to 0 each time we run the
+  /// full PROPFIND.
+  int _pagePropfindCounter = 0;
+  static const int _propfindSafetyNetEvery = 8;
+
+  Duration _pullIntervalForIdle() {
+    if (_idlePullCount < _idlePullThreshold) {
+      return AppConfig.deltaPullInterval;
+    }
+    // Exponential backoff: idle=3 → 4s, 4 → 8s, 5 → 16s, 6+ → 30s (cap).
+    final shift = (_idlePullCount - _idlePullThreshold).clamp(0, 6);
+    final ms = AppConfig.deltaPullInterval.inMilliseconds * (2 << shift);
+    final capped = ms.clamp(
+      AppConfig.deltaPullInterval.inMilliseconds,
+      _idlePullMaxInterval.inMilliseconds,
+    );
+    return Duration(milliseconds: capped);
   }
 
   bool _isPulling = false;
@@ -5534,19 +5574,39 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         'cachedMetaEtag=${_remoteMetaEtag ?? "null"} '
         'lastPageEtags=${_lastPageEtags.length}',
       ));
-      // Fetch metadata ETag + per-page ETags in a single parallel round-trip.
-      // We used to skip the per-page PROPFIND on the idle fast-path to save a
-      // call, but that hid a dangerous case: when another device crashes
-      // mid-upload after writing pages + document.json but BEFORE committing
-      // metadata.json (ordered-commit bug window), the server sits with
-      // metadata.pageCount < pages/ folder count. The metadata ETag looks
-      // unchanged → fast-path skip → the orphan page_NNN.json is invisible
-      // to this device forever. By doing both checks here we detect the
-      // mismatch and fall through to the slow path which downloads
-      // document.json (which IS up-to-date) and hydrates the new pages.
-      final remoteState =
-          await syncService.getRemoteChangeState(pullNotebookId);
-      final fastMetaEtag = remoteState.metaEtag;
+      // ── Cheap idle path: meta-ETag HEAD only ──
+      //
+      // Fetching meta-ETag AND a full pages/ PROPFIND every 2 s burnt a
+      // whole CPU core idle on a 215-page notebook (XML payload ~50 KB +
+      // parse + Map diff). Almost every poll is a noop, so we now do
+      // ONLY the meta-ETag HEAD (a few-byte response) on most ticks and
+      // fall through to the full PROPFIND only when meta-ETag actually
+      // moved, or every [_propfindSafetyNetEvery] cycles as a safety
+      // net catching the rare ordered-commit race (another device wrote
+      // pages + document.json but crashed before committing
+      // metadata.json — meta-ETag unchanged but pages/ folder has new
+      // files invisible from a HEAD).
+      String? fastMetaEtag;
+      var fullStateFetched = false;
+      ({String? metaEtag, Map<String, String> pageEtags})? remoteState;
+      final mustDoSafetyNet =
+          ++_pagePropfindCounter >= _propfindSafetyNetEvery;
+      try {
+        fastMetaEtag =
+            await syncService.getDeltaMetaEtag(pullNotebookId);
+      } catch (e) {
+        unawaited(CrashLogger.append('[Pull] meta-HEAD failed: $e'));
+        return;
+      }
+      final metaMoved = fastMetaEtag != null &&
+          (_remoteMetaEtag == null || fastMetaEtag != _remoteMetaEtag);
+      if (metaMoved || mustDoSafetyNet || _remoteMetaEtag == null) {
+        remoteState =
+            await syncService.getRemoteChangeState(pullNotebookId);
+        fastMetaEtag = remoteState.metaEtag;
+        fullStateFetched = true;
+        _pagePropfindCounter = 0;
+      }
       if (state == null || state!.metadata.id != pullNotebookId) {
         print('[Canvas] Pull aborted — notebook switched during HEAD '
             '(expected $pullNotebookId, got ${state?.metadata.id})');
@@ -5564,15 +5624,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       //      the previous detector missed, causing iPad edits to existing
       //      pages to be invisible on PC forever when the iPad's save hit
       //      the ordered-commit race.
-      final remotePageCount = remoteState.pageEtags.length;
-      final serverInconsistent =
-          remotePageCount > s0.document.pages.length ||
-          (_lastPageEtags.isNotEmpty &&
-              remoteState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k))) ||
-          (_lastPageEtags.isNotEmpty &&
-              remoteState.pageEtags.entries.any(
-                  (e) => _lastPageEtags[e.key] != null &&
-                         _lastPageEtags[e.key] != e.value));
+      // Skipped on the cheap path (no full PROPFIND) since meta-ETag is
+      // matching our cache → the safety-net cycle every
+      // [_propfindSafetyNetEvery] ticks will catch any rare divergence.
+      final int remotePageCount = fullStateFetched
+          ? remoteState!.pageEtags.length
+          : _lastPageEtags.length;
+      final serverInconsistent = fullStateFetched &&
+          (remoteState!.pageEtags.length > s0.document.pages.length ||
+              (_lastPageEtags.isNotEmpty &&
+                  remoteState.pageEtags.keys.any((k) => !_lastPageEtags.containsKey(k))) ||
+              (_lastPageEtags.isNotEmpty &&
+                  remoteState.pageEtags.entries.any(
+                      (e) => _lastPageEtags[e.key] != null &&
+                             _lastPageEtags[e.key] != e.value)));
       if (fastMetaEtag != null &&
           _remoteMetaEtag != null &&
           fastMetaEtag == _remoteMetaEtag &&
@@ -5627,8 +5692,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           unawaited(CrashLogger.append(
             '[Pull] skip: meta ETag unchanged (fast=$fastMetaEtag) '
             'and state is consistent (pages=${s0.pages.length}=doc=${s0.document.pages.length}, '
-            'remote pages=$remotePageCount)',
+            'remote pages=$remotePageCount, fullPropfind=$fullStateFetched)',
           ));
+          _idlePullCount++;
           return;
         }
         unawaited(CrashLogger.append(
@@ -5651,6 +5717,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       ));
 
       // ── Slow path: remote changed, acquire lock ──
+      // Real activity → drop adaptive backoff back to the snappy interval.
+      _idlePullCount = 0;
       final locked = await _acquireSyncLock();
       if (!locked) return;
       try {
