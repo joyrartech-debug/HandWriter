@@ -218,17 +218,19 @@ class HwFloatingDock extends StatelessWidget {
     );
   }
 
+  static const Set<CanvasTool> _inkTools = {
+    CanvasTool.pen,
+    CanvasTool.ballpoint,
+    CanvasTool.brush,
+    CanvasTool.calligraphy,
+    CanvasTool.highlighter,
+  };
+
   Widget _toolBtn(
       BuildContext context, CanvasTool tool, String icon, String tooltip) {
     final active = currentTool == tool;
     final p = HwThemeScope.of(context);
-    final isInkTool = const {
-      CanvasTool.pen,
-      CanvasTool.ballpoint,
-      CanvasTool.brush,
-      CanvasTool.calligraphy,
-      CanvasTool.highlighter,
-    }.contains(tool);
+    final isInkTool = _inkTools.contains(tool);
 
     return Tooltip(
       message: tooltip,

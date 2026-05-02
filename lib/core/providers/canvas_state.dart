@@ -347,6 +347,14 @@ class PageConflict {
 //  CANVAS STATE
 // ═══════════════════════════════════════════════════════════════
 
+/// Per-DocumentStructure cache for [CanvasState.filteredPageIndices].
+/// Keyed on document identity so the entry is naturally GC'd when a
+/// rebuild produces a different document. Holds the most recent
+/// (activeChapterId, indices) tuple — single-slot is fine because
+/// realistic UI only filters by one chapter at a time.
+final Expando<({String? chapterId, List<int> indices})> _filteredIndicesCache =
+    Expando();
+
 class CanvasState {
   final NotebookMetadata metadata;
   final DocumentStructure document;
@@ -384,14 +392,29 @@ class CanvasState {
   final List<PageConflict> pendingConflicts;
 
   /// Indices of pages visible under the active chapter filter (or all if null).
+  ///
+  /// Memoised on `document` identity + `activeChapterId`. With a 215-page
+  /// notebook this getter used to allocate a fresh `List<int>` of length
+  /// 215 (and walk all pages for the chapter filter) every time it was
+  /// read — and the build path reads it 3-5× per rebuild and creates a
+  /// derived `[i+1]` list of the same length, multiplying the work. The
+  /// cache lets `Consumer.select((s) => s.filteredPageIndices)` actually
+  /// compare-equal across rebuilds (identical list reference) so the
+  /// chrome can skip rebuilding when the slice is genuinely unchanged.
   List<int> get filteredPageIndices {
-    if (activeChapterId == null) {
-      return List.generate(document.pages.length, (i) => i);
+    final cached = _filteredIndicesCache[document];
+    if (cached != null && cached.chapterId == activeChapterId) {
+      return cached.indices;
     }
-    return [
-      for (int i = 0; i < document.pages.length; i++)
-        if (document.pages[i].chapterId == activeChapterId) i,
-    ];
+    final result = activeChapterId == null
+        ? List<int>.generate(document.pages.length, (i) => i, growable: false)
+        : List<int>.unmodifiable([
+            for (int i = 0; i < document.pages.length; i++)
+              if (document.pages[i].chapterId == activeChapterId) i,
+          ]);
+    _filteredIndicesCache[document] =
+        (chapterId: activeChapterId, indices: result);
+    return result;
   }
 
   int get filteredPageCount => filteredPageIndices.length;

@@ -5716,9 +5716,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         'cached=${_remoteMetaEtag ?? "null"} → acquire lock + full fetch',
       ));
 
-      // ── Slow path: remote changed, acquire lock ──
-      // Real activity → drop adaptive backoff back to the snappy interval.
-      _idlePullCount = 0;
+      // ── Slow path: remote changed (or safety-net cycle), acquire lock ──
+      //
+      // We deliberately do NOT reset _idlePullCount here. The slow path
+      // is entered both for genuine changes AND for the periodic safety
+      // net (every [_propfindSafetyNetEvery] ticks). Resetting on
+      // safety-net cycles defeated the adaptive backoff: every 8th tick
+      // dropped us back to the 2 s cadence, then 8 more ticks of 2 s,
+      // then safety-net again, forever — the whole point of the backoff
+      // (idle should converge to 30 s) never materialised, and a
+      // 215-page notebook kept paying a full pages/ PROPFIND every 16 s
+      // for nothing. The reset now happens deeper in the function, only
+      // when [changeState.metaEtag != _remoteMetaEtag] (true work to
+      // do).
       final locked = await _acquireSyncLock();
       if (!locked) return;
       try {
@@ -5761,6 +5771,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
                            _lastPageEtags[e.key] != e.value));
         if (changeState.metaEtag != null &&
             (changeState.metaEtag != _remoteMetaEtag || innerInconsistent)) {
+          // Real work detected → reset idle counter so the next ticks
+          // happen at the snappy 2 s cadence until things stabilise.
+          _idlePullCount = 0;
           if (changeState.metaEtag == _remoteMetaEtag && innerInconsistent) {
             print('[Canvas] Meta ETag unchanged but pages/ folder grew '
                 '(${changeState.pageEtags.length} remote vs '
