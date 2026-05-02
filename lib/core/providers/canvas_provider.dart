@@ -31,6 +31,13 @@ final canvasProvider =
   return CanvasNotifier(ref);
 });
 
+/// Per-StrokeData bounding-box cache used by the eraser hit-test.
+/// Computed lazily on the first hit, persists for the lifetime of the
+/// underlying StrokeData reference (Expando = weak-keyed). Skipping
+/// even one stroke's 80-point loop per pointer event is the difference
+/// between a 200-element walk dominating the main thread and not.
+final Expando<Rect> _strokeBboxCache = Expando<Rect>();
+
 class CanvasNotifier extends StateNotifier<CanvasState?> {
   final Ref _ref;
   // Track whether we've pushed undo for the current eraser/drag gesture
@@ -53,7 +60,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   Timer? _eraseFlushTimer;
   DateTime _lastEraseFlushAt =
       DateTime.fromMillisecondsSinceEpoch(0);
-  static const Duration _eraseFlushInterval = Duration(milliseconds: 33);
+  // 16 ms = 60 Hz commit cap — one flush per vsync. Below 60 Hz the
+  // visual updates feel choppy regardless of the per-flush work
+  // (user perceives 20 fps eraser feedback even on a 1-stroke page
+  // because the canvas doesn't tick on every vsync). Each flush
+  // remains cheap thanks to the stroke-path Expando cache and the
+  // Picture cache walking only the current page's elements.
+  static const Duration _eraseFlushInterval = Duration(milliseconds: 16);
+
+  /// Last position where [_eraseAt] actually walked the content list.
+  /// Pointer events whose movement since this position is below
+  /// [_eraseRadiusFraction] × eraserRadius are skipped — at 120 Hz pen
+  /// on iPad the pointer reports many sub-millimetre samples that
+  /// cannot intersect any element a previous, denser sample didn't
+  /// already cover. Walking 200 elements × 80 points per skipped
+  /// sample dominated CPU on dense ink pages.
+  Offset _lastEraseAtPos = const Offset(-1e9, -1e9);
+  static const double _eraseRadiusFraction = 0.3;
 
   /// Mutex: serializes save() and _pullRemoteChanges() so they never
   /// race each other. Only one can modify state at a time.
@@ -1112,6 +1135,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     if (tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke) {
       _eraserUndoPushed = false; // Reset at start of each eraser gesture
+      _lastEraseAtPos = const Offset(-1e9, -1e9); // unfreeze dist-throttle
       state = state!.copyWith(eraserCursorPos: position);
       _eraseAt(position);
       return;
@@ -1139,7 +1163,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     if (tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke) {
-      state = state!.copyWith(eraserCursorPos: position);
+      // Note: do NOT call state.copyWith for eraserCursorPos here.
+      // continueStroke fires at 60-120 Hz on Apple Pencil / mouse and
+      // every state mutation triggers Riverpod fan-out to all
+      // listeners (~7 selectors run their compute even if they don't
+      // re-fire). _eraseAt below updates the cursor position itself
+      // alongside its own distance throttle so the cursor moves
+      // visibly only when erase work happens.
       _eraseAt(position);
       return;
     }
@@ -1966,7 +1996,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void _eraseAt(Offset position) {
     if (state == null) return;
     final s = state!;
-    final fileName = s.currentPageFileName;
+    final eraseRadius = eraserSizeToRadius(s.toolSettings.eraserSize);
+    // Sub-radius movement check: any element a closer-spaced previous
+    // sample might erase is also reachable from this near-identical
+    // position, so skip the O(elements × points) scan entirely.
+    final dx = position.dx - _lastEraseAtPos.dx;
+    final dy = position.dy - _lastEraseAtPos.dy;
+    final movedSq = dx * dx + dy * dy;
+    final thresholdSq = (eraseRadius * _eraseRadiusFraction) *
+        (eraseRadius * _eraseRadiusFraction);
+    if (movedSq < thresholdSq) return;
+    _lastEraseAtPos = position;
+
+    // Now that we know we're going to do real erase work, push the
+    // cursor visualisation to state. Throttling this with the same
+    // dist-check as the erase compute means the cursor visibly moves
+    // ~30 Hz instead of 120 Hz, but only saves Riverpod fan-out work
+    // — at radius * 0.3 movement thresholds the cursor still tracks
+    // the pointer smoothly to the eye.
+    state = s.copyWith(eraserCursorPos: position);
+    final s2 = state!;
+
+    final fileName = s2.currentPageFileName;
     // Use the in-progress pending page as base if we have one — otherwise
     // each event would re-erase from the original (pre-gesture) page and
     // wipe out earlier erasures within the throttle window.
@@ -1976,7 +2027,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             : s.currentPage;
     if (page == null) return;
 
-    final eraseRadius = eraserSizeToRadius(s.toolSettings.eraserSize);
     final isStrokeEraser = s.currentTool == CanvasTool.eraserStroke;
 
     final newContent = <ContentElement>[];
@@ -2036,18 +2086,69 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       element.map(
         stroke: (stroke) {
           handled = true;
+
+          // BBOX FAST PATH — most strokes on a dense page are nowhere
+          // near the eraser cursor, so walking all 80 points just to
+          // discover that is wasted work. Cache the stroke's bbox via
+          // Expando the first time we see it; subsequent _eraseAt
+          // calls skip the entire point loop unless the bbox
+          // (inflated by eraseRadius) actually contains `position`.
+          // On a 200-stroke page where the cursor only intersects
+          // ~5 strokes at a time this drops the per-event work from
+          // 200 × 80 = 16k iterations to ~5 × 80 + 195 bbox checks.
+          var bbox = _strokeBboxCache[stroke.data];
+          if (bbox == null) {
+            double minX = double.infinity, minY = double.infinity;
+            double maxX = -double.infinity, maxY = -double.infinity;
+            for (final p in stroke.data.points) {
+              if (p.x < minX) minX = p.x;
+              if (p.x > maxX) maxX = p.x;
+              if (p.y < minY) minY = p.y;
+              if (p.y > maxY) maxY = p.y;
+            }
+            if (minX == double.infinity) {
+              // Empty stroke; treat as untouched.
+              newContent.add(element);
+              return;
+            }
+            bbox = Rect.fromLTRB(minX, minY, maxX, maxY);
+            _strokeBboxCache[stroke.data] = bbox;
+          }
+          if (!bbox.inflate(eraseRadius).contains(position)) {
+            newContent.add(element);
+            return;
+          }
+
+          final r2 = eraseRadius * eraseRadius;
           if (isStrokeEraser) {
             // Remove entire stroke if any point is within radius
             for (final point in stroke.data.points) {
               final dx = point.x - position.dx;
               final dy = point.y - position.dy;
-              if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
+              if (dx * dx + dy * dy < r2) {
                 changed = true;
                 return; // skip adding this element
               }
             }
             newContent.add(element);
           } else {
+            // FAST PATH for standard eraser: short-circuit "is any point
+            // touched?" before allocating segments/currentSegment lists.
+            // 95 % of strokes that pass the bbox check still have no
+            // points within the (smaller) eraser circle.
+            bool anyTouched = false;
+            for (final point in stroke.data.points) {
+              final dx = point.x - position.dx;
+              final dy = point.y - position.dy;
+              if (dx * dx + dy * dy < r2) {
+                anyTouched = true;
+                break;
+              }
+            }
+            if (!anyTouched) {
+              newContent.add(element);
+              return;
+            }
             // Standard eraser: split stroke, keep segments outside eraser
             final segments = <List<StrokePoint>>[];
             var currentSegment = <StrokePoint>[];
@@ -2055,7 +2156,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             for (final point in stroke.data.points) {
               final dx = point.x - position.dx;
               final dy = point.y - position.dy;
-              if (dx * dx + dy * dy < eraseRadius * eraseRadius) {
+              if (dx * dx + dy * dy < r2) {
                 if (currentSegment.length >= 2) {
                   segments.add(currentSegment);
                 }

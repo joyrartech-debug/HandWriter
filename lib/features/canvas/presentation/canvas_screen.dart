@@ -343,17 +343,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _triggerAutoSave() {
     final state = ref.read(canvasProvider);
     if (state == null || !state.isDirty || _isSaving) return;
-    // Defer the save while a stroke is mid-flight. Even with the encoding
-    // yield-batches, _saveInner does enough sync work (state.copyWith,
-    // setState in the canvas chrome) to drop ~1-2 frames — visible as a
-    // tiny gap in the stroke the user is actively drawing on iPad. Save
-    // fires the moment the pen lifts, when the autosave timer reschedules
-    // on the next dirty transition or on lifecycle pause.
-    if (_activeStrokeNotifier.isActive) {
-      // Re-arm the debounce so we try again when the stroke ends. Don't
-      // bypass the max-delay timer though — if user keeps writing for
-      // 15 s straight, we still attempt save (the new stroke point burst
-      // might tolerate it).
+    // Defer the save while a stroke is mid-flight OR an eraser drag is
+    // in progress. _saveInner does enough sync work (state.copyWith,
+    // setState in the canvas chrome) plus a 50 MB ZIP rebuild via
+    // compute() to drop many frames — a >1.2 s eraser drag would
+    // otherwise stall mid-gesture. eraserCursorPos is non-null only
+    // between pointer-down and pointer-up on an eraser tool, so it's
+    // the right signal. Save fires the moment the pen/eraser lifts,
+    // when the next dirty transition re-arms the debounce.
+    if (_activeStrokeNotifier.isActive || state.eraserCursorPos != null) {
       _autoSaveDebounce?.cancel();
       _autoSaveDebounce = Timer(const Duration(milliseconds: 600), _triggerAutoSave);
       return;
@@ -2107,7 +2105,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       return (
         metadata: s.metadata,
         document: s.document,
-        pages: s.pages,
+        // pages: OMITTED — eraser commits replace the pages Map every
+        // 50 ms and the chrome doesn't actually use page CONTENT, only
+        // counts (which come from document.pages.length). Letting
+        // pages-ref changes rebuild the chrome was the residual stutter
+        // on dense ink during eraser drag.
         currentPageIndex: s.currentPageIndex,
         isDirty: s.isDirty,
         toolSettings: s.toolSettings,
@@ -2708,25 +2710,36 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                         // untouched.
                         child: Consumer(
                           builder: (context, ref, _) {
-                            // Watch viewport + imageCache so the painter
-                            // rebuilds on pan/zoom AND when a new asset
-                            // image is decoded (so it appears on canvas).
-                            // The chrome's parent select excludes both,
-                            // so this Consumer is the *only* widget that
-                            // rebuilds for those changes.
+                            // Watch viewport + imageCache + pages so the
+                            // painter rebuilds on pan/zoom, when a new
+                            // asset image is decoded, AND when the eraser
+                            // / draw / undo commits a new pages map. The
+                            // chrome's parent select excludes ALL of
+                            // those (they tick at 20-120 Hz during
+                            // interaction), so this Consumer is the
+                            // *only* widget that rebuilds for those
+                            // changes.
                             ref.watch(canvasProvider.select((s) =>
                                 s == null
                                     ? const (zoom: 1.0, panOffset: Offset.zero)
                                     : (zoom: s.zoom, panOffset: s.panOffset)));
                             ref.watch(canvasProvider.select(
                                 (s) => s?.imageCache));
+                            ref.watch(canvasProvider.select(
+                                (s) => s?.pages));
                             // Read full state fresh — the parent's
-                            // canvasState (closure) has stale viewport/
-                            // imageCache because parent didn't rebuild.
+                            // canvasState (closure) has stale fields
+                            // because parent didn't rebuild for any of
+                            // the above. Use `s.currentPage` (computed
+                            // from the live `pages` map) as the painter's
+                            // pageData; falling back to the parent's
+                            // captured `currentPage` only for the very
+                            // first paint when ref.read returns null.
                             final s = ref.read(canvasProvider) ?? canvasState;
+                            final livePage = s.currentPage ?? currentPage;
                             return CustomPaint(
                               painter: CanvasRenderEngine(
-                                pageData: currentPage,
+                                pageData: livePage,
                                 activeStroke: _activeStrokeNotifier.points.isNotEmpty
                                     ? _activeStrokeNotifier.points
                                     : (s.activeStroke.isNotEmpty ? s.activeStroke : null),

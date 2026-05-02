@@ -271,12 +271,19 @@ class CanvasRenderEngine extends CustomPainter {
     Offset selCenter,
     bool hasTransform,
   ) {
-    // Fast path: most pages have 0 images. Avoid the sort + walk
-    // entirely on those pages. Two `.any` checks are O(N) with early
-    // exit, vs the full `_getSortedContent` walk + per-element
-    // `.map(...)` closure allocation.
-    final hasAnyImage = pageData.layers.content.any((e) =>
-        e.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false));
+    // Fast path: most pages have 0 images. Cache the answer on
+    // pageData via Expando — without the cache this `.any` walks all
+    // 200 elements with 4 closure allocations per `.map(...)` call
+    // (~800 closures per paint just to learn there are no images).
+    final cachedHasImages = _hasImageCache[pageData];
+    final bool hasAnyImage;
+    if (cachedHasImages != null) {
+      hasAnyImage = cachedHasImages;
+    } else {
+      hasAnyImage = pageData.layers.content.any((e) =>
+          e.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false));
+      _hasImageCache[pageData] = hasAnyImage;
+    }
     if (!hasAnyImage) return;
     final sortedContent = _getSortedContent(pageData.layers.content);
     for (final element in sortedContent) {
@@ -598,30 +605,70 @@ class CanvasRenderEngine extends CustomPainter {
         ..strokeCap = StrokeCap.round
         ..strokeJoin = StrokeJoin.round
         ..isAntiAlias = true;
+      final zoomBucketKey = (zoom / 0.5).round();
+      final cached = _strokePathCache[stroke];
+      if (cached != null && cached.zoomBucket == zoomBucketKey) {
+        for (final run in cached.runs) {
+          paint.strokeWidth = run.width;
+          canvas.drawPath(run.path, paint);
+        }
+        return;
+      }
       final interpolated = _catmullRomInterpolate(stroke.points, zoom);
-      _drawBucketedSegments(canvas, paint, interpolated,
+      final runs = _bucketSegmentsToPaths(
+          interpolated,
           (p0, p1) => stroke.baseWidth *
               (0.6 + ((p0.pressure + p1.pressure) / 2) * 0.4));
+      _strokePathCache[stroke] = _StrokeCacheEntry(zoomBucketKey, runs);
+      for (final run in runs) {
+        paint.strokeWidth = run.width;
+        canvas.drawPath(run.path, paint);
+      }
       return;
     }
 
     // Brush: wide, soft edges via multiple overlapping strokes
     if (stroke.toolType == 'brush') {
+      final zoomBucketKey = (zoom / 0.5).round();
+      final cached = _brushPathCache[stroke];
+      if (cached != null && cached.zoomBucket == zoomBucketKey) {
+        for (final layer in cached.layers) {
+          final paint = Paint()
+            ..color = color.withValues(alpha: layer.alpha)
+            ..style = PaintingStyle.stroke
+            ..strokeCap = StrokeCap.round
+            ..strokeJoin = StrokeJoin.round
+            ..isAntiAlias = true;
+          for (final run in layer.runs) {
+            paint.strokeWidth = run.width;
+            canvas.drawPath(run.path, paint);
+          }
+        }
+        return;
+      }
       final interpolated = _catmullRomInterpolate(stroke.points, zoom);
+      final layers = <_BrushLayer>[];
       for (int layer = 0; layer < 3; layer++) {
         final alpha = (stroke.opacity * (0.3 - layer * 0.08)).clamp(0.05, 1.0);
         final widthMul = 1.0 + layer * 0.6;
+        final runs = _bucketSegmentsToPaths(
+            interpolated,
+            (p0, p1) => stroke.baseWidth *
+                widthMul *
+                (0.2 + ((p0.pressure + p1.pressure) / 2) * 0.8));
+        layers.add(_BrushLayer(alpha, runs));
         final paint = Paint()
           ..color = color.withValues(alpha: alpha)
           ..style = PaintingStyle.stroke
           ..strokeCap = StrokeCap.round
           ..strokeJoin = StrokeJoin.round
           ..isAntiAlias = true;
-        _drawBucketedSegments(canvas, paint, interpolated,
-            (p0, p1) => stroke.baseWidth *
-                widthMul *
-                (0.2 + ((p0.pressure + p1.pressure) / 2) * 0.8));
+        for (final run in runs) {
+          paint.strokeWidth = run.width;
+          canvas.drawPath(run.path, paint);
+        }
       }
+      _brushPathCache[stroke] = _BrushCacheEntry(zoomBucketKey, layers);
       return;
     }
 
@@ -752,9 +799,29 @@ class CanvasRenderEngine extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
+
+    // Reuse cached bucketed paths if the stroke (and zoom-bucket)
+    // hasn't changed. This is the actual hot-path optimisation: a
+    // page-level Picture cache miss (e.g. eraser commit) used to
+    // re-run Catmull-Rom interpolation + bucketing for every stroke
+    // on the page (~100 strokes × 80 pts × 24 sub-segments = 192 k
+    // math ops). With this cache, only strokes whose StrokeData
+    // reference actually changed pay the recompute; surviving
+    // strokes just replay the cached Path objects.
+    final zoomBucketKey = (zoom / 0.5).round();
+    final cached = _strokePathCache[stroke];
+    if (cached != null && cached.zoomBucket == zoomBucketKey) {
+      for (final run in cached.runs) {
+        paint.strokeWidth = run.width;
+        canvas.drawPath(run.path, paint);
+      }
+      return;
+    }
+
     final count = interpolated.length;
     if (count < 2) return;
     const widthQuantum = 0.5;
+    final runs = <_PathRun>[];
     Path? currentPath;
     double currentBucket = double.nan;
     for (int i = 0; i < count - 1; i++) {
@@ -763,36 +830,34 @@ class CanvasRenderEngine extends CustomPainter {
       final w = ((p0.w + p1.w) * 0.5).clamp(0.4, 999.0);
       final bucket = (w / widthQuantum).round() * widthQuantum;
       if (bucket != currentBucket) {
-        // Flush previous bucket as one drawPath.
         if (currentPath != null) {
-          paint.strokeWidth = currentBucket;
-          canvas.drawPath(currentPath, paint);
+          runs.add(_PathRun(currentPath, currentBucket));
         }
         currentPath = Path()..moveTo(p0.x, p0.y);
         currentBucket = bucket;
       }
       currentPath!.lineTo(p1.x, p1.y);
     }
-    // Flush the final bucket.
     if (currentPath != null) {
-      paint.strokeWidth = currentBucket;
-      canvas.drawPath(currentPath, paint);
+      runs.add(_PathRun(currentPath, currentBucket));
+    }
+    _strokePathCache[stroke] = _StrokeCacheEntry(zoomBucketKey, runs);
+    for (final run in runs) {
+      paint.strokeWidth = run.width;
+      canvas.drawPath(run.path, paint);
     }
   }
 
-  /// Same width-bucketing trick used in [_paintStroke] for the fountain
-  /// pen path, but adapted to plain `StrokePoint`s (used by ballpoint,
-  /// brush). Groups consecutive segments whose width quantises to the
-  /// same 0.5 px bucket and emits ONE drawPath per bucket — typically
-  /// 3-5 drawPath per stroke instead of N drawLine.
-  void _drawBucketedSegments(
-    Canvas canvas,
-    Paint paint,
+  /// Build a list of (Path, width) bucketed runs from a sequence of
+  /// `StrokePoint`s + a width function. Returns runs the caller can
+  /// either draw directly or stash in [_strokePathCache] for reuse.
+  List<_PathRun> _bucketSegmentsToPaths(
     List<StrokePoint> pts,
     double Function(StrokePoint p0, StrokePoint p1) widthFn,
   ) {
     final n = pts.length;
-    if (n < 2) return;
+    final runs = <_PathRun>[];
+    if (n < 2) return runs;
     const widthQuantum = 0.5;
     Path? currentPath;
     double currentBucket = double.nan;
@@ -803,8 +868,7 @@ class CanvasRenderEngine extends CustomPainter {
       final bucket = (w / widthQuantum).round() * widthQuantum;
       if (bucket != currentBucket) {
         if (currentPath != null) {
-          paint.strokeWidth = currentBucket;
-          canvas.drawPath(currentPath, paint);
+          runs.add(_PathRun(currentPath, currentBucket));
         }
         currentPath = Path()..moveTo(p0.x, p0.y);
         currentBucket = bucket;
@@ -812,9 +876,9 @@ class CanvasRenderEngine extends CustomPainter {
       currentPath!.lineTo(p1.x, p1.y);
     }
     if (currentPath != null) {
-      paint.strokeWidth = currentBucket;
-      canvas.drawPath(currentPath, paint);
+      runs.add(_PathRun(currentPath, currentBucket));
     }
+    return runs;
   }
 
   List<StrokePoint> _catmullRomInterpolate(List<StrokePoint> points, double zoom) {
@@ -1342,12 +1406,18 @@ class CanvasRenderEngine extends CustomPainter {
     // ui.Image instances instead — same-content maps no longer
     // false-trigger repaints (~70% of idle CPU on a 215-page notebook
     // came from this).
-    return pageData != oldDelegate.pageData ||
-        activeStroke != oldDelegate.activeStroke ||
-        lassoSelection != oldDelegate.lassoSelection ||
-        lassoPath != oldDelegate.lassoPath ||
+    // !identical instead of != throughout — every comparison field is
+    // either an immutable freezed object (PageData, LassoSelection,
+    // ShapeData) or a List/Map. With `!=`, freezed runs deep equality
+    // on PageData, walking all 200 stroke points × 80 points per
+    // shouldRepaint call. With `!identical`, page mutation always
+    // produces a new ref so identity is sufficient AND ~1000× faster.
+    return !identical(pageData, oldDelegate.pageData) ||
+        !identical(activeStroke, oldDelegate.activeStroke) ||
+        !identical(lassoSelection, oldDelegate.lassoSelection) ||
+        !identical(lassoPath, oldDelegate.lassoPath) ||
         shapePreview != oldDelegate.shapePreview ||
-        recognizedShapePreview != oldDelegate.recognizedShapePreview ||
+        !identical(recognizedShapePreview, oldDelegate.recognizedShapePreview) ||
         zoom != oldDelegate.zoom ||
         panOffset != oldDelegate.panOffset ||
         !_imageCacheEqual(imageCache, oldDelegate.imageCache);
@@ -1367,6 +1437,47 @@ class CanvasRenderEngine extends CustomPainter {
   /// Bounded LRU so memory doesn't grow unboundedly as the user flips
   /// through pages.
   static final _staticPictureCache = _StaticPictureCache();
+
+  /// Per-StrokeData cache of bucketed Path runs. Skips the expensive
+  /// Catmull-Rom interpolation + width bucketing on every Picture
+  /// rebuild — the interpolation result depends only on the stroke
+  /// points + zoom-bucket, neither of which change as the user erases
+  /// other strokes on the same page. Entries are GC'd along with their
+  /// owning StrokeData (Expando = weak-keyed map).
+  static final Expando<_StrokeCacheEntry> _strokePathCache = Expando();
+
+  /// Brush has 3 overlapping layers per stroke, each with its own
+  /// width multiplier and alpha — needs a separate cache shape.
+  static final Expando<_BrushCacheEntry> _brushPathCache = Expando();
+
+  /// Cached "does this page have any image element?" answer. Page
+  /// mutations produce new PageData refs so the cache lifetime is
+  /// naturally bounded; missing entries lazy-fill on first read.
+  static final Expando<bool> _hasImageCache = Expando();
+}
+
+class _PathRun {
+  final Path path;
+  final double width;
+  const _PathRun(this.path, this.width);
+}
+
+class _StrokeCacheEntry {
+  final int zoomBucket;
+  final List<_PathRun> runs;
+  const _StrokeCacheEntry(this.zoomBucket, this.runs);
+}
+
+class _BrushLayer {
+  final double alpha;
+  final List<_PathRun> runs;
+  const _BrushLayer(this.alpha, this.runs);
+}
+
+class _BrushCacheEntry {
+  final int zoomBucket;
+  final List<_BrushLayer> layers;
+  const _BrushCacheEntry(this.zoomBucket, this.layers);
 }
 
 /// Lightweight struct for Catmull-Rom interpolated points with pre-computed width.
