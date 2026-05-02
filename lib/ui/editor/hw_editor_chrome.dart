@@ -625,23 +625,32 @@ class _StrokePreviewPainter extends CustomPainter {
 
 /// Bottom strip with chapter label + horizontally scrolling page thumbnails.
 ///
-/// Shows ALL pages of the notebook (lazy via builder), auto-scrolls to keep
-/// the current page roughly centered, and renders each thumbnail with a
-/// mini sketch (3 ruled lines) so it actually reads as a "page" instead of
-/// an empty box. Real rendered thumbnails (via ThumbnailService) can be
-/// plugged in later by passing a thumbnail-builder callback.
+/// Shows the pages whose 1-based numbers are in [pageNumbers] (typically
+/// just the active chapter's pages). Auto-scrolls to keep the current page
+/// roughly centered. Each thumbnail renders a mini sketch (4 ruled lines)
+/// so it reads as a "page" instead of an empty box. Real rendered
+/// thumbnails (via ThumbnailService) can be plugged in later.
 class HwBottomPageStrip extends StatefulWidget {
   final String? chapterLabel;
-  final int currentPage; // 1-based
-  final int totalPages;
+
+  /// 1-based page numbers to show. The strip mirrors the active chapter
+  /// filter — when no filter is active this should be 1..totalPages.
+  final List<int> pageNumbers;
+
+  /// 1-based page number of the currently open page. May or may not be
+  /// present in [pageNumbers] (if the user is on a page outside the
+  /// filter, no thumbnail is highlighted).
+  final int currentPage;
+
+  /// Tapping a thumbnail emits the underlying 1-based page number.
   final ValueChanged<int> onPageTap;
   final VoidCallback onAllPagesTap;
 
   const HwBottomPageStrip({
     super.key,
     this.chapterLabel,
+    required this.pageNumbers,
     required this.currentPage,
-    required this.totalPages,
     required this.onPageTap,
     required this.onAllPagesTap,
   });
@@ -666,8 +675,8 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
   @override
   void didUpdateWidget(covariant HwBottomPageStrip old) {
     super.didUpdateWidget(old);
-    if (old.currentPage != widget.currentPage ||
-        old.totalPages != widget.totalPages) {
+    final pagesChanged = old.pageNumbers.length != widget.pageNumbers.length;
+    if (old.currentPage != widget.currentPage || pagesChanged) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToCurrent());
     }
   }
@@ -676,9 +685,9 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
     if (!_ctrl.hasClients) return;
     final viewport = _ctrl.position.viewportDimension;
     if (viewport <= 0) return;
-    // Center the current page within the viewport when possible.
-    final desired =
-        (widget.currentPage - 1) * _stride - (viewport - _itemWidth) / 2;
+    final pos = widget.pageNumbers.indexOf(widget.currentPage);
+    if (pos < 0) return; // current page is outside the filter — no scroll
+    final desired = pos * _stride - (viewport - _itemWidth) / 2;
     final clamped =
         desired.clamp(0.0, _ctrl.position.maxScrollExtent).toDouble();
     _ctrl.animateTo(
@@ -727,7 +736,7 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
             const SizedBox(width: 12),
           ],
           Expanded(
-            child: widget.totalPages <= 0
+            child: widget.pageNumbers.isEmpty
                 ? Center(
                     child: Text('Nessuna pagina',
                         style:
@@ -735,11 +744,11 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
                 : ListView.separated(
                     controller: _ctrl,
                     scrollDirection: Axis.horizontal,
-                    itemCount: widget.totalPages,
+                    itemCount: widget.pageNumbers.length,
                     separatorBuilder: (_, __) =>
                         const SizedBox(width: _itemSpacing),
                     itemBuilder: (_, i) {
-                      final n = i + 1;
+                      final n = widget.pageNumbers[i];
                       final selected = n == widget.currentPage;
                       return _PageThumb(
                         number: n,

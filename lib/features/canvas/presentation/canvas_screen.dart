@@ -2237,8 +2237,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   ),
                   HwBottomPageStrip(
                     chapterLabel: _currentChapterLabel(canvasState),
+                    // Only show pages of the active chapter (or all when
+                    // no chapter filter is active). Previously the strip
+                    // listed every page in the notebook even when the
+                    // chapter label said "Cap. Appendice (4 pagine)" —
+                    // the count and the strip disagreed.
+                    pageNumbers: [
+                      for (final i in canvasState.filteredPageIndices) i + 1,
+                    ],
                     currentPage: canvasState.currentPageIndex + 1,
-                    totalPages: canvasState.document.pages.length,
                     onPageTap: (n) => notifier.goToPage(n - 1),
                     onAllPagesTap: () => _showPageManager(canvasState),
                   ),
@@ -2260,7 +2267,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                     },
                     onToolChanged: (t) {
                       notifier.setTool(t);
-                      setState(() => _popupOpen = true);
+                      // Switching tool never auto-opens the popup —
+                      // the user explicitly asks for it by tapping
+                      // the active tool again.
+                      if (_popupOpen) setState(() => _popupOpen = false);
                     },
                     onActiveTap: () =>
                         setState(() => _popupOpen = !_popupOpen),
