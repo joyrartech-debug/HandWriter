@@ -95,10 +95,16 @@ class CrashLogger {
     if (!verboseEnabled && _isVerboseRoutine(message)) return;
     try {
       final stamp = DateTime.now().toIso8601String();
+      // flush:false intentionally — flush:true forces an fsync per
+      // append, which on a slow disk can stall the main thread for
+      // 5–30 ms. The OS will eventually flush the dirty pages on its
+      // own. Crash-time loss of the last few buffered log lines is
+      // acceptable; freezing the canvas mid-pan to fsync each
+      // routine instrumentation line is not.
       await file.writeAsString(
         '[$stamp] $message\n',
         mode: FileMode.append,
-        flush: true,
+        flush: false,
       );
       await _rotateIfTooBig();
     } catch (_) {

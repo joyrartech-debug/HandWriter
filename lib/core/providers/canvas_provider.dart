@@ -3146,19 +3146,30 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   // ── Zoom & Pan ──
 
+  /// Mark "user is currently dragging/zooming". The pull tick consults
+  /// [_isInteractingRecent] and skips its network round-trip until the
+  /// user stops moving — keeps response-handling microtasks out of the
+  /// pan event loop.
+  void _bumpInteract() {
+    _lastInteractAt = DateTime.now();
+  }
+
   void setZoom(double zoom) {
     if (state == null) return;
+    _bumpInteract();
     state = state!.copyWith(zoom: zoom.clamp(0.25, 5.0));
   }
 
   void setPanOffset(Offset offset) {
     if (state == null) return;
+    _bumpInteract();
     state = state!.copyWith(panOffset: offset);
   }
 
   /// Set zoom and pan in a single state update to avoid intermediate render frames.
   void setZoomAndPan(double zoom, Offset pan) {
     if (state == null) return;
+    _bumpInteract();
     state = state!.copyWith(zoom: zoom.clamp(0.25, 5.0), panOffset: pan);
   }
 
@@ -5484,6 +5495,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _pullTimer?.cancel();
     _pullTimer = Timer(next, () {
       if (_disposed) return;
+      // Skip while the user is actively dragging / zooming. The pull's
+      // network HEAD response-handling microtasks would otherwise
+      // schedule on the same event loop as pointer events, and the
+      // resulting context switches show up as occasional pan stutter.
+      // The next tick (re-armed below) will fire the moment the user
+      // stops moving (the 150 ms guard window naturally lapses).
+      if (_isInteractingRecent) {
+        _schedulePullTick();
+        return;
+      }
       // Skip if a pull or save is still in flight. _pullRemoteChanges()
       // early-returns on _isPulling already, but we also want to back off
       // when save() is uploading so a concurrent PROPFIND doesn't see our
@@ -5531,6 +5552,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// exiting mid-download drops the pulled pages before they reach disk
   /// and the next open reads the stale local file.
   Future<void>? _pendingPullFuture;
+
+  /// Set to a "pan/zoom is happening RIGHT NOW" timestamp by the canvas
+  /// screen on every pointer-move during pan/zoom. While this stamp is
+  /// recent, [_schedulePullTick] skips the network call so the HEAD's
+  /// response-handling microtask never lands mid-drag and never causes
+  /// a frame-time spike. The stamp is bumped from setPanOffset and
+  /// setZoom-and-pan paths, and naturally goes stale within ~150 ms of
+  /// the last move event so polling resumes seamlessly when the user
+  /// stops moving.
+  DateTime _lastInteractAt =
+      DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _interactGuard = Duration(milliseconds: 150);
+  bool get _isInteractingRecent =>
+      DateTime.now().difference(_lastInteractAt) < _interactGuard;
   // _isSyncing tracked by _syncLock mutex
 
   /// Checks if the remote metadata.json ETag has changed, then pulls
