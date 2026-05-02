@@ -2058,7 +2058,58 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   @override
   Widget build(BuildContext context) {
-    final canvasState = ref.watch(canvasProvider);
+    // ── Targeted watch: skip rebuilds during pan/zoom/eraser-cursor ──
+    //
+    // `state.copyWith(panOffset: x)` and friends fire on every pointer-
+    // move event during pan, every wheel event during zoom, and every
+    // hover during erase. With a plain `ref.watch(canvasProvider)` each
+    // of those events caused a full rebuild of the editor chrome
+    // (top bar + bottom strip + floating dock + tool popup) — visibly
+    // choppy on a 215-page notebook.
+    //
+    // Instead we watch a record signature that EXCLUDES the volatile
+    // fields. Riverpod's select compares the result with `==`, and a
+    // record's `==` is field-wise — when the only change is panOffset,
+    // every other field is identical-by-reference (state.copyWith
+    // shares unchanged Map/List/object refs), the record compares
+    // equal, and the watch is a no-op.
+    //
+    // The `_buildCanvas` path uses an inner Consumer (or notifier) to
+    // pick up the live panOffset/zoom for the painter, so panning
+    // still updates the canvas — it just doesn't drag the rest of the
+    // UI tree along for the ride.
+    ref.watch(canvasProvider.select((s) {
+      if (s == null) return null;
+      return (
+        metadata: s.metadata,
+        document: s.document,
+        pages: s.pages,
+        currentPageIndex: s.currentPageIndex,
+        isDirty: s.isDirty,
+        toolSettings: s.toolSettings,
+        activeChapterId: s.activeChapterId,
+        pendingConflicts: s.pendingConflicts,
+        pendingRemoteChanges: s.pendingRemoteChanges,
+        lassoSelection: s.lassoSelection,
+        activeStroke: s.activeStroke,
+        lassoPath: s.lassoPath,
+        shapeStartPos: s.shapeStartPos,
+        shapeEndPos: s.shapeEndPos,
+        recognizedShape: s.recognizedShape,
+        selectedElementId: s.selectedElementId,
+        imageCache: s.imageCache,
+        assetBytes: s.assetBytes,
+        currentTool: s.currentTool,
+        undoStack: s.undoStack,
+        redoStack: s.redoStack,
+        symbolLibraries: s.symbolLibraries,
+        // panOffset, zoom, eraserCursorPos intentionally OMITTED.
+      );
+    }));
+    // After the select-based subscription decides we should rebuild,
+    // pull the full state synchronously for the build body's many
+    // canvasState.X reads. ref.read does NOT subscribe.
+    final canvasState = ref.read(canvasProvider);
 
     // Auto-open conflict resolution when conflicts detected
     ref.listen<int>(
@@ -2603,43 +2654,57 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                         : null,
                     child: ClipRect(
                       child: RepaintBoundary(
-                        child: CustomPaint(
-                          painter: CanvasRenderEngine(
-                            pageData: currentPage,
-                            activeStroke: _activeStrokeNotifier.points.isNotEmpty
-                                ? _activeStrokeNotifier.points
-                                : (canvasState.activeStroke.isNotEmpty ? canvasState.activeStroke : null),
-                            activeToolType: _toolTypeString(canvasState.currentTool),
-                            activeColor: canvasState.toolSettings.color,
-                            activeWidth: canvasState.toolSettings.strokeWidth,
-                            lassoSelection: canvasState.lassoSelection,
-                            lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
-                                ? _lassoPathNotifier.points
-                                : (canvasState.lassoPath.isNotEmpty ? canvasState.lassoPath : null),
-                            lassoPathGetter: _lassoPathNotifier.isActive
-                                ? () => _lassoPathNotifier.points
-                                : null,
-                            shapePreview: (canvasState.shapeStartPos != null && canvasState.shapeEndPos != null)
-                                ? (canvasState.shapeStartPos!, canvasState.shapeEndPos!, canvasState.toolSettings.shapeType)
-                                : null,
-                            recognizedShapePreview: canvasState.recognizedShape,
-                            zoom: canvasState.zoom,
-                            panOffset: canvasState.panOffset,
-                            imageCache: canvasState.imageCache,
-                            repaintNotifier: _repaintNotifier,
-                          ),
-                          isComplex: true,
-                          // willChange:false lets Skia keep the rastered
-                          // page content in its raster cache between
-                          // frames. The painter's `repaintNotifier` (an
-                          // active-stroke / lasso Listenable) and
-                          // `shouldRepaint` already correctly invalidate
-                          // when content actually changes, so we DON'T
-                          // need to rasterize from scratch every frame —
-                          // doing that on a 100-stroke page burns a
-                          // whole CPU core for no reason.
-                          willChange: false,
-                          size: canvasSize,
+                        // ── Inner viewport watch ──
+                        // The parent build's `ref.watch` deliberately
+                        // EXCLUDES panOffset/zoom so pan/wheel events don't
+                        // rebuild the editor chrome. But the painter still
+                        // needs them — wrap CustomPaint in a Consumer that
+                        // watches just `(zoom, panOffset)` so panning
+                        // rebuilds only this CustomPaint subtree (a
+                        // ~1-widget tree), and the rest of the UI is
+                        // untouched.
+                        child: Consumer(
+                          builder: (context, ref, _) {
+                            final viewport = ref.watch(canvasProvider.select(
+                                (s) => s == null
+                                    ? const (zoom: 1.0, panOffset: Offset.zero)
+                                    : (zoom: s.zoom, panOffset: s.panOffset)));
+                            return CustomPaint(
+                              painter: CanvasRenderEngine(
+                                pageData: currentPage,
+                                activeStroke: _activeStrokeNotifier.points.isNotEmpty
+                                    ? _activeStrokeNotifier.points
+                                    : (canvasState.activeStroke.isNotEmpty ? canvasState.activeStroke : null),
+                                activeToolType: _toolTypeString(canvasState.currentTool),
+                                activeColor: canvasState.toolSettings.color,
+                                activeWidth: canvasState.toolSettings.strokeWidth,
+                                lassoSelection: canvasState.lassoSelection,
+                                lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
+                                    ? _lassoPathNotifier.points
+                                    : (canvasState.lassoPath.isNotEmpty ? canvasState.lassoPath : null),
+                                lassoPathGetter: _lassoPathNotifier.isActive
+                                    ? () => _lassoPathNotifier.points
+                                    : null,
+                                shapePreview: (canvasState.shapeStartPos != null && canvasState.shapeEndPos != null)
+                                    ? (canvasState.shapeStartPos!, canvasState.shapeEndPos!, canvasState.toolSettings.shapeType)
+                                    : null,
+                                recognizedShapePreview: canvasState.recognizedShape,
+                                zoom: viewport.zoom,
+                                panOffset: viewport.panOffset,
+                                imageCache: canvasState.imageCache,
+                                repaintNotifier: _repaintNotifier,
+                              ),
+                              isComplex: true,
+                              // willChange:false lets Skia keep the
+                              // rastered page content in its raster
+                              // cache between frames. The painter's
+                              // `repaintNotifier` and `shouldRepaint`
+                              // already invalidate correctly when
+                              // content actually changes.
+                              willChange: false,
+                              size: canvasSize,
+                            );
+                          },
                         ),
                       ),
                     ),
