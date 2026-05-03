@@ -211,9 +211,16 @@ class CanvasRenderEngine extends CustomPainter {
       _paintLassoPathFromPoints(canvas, currentLassoPath);
     }
 
-    // 7. Lasso selection bounds
+    // 7. Lasso selection bounds — pass through the resolved live
+    // transform so the dashed marquee follows the moving content
+    // during drag/rotate/scale instead of staying pinned at start.
     if (lassoSelection != null) {
-      _paintSelectionBounds(canvas);
+      _paintSelectionBounds(
+        canvas,
+        liveDragOffset: selDragOffset,
+        liveRotation: selRotation,
+        liveScale: selScale,
+      );
     }
 
     canvas.restore();
@@ -1422,28 +1429,38 @@ class CanvasRenderEngine extends CustomPainter {
     }
   }
 
-  void _paintSelectionBounds(Canvas canvas) {
+  void _paintSelectionBounds(
+    Canvas canvas, {
+    Offset? liveDragOffset,
+    double? liveRotation,
+    double? liveScale,
+  }) {
     final sel = lassoSelection!;
+    // Use the resolved live values when present (caller passes the
+    // already-merged ones from liveLassoTransform). Falls back to the
+    // Riverpod state when no gesture is in flight.
+    final dragOffset = liveDragOffset ?? sel.dragOffset;
+    final rotation = liveRotation ?? sel.rotation;
+    final scale = liveScale ?? sel.scale;
     final center = sel.bounds.center;
-    // Apply scale around center, then translate by dragOffset
     final scaledBounds = Rect.fromCenter(
       center: center,
-      width: sel.bounds.width * sel.scale,
-      height: sel.bounds.height * sel.scale,
-    ).translate(sel.dragOffset.dx, sel.dragOffset.dy);
+      width: sel.bounds.width * scale,
+      height: sel.bounds.height * scale,
+    ).translate(dragOffset.dx, dragOffset.dy);
     final selRect = scaledBounds.inflate(4);
 
     canvas.save();
-    if (sel.rotation != 0.0) {
+    if (rotation != 0.0) {
       final transformCenter = scaledBounds.center;
       canvas.translate(transformCenter.dx, transformCenter.dy);
-      canvas.rotate(sel.rotation);
+      canvas.rotate(rotation);
       canvas.translate(-transformCenter.dx, -transformCenter.dy);
     }
 
     // Dashed border
     _paintDashedRect(canvas, selRect, const Color(0xFF2196F3), 1.0);
-    
+
     canvas.restore();
   }
 

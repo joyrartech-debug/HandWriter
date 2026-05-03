@@ -274,8 +274,11 @@ class HwFloatingDock extends StatelessWidget {
           _toolBtn(context, CanvasTool.highlighter, 'highlighter',
               'Evidenziatore'),
           _gap(isVert, context),
+          // Default eraser is "per stroke" — full-stroke removal is what
+          // the user reaches for most often. The popup still lets them
+          // flip to per-area mode.
           _toolBtn(
-              context, CanvasTool.eraserStandard, 'eraser', 'Gomma · E'),
+              context, CanvasTool.eraserStroke, 'eraser', 'Gomma · E'),
           _toolBtn(context, CanvasTool.lasso, 'lasso', 'Lasso · L'),
           _toolBtn(context, CanvasTool.text, 'text', 'Testo · T'),
           _toolBtn(context, CanvasTool.shape, 'shape', 'Forma · S'),
@@ -311,7 +314,14 @@ class HwFloatingDock extends StatelessWidget {
 
   Widget _toolBtn(
       BuildContext context, CanvasTool tool, String icon, String tooltip) {
-    final active = currentTool == tool;
+    // The eraser dock button represents both per-stroke and per-area
+    // erasers — the user picks the mode in the popup. Highlight the
+    // single button whichever variant is active.
+    final isEraserBtn = tool == CanvasTool.eraserStroke ||
+        tool == CanvasTool.eraserStandard;
+    final isEraserActive = currentTool == CanvasTool.eraserStroke ||
+        currentTool == CanvasTool.eraserStandard;
+    final active = isEraserBtn ? isEraserActive : currentTool == tool;
     final p = HwThemeScope.of(context);
     final isInkTool = _inkTools.contains(tool);
 

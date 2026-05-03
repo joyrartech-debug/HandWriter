@@ -1491,23 +1491,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final visualWidth = state!.toolSettings.strokeWidth * (0.15 + avgPressure * 0.85);
     final color = state!.toolSettings.color;
 
-    // ── LINE & ARROW DETECTION ──
-    // If the path length is barely longer than the distance between start and end, it's a straight line.
+    // ── LINE DETECTION ──
+    // If the path length is barely longer than the distance between
+    // start and end, treat as a straight line. Arrow auto-recognition
+    // was removed because tiny natural wobbles at the end of a line
+    // were being misclassified as an arrow head — the user almost
+    // always wanted just a line. Arrows can still be drawn manually
+    // via the shape tool.
     if (pathLen > 20 && (pathLen / startEndDist) < 1.25) {
-      // Basic arrow detection (checking if the tail hooks back)
-      final tailStart = points[(points.length * 0.8).round()];
-      final tailDist = sqrt(pow(points.last.x - tailStart.x, 2) + pow(points.last.y - tailStart.y, 2));
-      if (tailDist > 5 && tailDist < maxDim * 0.4) {
-        // We can confidently assume it's an arrow if it hooks
-        final arrowEnd = _snapLineEnd(points.first.x, points.first.y, points.last.x, points.last.y);
-        return ShapeData(
-          shapeType: 'arrow',
-          x1: points.first.x, y1: points.first.y,
-          x2: arrowEnd[0], y2: arrowEnd[1],
-          strokeColor: color, strokeWidth: visualWidth,
-        );
-      }
-      
       return ShapeData(
         shapeType: 'line',
         x1: points.first.x, y1: points.first.y,
