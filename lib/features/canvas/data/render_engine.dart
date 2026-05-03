@@ -15,23 +15,24 @@ class CanvasRenderEngine extends CustomPainter {
   final double? activeWidth;
   final LassoSelection? lassoSelection;
   /// Optional live override for the lasso transform (drag/rotate/scale).
-  /// When non-null, paint() reads the current values from the callback
-  /// each frame so the canvas can repaint at vsync without rebuilding
-  /// the widget tree. Used in tandem with a repaintNotifier that ticks
-  /// on the same source.
-  final ({Offset dragOffset, double rotation, double scale}) Function()?
+  /// The callback returns the current values each frame, or `null` when
+  /// no gesture is in flight — that way the painter never needs the
+  /// widget tree to rebuild between "active" and "inactive" states; it
+  /// just re-asks the callback. Used together with a repaintNotifier
+  /// that ticks on the same source so the painter is invalidated at
+  /// pointer rate.
+  final ({Offset dragOffset, double rotation, double scale})? Function()?
       liveLassoTransform;
   /// Optional live override for a single non-lasso element being
-  /// dragged / rotated / resized. Same purpose as liveLassoTransform.
-  /// scaleW/scaleH are multiplicative on the element's stored size
-  /// (top-left fixed, then dragOffset translates).
+  /// dragged / rotated / resized. Same callback contract as
+  /// liveLassoTransform — returns null when no gesture is in flight.
   final ({
     String elementId,
     Offset dragOffset,
     double rotationDelta,
     double scaleW,
     double scaleH,
-  }) Function()? liveElementTransform;
+  })? Function()? liveElementTransform;
   final List<Offset>? lassoPath;
   final List<Offset> Function()? lassoPathGetter;
   final (Offset, Offset, String)? shapePreview;

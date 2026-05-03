@@ -2800,11 +2800,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                                 // Live transform during drag/rotate/scale —
                                 // bypasses Riverpod so the page repaints
                                 // without rebuilding the widget tree.
-                                liveLassoTransform: _lassoTransformNotifier.isActive
-                                    ? () => _lassoTransformNotifier.snapshot()
-                                    : null,
-                                liveElementTransform: _elementTransformNotifier.isActive
-                                    ? () => (
+                                // ALWAYS pass the callback (it returns
+                                // null when no gesture is in flight) —
+                                // otherwise the CustomPaint, captured
+                                // before _lassoTransformNotifier.begin()
+                                // ran, would have a null callback for
+                                // the entire gesture and the painter
+                                // would fall back to stale Riverpod
+                                // state.
+                                liveLassoTransform: () =>
+                                    _lassoTransformNotifier.isActive
+                                        ? _lassoTransformNotifier.snapshot()
+                                        : null,
+                                liveElementTransform: () => _elementTransformNotifier.isActive
+                                    ? (
                                           elementId: _elementTransformNotifier.elementId!,
                                           dragOffset: _elementTransformNotifier.dragOffset,
                                           rotationDelta: _elementTransformNotifier.rotationDelta,
