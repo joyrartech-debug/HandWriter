@@ -10,6 +10,17 @@ import 'package:handwriter/shared/models/ncnote_format.dart';
 class CanvasRenderEngine extends CustomPainter {
   final PageData pageData;
   final List<StrokePoint>? activeStroke;
+  /// Optional dynamic provider for the active stroke. When non-null,
+  /// paint() calls it on every frame to fetch the CURRENT live points
+  /// (typically from a ChangeNotifier) instead of using the snapshot
+  /// captured in [activeStroke] at widget build time. This is the
+  /// same fix pattern as [liveLassoTransform]: avoids the painter
+  /// rendering a stale empty/old buffer when the live notifier has
+  /// already moved on to a new stroke and the wrapper widget hasn't
+  /// rebuilt yet (the bug where a fresh stroke appeared to start at
+  /// the previous stroke's end-point and "stretch" to where the user
+  /// actually wrote).
+  final List<StrokePoint>? Function()? activeStrokeGetter;
   final String? activeToolType;
   final int? activeColor;
   final double? activeWidth;
@@ -44,6 +55,7 @@ class CanvasRenderEngine extends CustomPainter {
   CanvasRenderEngine({
     required this.pageData,
     this.activeStroke,
+    this.activeStrokeGetter,
     this.activeToolType,
     this.activeColor,
     this.activeWidth,
@@ -186,10 +198,15 @@ class CanvasRenderEngine extends CustomPainter {
       );
     }
 
-    // 4. Active stroke being drawn
-    if (activeStroke != null && activeStroke!.length >= 2) {
+    // 4. Active stroke being drawn — fetch live from the getter when
+    // present so the painter never renders a snapshot the wrapper
+    // widget captured at build time (the cause of the phantom-line
+    // bug where a fresh stroke appeared to start at the previous
+    // stroke's end-point).
+    final liveActive = activeStrokeGetter?.call() ?? activeStroke;
+    if (liveActive != null && liveActive.length >= 2) {
       _paintStroke(canvas, StrokeData(
-        points: activeStroke!,
+        points: liveActive,
         toolType: activeToolType ?? 'pen',
         color: activeColor ?? 0xFF000000,
         baseWidth: activeWidth ?? AppConfig.defaultStrokeWidth,

@@ -2846,9 +2846,28 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             return CustomPaint(
                               painter: CanvasRenderEngine(
                                 pageData: livePage,
-                                activeStroke: _activeStrokeNotifier.points.isNotEmpty
-                                    ? _activeStrokeNotifier.points
-                                    : (s.activeStroke.isNotEmpty ? s.activeStroke : null),
+                                // Pass nothing as the snapshot — the painter
+                                // resolves the active stroke via the getter
+                                // every frame so a captured snapshot can
+                                // never go stale between widget rebuilds.
+                                activeStroke: null,
+                                activeStrokeGetter: () {
+                                  // Notifier always wins when it has points
+                                  // (live drawing). Fall back to Riverpod's
+                                  // activeStroke (carries the very first
+                                  // point committed via startStroke before
+                                  // the first PointerMove). Either may be
+                                  // null between strokes.
+                                  if (_activeStrokeNotifier.points.isNotEmpty) {
+                                    return _activeStrokeNotifier.points;
+                                  }
+                                  final liveS = ref.read(canvasProvider);
+                                  final stroke = liveS?.activeStroke;
+                                  if (stroke != null && stroke.isNotEmpty) {
+                                    return stroke;
+                                  }
+                                  return null;
+                                },
                                 activeToolType: _toolTypeString(s.currentTool),
                                 activeColor: s.toolSettings.color,
                                 activeWidth: s.toolSettings.strokeWidth,
