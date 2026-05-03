@@ -2889,12 +2889,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               // Transform handles for selected elements
               ..._buildTransformHandles(canvasState, canvasSize),
 
-              // Lasso selection handles (resize corners + rotation)
-              ..._buildLassoHandles(canvasState, canvasSize),
-
-              // Floating context actions near lasso selection
-              if (canvasState.lassoSelection != null)
-                _buildFloatingSelectionActions(canvasState, canvasSize),
+              // Lasso handles + floating context actions wrapped in a
+              // ListenableBuilder on _lassoTransformNotifier so that
+              // during drag/rotate/scale they re-position at vsync from
+              // the live notifier values — without rebuilding the whole
+              // editor tree. _buildLassoHandles itself reads the live
+              // values when the notifier is active.
+              Positioned.fill(
+                child: ListenableBuilder(
+                  listenable: _lassoTransformNotifier,
+                  builder: (_, __) => Stack(
+                    children: [
+                      ..._buildLassoHandles(canvasState, canvasSize),
+                      if (canvasState.lassoSelection != null)
+                        _buildFloatingSelectionActions(canvasState, canvasSize),
+                    ],
+                  ),
+                ),
+              ),
 
               // Recognized shape adjustment indicator (only for shape tool adjustment mode)
               if (canvasState.isAdjustingRecognized && canvasState.recognizedShape != null)
@@ -3357,7 +3369,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // ── Lasso selection rotation handle ──
 
   Widget _buildFloatingSelectionActions(CanvasState state, Size canvasSize) {
-    final sel = state.lassoSelection!;
+    final originalSel = state.lassoSelection!;
+    // Same live-transform override as _buildLassoHandles — keeps the
+    // floating action bar attached to the moving selection during a
+    // drag/rotate/scale gesture.
+    final sel = _lassoTransformNotifier.isActive
+        ? originalSel.copyWith(
+            dragOffset: _lassoTransformNotifier.dragOffset,
+            rotation: _lassoTransformNotifier.rotation,
+            scale: _lassoTransformNotifier.scale,
+          )
+        : originalSel;
     final center = sel.bounds.center;
     final scaledBounds = Rect.fromCenter(
       center: center,
@@ -3447,8 +3469,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   List<Widget> _buildLassoHandles(CanvasState state, Size canvasSize) {
-    final sel = state.lassoSelection;
-    if (sel == null) return [];
+    final originalSel = state.lassoSelection;
+    if (originalSel == null) return [];
+
+    // During drag/rotate/scale the local LassoTransformNotifier holds the
+    // live values. Riverpod state stays at the *initial* transform until
+    // pointer-up, so reading sel.dragOffset/scale/rotation directly here
+    // would freeze the handles in place while the canvas content moved
+    // underneath — the visible "lag". Override with the live values.
+    final sel = _lassoTransformNotifier.isActive
+        ? originalSel.copyWith(
+            dragOffset: _lassoTransformNotifier.dragOffset,
+            rotation: _lassoTransformNotifier.rotation,
+            scale: _lassoTransformNotifier.scale,
+          )
+        : originalSel;
 
     final center = sel.bounds.center;
     final scaledBounds = Rect.fromCenter(
