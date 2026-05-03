@@ -2556,6 +2556,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  /// Apply the full transform (drag/rotation/scale) atomically. Used by
+  /// the UI when committing a locally-tracked LassoTransformNotifier on
+  /// pointer-up, so Riverpod fires a single state update per gesture
+  /// instead of one per pointer-move.
+  void commitSelectionTransform({
+    required Offset dragOffset,
+    required double rotation,
+    required double scale,
+  }) {
+    if (state == null || state!.lassoSelection == null) return;
+    state = state!.copyWith(
+      lassoSelection: state!.lassoSelection!.copyWith(
+        dragOffset: dragOffset,
+        rotation: rotation,
+        scale: scale,
+      ),
+    );
+  }
+
   void applySelectionTransform() {
     if (state == null || state!.lassoSelection == null) return;
     final s = state!;

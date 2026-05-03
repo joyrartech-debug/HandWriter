@@ -14,6 +14,13 @@ class CanvasRenderEngine extends CustomPainter {
   final int? activeColor;
   final double? activeWidth;
   final LassoSelection? lassoSelection;
+  /// Optional live override for the lasso transform (drag/rotate/scale).
+  /// When non-null, paint() reads the current values from the callback
+  /// each frame so the canvas can repaint at vsync without rebuilding
+  /// the widget tree. Used in tandem with a repaintNotifier that ticks
+  /// on the same source.
+  final ({Offset dragOffset, double rotation, double scale}) Function()?
+      liveLassoTransform;
   final List<Offset>? lassoPath;
   final List<Offset> Function()? lassoPathGetter;
   final (Offset, Offset, String)? shapePreview;
@@ -29,6 +36,7 @@ class CanvasRenderEngine extends CustomPainter {
     this.activeColor,
     this.activeWidth,
     this.lassoSelection,
+    this.liveLassoTransform,
     this.lassoPath,
     this.lassoPathGetter,
     this.shapePreview,
@@ -82,9 +90,12 @@ class CanvasRenderEngine extends CustomPainter {
     final selectedIdsSet = lassoSel != null
         ? lassoSel.selectedIds.toSet()
         : const <String>{};
-    final selDragOffset = lassoSel?.dragOffset ?? Offset.zero;
-    final selRotation = lassoSel?.rotation ?? 0.0;
-    final selScale = lassoSel?.scale ?? 1.0;
+    // Resolve live transform override if present — bypasses Riverpod for
+    // per-frame drag/rotate/scale updates.
+    final liveTr = liveLassoTransform?.call();
+    final selDragOffset = liveTr?.dragOffset ?? lassoSel?.dragOffset ?? Offset.zero;
+    final selRotation = liveTr?.rotation ?? lassoSel?.rotation ?? 0.0;
+    final selScale = liveTr?.scale ?? lassoSel?.scale ?? 1.0;
     final selCenter = lassoSel?.bounds.center ?? Offset.zero;
     final hasTransform = selDragOffset != Offset.zero ||
         selRotation != 0.0 ||
