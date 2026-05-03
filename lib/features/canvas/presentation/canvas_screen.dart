@@ -2706,18 +2706,32 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 child: Listener(
                   behavior: HitTestBehavior.opaque,
                   onPointerDown: (e) {
-                    // Right-click → cancel pending symbol or show context menu
+                    // ── Live-state read (was the phantom-line bug) ──
+                    // `canvasState` from the build closure is intentionally
+                    // STALE on pan/zoom/pages — the chrome's select excludes
+                    // those fields. _toPageCoords reads state.panOffset and
+                    // state.zoom, so feeding it the stale state turned the
+                    // very first point of a new stroke into the wrong page
+                    // coordinate (it lived in the OLD pan/zoom frame). The
+                    // next pointer-move could land in the right frame and
+                    // the user saw the new stroke "stretch" from a phantom
+                    // start to the real one. Same fix as onPointerSignal
+                    // below — always pull live state.
+                    final live = ref.read(canvasProvider) ?? canvasState;
                     if (e.kind == PointerDeviceKind.mouse && e.buttons == kSecondaryMouseButton) {
-                      if (canvasState.pendingSymbol != null) {
+                      if (live.pendingSymbol != null) {
                         ref.read(canvasProvider.notifier).clearPendingSymbol();
                         return;
                       }
-                      _showContextMenu(e.position, e.localPosition, canvasState, canvasSize);
+                      _showContextMenu(e.position, e.localPosition, live, canvasSize);
                       return;
                     }
-                    _onPointerDown(e, canvasState, canvasSize);
+                    _onPointerDown(e, live, canvasSize);
                   },
-                  onPointerMove: (e) => _onPointerMove(e, canvasState, canvasSize),
+                  onPointerMove: (e) {
+                    final live = ref.read(canvasProvider) ?? canvasState;
+                    _onPointerMove(e, live, canvasSize);
+                  },
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
                   onPointerSignal: (event) {
