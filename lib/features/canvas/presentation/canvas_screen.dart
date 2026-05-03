@@ -124,17 +124,33 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // we resume the same stroke — preventing the visible mid-letter break
   // caused by Apple Pencil sample dropouts / iOS pointer rebatching.
   //
-  // [_deferStylusPx] tuning: spurious Up→Down has dist ≈ 0–3 logical px
-  // (the pen does not move during a hardware sample dropout). Deliberate
-  // strokes like the i-dot are ≥ 5 mm away from the end of the previous
-  // stroke — at the iPad default zoom of 2.0, that's ≥ 30 logical px. A
-  // threshold of 10 px keeps spurious dropouts inside and i-dots outside.
-  static const int _deferStylusMs = 80;
-  static const double _deferStylusPx = 10.0;
+  // Tuning rationale:
+  //   * Hardware spurious Up→Down has dist ≈ 0–3 logical px (the pen does
+  //     not move during a sample dropout) and gap ≈ a few ms.
+  //   * A deliberate new stroke (lift the pen, move, set down) takes the
+  //     user 60+ ms even at sketch speed and lands a few px away once the
+  //     pen has actually moved.
+  //   * The previous 80 ms / 10 px window was generous enough to swallow
+  //     short fast taps as "continuation": the new stroke would graft
+  //     onto the tail of the previous one and the user saw a phantom
+  //     line stretching from the old end-point to where they actually
+  //     wrote. Tightened to 50 ms / 4 px — still well above any real
+  //     hardware glitch but no longer captures intentional re-strokes.
+  static const int _deferStylusMs = 50;
+  static const double _deferStylusPx = 4.0;
   Timer? _deferredCommitTimer;
   List<StrokePoint>? _deferredCommitPoints;
   DateTime? _deferredCommitAt;
   Offset? _deferredCommitLastScreenPos;
+  /// True for the very next pointer-move after a "continuation" decision —
+  /// lets us double-check that the new pointer position is actually close
+  /// to the tail of the kept-alive stroke. If the user really started a
+  /// fresh stroke that just happened to land within the defer window, the
+  /// first move will be far away from the kept tail; in that case we
+  /// commit the old stroke and start a new one. Without this guard, the
+  /// new mark would graft onto the previous stroke, producing the
+  /// "phantom line stretching from the old end-point" bug.
+  bool _justContinuedFromDefer = false;
 
   // [StrokeDbg] logging is gated by [CrashLogger.verboseEnabled] (default
   // false). Set that flag to true to re-enable [Pull], [Mem], [StrokeDbg]
@@ -970,12 +986,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       if (deferredPts != null && _deferredCommitAt != null && _deferredCommitLastScreenPos != null) {
         final defGapMs = now.difference(_deferredCommitAt!).inMilliseconds;
         final defDist = (event.position - _deferredCommitLastScreenPos!).distance;
-        if (defGapMs < 100 && defDist < _deferStylusPx) {
+        if (defGapMs < _deferStylusMs && defDist < _deferStylusPx) {
           _deferredCommitTimer?.cancel();
           _deferredCommitTimer = null;
           _deferredCommitPoints = null;
           _deferredCommitAt = null;
           _deferredCommitLastScreenPos = null;
+          _justContinuedFromDefer = true;
           _strokeDbg(
             'CONTINUATION p=${event.pointer} '
             'gap=${defGapMs}ms dist=${defDist.toStringAsFixed(1)}px '
@@ -1348,6 +1365,34 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         return;
       }
 
+      // Post-continuation guard: the very first MOVE after a continuation
+      // decision must land near the tail of the kept-alive stroke. If it
+      // doesn't (the user really started a fresh stroke that happened to
+      // arrive inside the defer window), commit the old stroke and start
+      // a fresh one — otherwise the new mark would graft a phantom line
+      // onto the previous stroke.
+      if (_justContinuedFromDefer) {
+        _justContinuedFromDefer = false;
+        final notifierPts = _activeStrokeNotifier.points;
+        if (notifierPts.isNotEmpty) {
+          final last = notifierPts.last;
+          final ddx = pagePos.dx - last.x;
+          final ddy = pagePos.dy - last.y;
+          // 12 page-units ≈ 24 screen-px at default 2× zoom — well above
+          // any realistic Apple Pencil sample dropout but short enough to
+          // catch unintended re-strokes nearby.
+          if (ddx * ddx + ddy * ddy > 12 * 12) {
+            final keptPts = List<StrokePoint>.from(notifierPts);
+            _activeStrokeNotifier.clear();
+            ref.read(canvasProvider.notifier).commitAndEndStroke(keptPts);
+            ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
+            _activeStrokeNotifier.start(pagePos, rawPressureForPen);
+            _lastStrokeActivity = DateTime.now();
+            _lastHoldCheckPos = pagePos;
+            return;
+          }
+        }
+      }
       _activeStrokeNotifier.addPoint(pagePos, rawPressureForPen);
       _lastStrokeActivity = DateTime.now();
 
