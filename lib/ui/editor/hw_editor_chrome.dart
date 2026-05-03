@@ -47,98 +47,182 @@ class HwEditorTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = HwThemeScope.of(context);
-    return Container(
-      height: 52,
-      padding: const EdgeInsets.symmetric(horizontal: 12),
-      decoration: BoxDecoration(
-        color: p.paper0,
-        border: Border(bottom: BorderSide(color: p.paper3)),
-      ),
-      child: Row(
-        children: [
-          HwButton(
-            leading: const HwIcon('chevron-left', size: 16),
-            label: 'Libreria',
-            onPressed: onBack,
-            tooltip: 'Torna alla libreria',
-          ),
-          const SizedBox(width: 8),
-          const HwDivider(),
-          const SizedBox(width: 12),
-          // Cover chip + title
-          Container(
-            width: 14,
-            height: 18,
-            decoration: BoxDecoration(
-              color: coverColor,
-              borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(1),
-                bottomLeft: Radius.circular(1),
-                topRight: Radius.circular(3),
-                bottomRight: Radius.circular(3),
+    return LayoutBuilder(builder: (ctx, c) {
+      final isCompact = c.maxWidth < 720;
+      return Container(
+        height: 52,
+        padding: EdgeInsets.symmetric(horizontal: isCompact ? 6 : 12),
+        decoration: BoxDecoration(
+          color: p.paper0,
+          border: Border(bottom: BorderSide(color: p.paper3)),
+        ),
+        child: Row(
+          children: [
+            // Back button — icon-only on compact to save space.
+            if (isCompact)
+              HwButton.icon(
+                icon: const HwIcon('chevron-left', size: 16),
+                tooltip: 'Torna alla libreria',
+                onPressed: onBack,
+              )
+            else
+              HwButton(
+                leading: const HwIcon('chevron-left', size: 16),
+                label: 'Libreria',
+                onPressed: onBack,
+                tooltip: 'Torna alla libreria',
               ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              notebookTitle,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: p.ink0,
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          SyncBadge(state: syncState),
-          if (dirty) ...[
+            const SizedBox(width: 4),
+            const HwDivider(),
             const SizedBox(width: 8),
-            const HwPill(
-              label: 'Non salvato',
-              background: Color(0x33B68A2D),
-              foreground: Color(0xFF7C5E1F),
+            // Cover chip + title
+            Container(
+              width: 14,
+              height: 18,
+              decoration: BoxDecoration(
+                color: coverColor,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(1),
+                  bottomLeft: Radius.circular(1),
+                  topRight: Radius.circular(3),
+                  bottomRight: Radius.circular(3),
+                ),
+              ),
             ),
-          ],
-          const Spacer(),
-          HwButton.icon(
-            icon: const HwIcon('undo', size: 16),
-            tooltip: 'Annulla',
-            onPressed: canUndo ? onUndo : null,
-          ),
-          HwButton.icon(
-            icon: const HwIcon('redo', size: 16),
-            tooltip: 'Ripeti',
-            onPressed: canRedo ? onRedo : null,
-          ),
-          const SizedBox(width: 8),
-          const HwDivider(),
-          const SizedBox(width: 8),
-          HwButton(
-            leading: const HwIcon('pages', size: 16),
-            label:
-                '${currentPage.toString().padLeft(2, '0')} / $totalPages',
-            onPressed: onPagesTap,
-            tooltip: 'Tutte le pagine',
-          ),
-          const SizedBox(width: 8),
-          const HwDivider(),
-          const SizedBox(width: 8),
-          HwButton.icon(
-              icon: const HwIcon('symbol', size: 16),
-              tooltip: 'Simboli',
-              onPressed: onSymbolsTap),
-          HwButton.icon(
-              icon: const HwIcon('export', size: 16),
-              tooltip: 'Esporta',
-              onPressed: onExportTap),
-          HwButton.icon(
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                notebookTitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: p.ink0,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            SyncBadge(state: syncState),
+            if (dirty && !isCompact) ...[
+              const SizedBox(width: 8),
+              const HwPill(
+                label: 'Non salvato',
+                background: Color(0x33B68A2D),
+                foreground: Color(0xFF7C5E1F),
+              ),
+            ],
+            const Spacer(),
+            // Always-visible essentials
+            HwButton.icon(
+              icon: const HwIcon('undo', size: 16),
+              tooltip: 'Annulla',
+              onPressed: canUndo ? onUndo : null,
+            ),
+            HwButton.icon(
+              icon: const HwIcon('redo', size: 16),
+              tooltip: 'Ripeti',
+              onPressed: canRedo ? onRedo : null,
+            ),
+            const SizedBox(width: 4),
+            const HwDivider(),
+            const SizedBox(width: 4),
+            // Page indicator: show with label on wide, icon-only on compact.
+            if (isCompact)
+              HwButton.icon(
+                icon: const HwIcon('pages', size: 16),
+                tooltip: 'Tutte le pagine',
+                onPressed: onPagesTap,
+              )
+            else
+              HwButton(
+                leading: const HwIcon('pages', size: 16),
+                label:
+                    '${currentPage.toString().padLeft(2, '0')} / $totalPages',
+                onPressed: onPagesTap,
+                tooltip: 'Tutte le pagine',
+              ),
+            // Secondary actions: keep visible on wide, fold into the
+            // overflow menu on compact.
+            if (!isCompact) ...[
+              const SizedBox(width: 4),
+              const HwDivider(),
+              const SizedBox(width: 4),
+              HwButton.icon(
+                  icon: const HwIcon('symbol', size: 16),
+                  tooltip: 'Simboli',
+                  onPressed: onSymbolsTap),
+              HwButton.icon(
+                  icon: const HwIcon('export', size: 16),
+                  tooltip: 'Esporta',
+                  onPressed: onExportTap),
+            ],
+            HwButton.icon(
               icon: const HwIcon('more', size: 16),
               tooltip: 'Altro',
-              onPressed: onMoreTap),
-        ],
+              onPressed: isCompact
+                  ? () => _showCompactOverflow(
+                        ctx,
+                        onSymbolsTap: onSymbolsTap,
+                        onExportTap: onExportTap,
+                        onMoreTap: onMoreTap,
+                      )
+                  : onMoreTap,
+            ),
+          ],
+        ),
+      );
+    });
+  }
+
+  /// Compact-mode overflow: bundles symbols + export + the original
+  /// "more" menu in a single popup so phone-width devices don't need
+  /// to fit 7 buttons in the top bar.
+  void _showCompactOverflow(
+    BuildContext context, {
+    VoidCallback? onSymbolsTap,
+    VoidCallback? onExportTap,
+    VoidCallback? onMoreTap,
+  }) async {
+    final p = HwThemeScope.of(context);
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: p.paper0,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            ListTile(
+              leading: const HwIcon('symbol', size: 18),
+              title: const Text('Simboli'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onSymbolsTap?.call();
+              },
+            ),
+            ListTile(
+              leading: const HwIcon('export', size: 18),
+              title: const Text('Esporta'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onExportTap?.call();
+              },
+            ),
+            const Divider(),
+            ListTile(
+              leading: const HwIcon('more', size: 18),
+              title: const Text('Altro…'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onMoreTap?.call();
+              },
+            ),
+          ],
+        ),
       ),
     );
   }

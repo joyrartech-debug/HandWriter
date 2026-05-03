@@ -502,73 +502,149 @@ class _TopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = HwThemeScope.of(context);
-    return Container(
-      padding: const EdgeInsets.fromLTRB(32, 20, 32, 16),
-      decoration: BoxDecoration(
-        color: p.paper0,
-        border: Border(bottom: BorderSide(color: p.paper3)),
+    return LayoutBuilder(builder: (ctx, c) {
+      final isCompact = c.maxWidth < 720;
+      final hPad = isCompact ? 16.0 : 32.0;
+      return Container(
+        padding: EdgeInsets.fromLTRB(hPad, 16, hPad, 14),
+        decoration: BoxDecoration(
+          color: p.paper0,
+          border: Border(bottom: BorderSide(color: p.paper3)),
+        ),
+        child: Row(
+          children: [
+            Text('HandWriter',
+                style: TextStyle(
+                  fontSize: isCompact ? 18 : 22,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.4,
+                  color: p.ink0,
+                )),
+            const Spacer(),
+            // Search field — full width on phone, fixed 240 on wide.
+            if (isCompact)
+              Expanded(
+                child: HwTextField(
+                  controller: searchController,
+                  hint: 'Cerca…',
+                  leading: const HwIcon('search', size: 16),
+                  onChanged: onSearchChanged,
+                  width: double.infinity,
+                ),
+              )
+            else
+              HwTextField(
+                controller: searchController,
+                hint: 'Cerca taccuini…',
+                leading: const HwIcon('search', size: 16),
+                onChanged: onSearchChanged,
+                width: 240,
+              ),
+            const SizedBox(width: 8),
+            // Wide-only: view toggle, sort label, divider, big "Importa".
+            if (!isCompact) ...[
+              const HwDivider(),
+              const SizedBox(width: 12),
+              Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: p.paper2,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Row(children: [
+                  _SegBtn(
+                      icon: 'grid',
+                      selected: gridView,
+                      onTap: () => onViewToggle(true)),
+                  _SegBtn(
+                      icon: 'list',
+                      selected: !gridView,
+                      onTap: () => onViewToggle(false)),
+                ]),
+              ),
+              const SizedBox(width: 12),
+              HwButton(
+                leading: const HwIcon('sort', size: 16),
+                label: sortLabel,
+                onPressed: onSortTap,
+              ),
+              const SizedBox(width: 12),
+              const HwDivider(),
+              const SizedBox(width: 12),
+              HwButton(
+                leading: const HwIcon('export', size: 16),
+                label: 'Importa',
+                tooltip: 'Importa un file .ncnote',
+                onPressed: onImportTap,
+              ),
+              const SizedBox(width: 4),
+              HwButton.icon(
+                  icon: const HwIcon('settings', size: 16),
+                  tooltip: 'Impostazioni',
+                  onPressed: onSettingsTap),
+            ] else ...[
+              // Compact: collapse view toggle / sort / import / settings
+              // into a single overflow menu. Saves ~360px of bar width.
+              HwButton.icon(
+                icon: const HwIcon('more', size: 16),
+                tooltip: 'Altro',
+                onPressed: () => _compactMenu(ctx),
+              ),
+            ],
+          ],
+        ),
+      );
+    });
+  }
+
+  void _compactMenu(BuildContext context) async {
+    final p = HwThemeScope.of(context);
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: p.paper0,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      child: Row(
-        children: [
-          Text('HandWriter',
-              style: TextStyle(
-                fontSize: 22,
-                fontWeight: FontWeight.w700,
-                letterSpacing: -0.4,
-                color: p.ink0,
-              )),
-          const Spacer(),
-          HwTextField(
-            controller: searchController,
-            hint: 'Cerca taccuini…',
-            leading: const HwIcon('search', size: 16),
-            onChanged: onSearchChanged,
-            width: 240,
-          ),
-          const SizedBox(width: 12),
-          const HwDivider(),
-          const SizedBox(width: 12),
-          // View toggle
-          Container(
-            padding: const EdgeInsets.all(2),
-            decoration: BoxDecoration(
-              color: p.paper2,
-              borderRadius: BorderRadius.circular(8),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            ListTile(
+              leading: HwIcon(gridView ? 'list' : 'grid', size: 18),
+              title: Text(gridView ? 'Vista a lista' : 'Vista a griglia'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onViewToggle(!gridView);
+              },
             ),
-            child: Row(
-              children: [
-                _SegBtn(
-                    icon: 'grid',
-                    selected: gridView,
-                    onTap: () => onViewToggle(true)),
-                _SegBtn(
-                    icon: 'list',
-                    selected: !gridView,
-                    onTap: () => onViewToggle(false)),
-              ],
+            ListTile(
+              leading: const HwIcon('sort', size: 18),
+              title: Text('Ordinamento: $sortLabel'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onSortTap();
+              },
             ),
-          ),
-          const SizedBox(width: 12),
-          HwButton(
-            leading: const HwIcon('sort', size: 16),
-            label: sortLabel,
-            onPressed: onSortTap,
-          ),
-          const SizedBox(width: 12),
-          const HwDivider(),
-          const SizedBox(width: 12),
-          HwButton(
-            leading: const HwIcon('export', size: 16),
-            label: 'Importa',
-            tooltip: 'Importa un file .ncnote',
-            onPressed: onImportTap,
-          ),
-          const SizedBox(width: 4),
-          HwButton.icon(
-              icon: const HwIcon('settings', size: 16),
-              tooltip: 'Impostazioni',
-              onPressed: onSettingsTap),
-        ],
+            const Divider(),
+            ListTile(
+              leading: const HwIcon('export', size: 18),
+              title: const Text('Importa .ncnote…'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onImportTap();
+              },
+            ),
+            ListTile(
+              leading: const HwIcon('settings', size: 18),
+              title: const Text('Impostazioni'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                onSettingsTap();
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
