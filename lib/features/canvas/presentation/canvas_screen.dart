@@ -490,13 +490,36 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           _save();
           return KeyEventResult.handled;
         case LogicalKeyboardKey.keyC:
-          ref.read(canvasProvider.notifier).copySelection();
-          _toast('Selezione copiata');
-          return KeyEventResult.handled;
+          {
+            final s = ref.read(canvasProvider);
+            final notif = ref.read(canvasProvider.notifier);
+            // Lasso selection takes priority; otherwise fall back to the
+            // single-element selection (image / shape / text picked via
+            // double-tap) so Ctrl+C copies an image too.
+            if (s?.lassoSelection != null) {
+              notif.copySelection();
+            } else if (s?.selectedElementId != null) {
+              notif.copyElement(s!.selectedElementId!);
+            } else {
+              return KeyEventResult.ignored;
+            }
+            _toast('Selezione copiata');
+            return KeyEventResult.handled;
+          }
         case LogicalKeyboardKey.keyX:
-          ref.read(canvasProvider.notifier).cutSelection();
-          _toast('Selezione tagliata');
-          return KeyEventResult.handled;
+          {
+            final s = ref.read(canvasProvider);
+            final notif = ref.read(canvasProvider.notifier);
+            if (s?.lassoSelection != null) {
+              notif.cutSelection();
+            } else if (s?.selectedElementId != null) {
+              notif.cutElement(s!.selectedElementId!);
+            } else {
+              return KeyEventResult.ignored;
+            }
+            _toast('Selezione tagliata');
+            return KeyEventResult.handled;
+          }
         case LogicalKeyboardKey.keyV:
           _pasteFromClipboard();
           return KeyEventResult.handled;
@@ -2352,15 +2375,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   HwBottomPageStrip(
                     chapterLabel: _currentChapterLabel(canvasState),
                     // Only show pages of the active chapter (or all when
-                    // no chapter filter is active). Previously the strip
-                    // listed every page in the notebook even when the
-                    // chapter label said "Cap. Appendice (4 pagine)" —
-                    // the count and the strip disagreed.
+                    // no chapter filter is active).
                     pageNumbers: [
                       for (final i in canvasState.filteredPageIndices) i + 1,
                     ],
                     currentPage: canvasState.currentPageIndex + 1,
                     onPageTap: (n) => notifier.goToPage(n - 1),
+                    onPageSecondary: (n, pos) =>
+                        _showPageStripContextMenu(n, pos),
                     onAllPagesTap: () => _showPageManager(canvasState),
                   ),
                 ],
@@ -4821,6 +4843,94 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         ),
       ],
     );
+  }
+
+  /// Right-click / long-press on a thumbnail in the bottom strip.
+  /// Anchored at [pos] (global), shows quick actions on that page.
+  void _showPageStripContextMenu(int pageNumber, Offset pos) async {
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    final pageIndex = pageNumber - 1;
+    if (pageIndex < 0 || pageIndex >= state.document.pages.length) return;
+
+    final action = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx + 1, pos.dy + 1),
+      elevation: 8,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      items: [
+        const PopupMenuItem(
+          value: 'goto',
+          child: Row(children: [
+            Icon(Icons.open_in_new_rounded, size: 18),
+            SizedBox(width: 12),
+            Text('Vai alla pagina'),
+          ]),
+        ),
+        const PopupMenuItem(
+          value: 'duplicate',
+          child: Row(children: [
+            Icon(Icons.content_copy_rounded, size: 18),
+            SizedBox(width: 12),
+            Text('Duplica pagina'),
+          ]),
+        ),
+        const PopupMenuItem(
+          value: 'add_after',
+          child: Row(children: [
+            Icon(Icons.add_circle_outline_rounded, size: 18),
+            SizedBox(width: 12),
+            Text('Nuova pagina dopo'),
+          ]),
+        ),
+        const PopupMenuDivider(),
+        PopupMenuItem(
+          value: 'delete',
+          child: Row(children: [
+            Icon(Icons.delete_outline_rounded,
+                size: 18, color: Colors.red.shade700),
+            const SizedBox(width: 12),
+            Text('Elimina pagina',
+                style: TextStyle(color: Colors.red.shade700)),
+          ]),
+        ),
+      ],
+    );
+
+    if (!mounted || action == null) return;
+    final notifier = ref.read(canvasProvider.notifier);
+    switch (action) {
+      case 'goto':
+        notifier.goToPage(pageIndex);
+        break;
+      case 'duplicate':
+        notifier.duplicatePage(pageIndex);
+        break;
+      case 'add_after':
+        notifier.goToPage(pageIndex);
+        notifier.addPage();
+        break;
+      case 'delete':
+        final ok = await showDialog<bool>(
+          context: context,
+          builder: (_) => AlertDialog(
+            title: const Text('Eliminare la pagina?'),
+            content: Text(
+                'La pagina $pageNumber e tutto il suo contenuto verranno eliminati.'),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Annulla')),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Elimina'),
+              ),
+            ],
+          ),
+        );
+        if (ok == true) notifier.deletePage(pageIndex);
+        break;
+    }
   }
 
   void _showPageManager(CanvasState canvasState) {

@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:handwriter/core/providers/canvas_state.dart';
 import 'package:handwriter/ui/primitives/hw_button.dart';
@@ -184,8 +185,6 @@ class HwFloatingDock extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _toolBtn(context, CanvasTool.pen, 'pen', 'Penna · P'),
-          _toolBtn(context, CanvasTool.ballpoint, 'ballpoint', 'Ballpoint'),
-          _toolBtn(context, CanvasTool.brush, 'brush', 'Pennello · B'),
           _toolBtn(
               context, CanvasTool.calligraphy, 'calligraphy', 'Calligrafia'),
           _toolBtn(context, CanvasTool.highlighter, 'highlighter',
@@ -646,6 +645,10 @@ class HwBottomPageStrip extends StatefulWidget {
 
   /// Tapping a thumbnail emits the underlying 1-based page number.
   final ValueChanged<int> onPageTap;
+  /// Right-click / long-press on a thumbnail — opens a contextual menu.
+  /// Receives the 1-based page number and the global tap position so the
+  /// caller can position a popup menu correctly.
+  final void Function(int pageNumber, Offset globalPosition)? onPageSecondary;
   final VoidCallback onAllPagesTap;
 
   const HwBottomPageStrip({
@@ -654,6 +657,7 @@ class HwBottomPageStrip extends StatefulWidget {
     required this.pageNumbers,
     required this.currentPage,
     required this.onPageTap,
+    this.onPageSecondary,
     required this.onAllPagesTap,
   });
 
@@ -743,7 +747,25 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
                     child: Text('Nessuna pagina',
                         style:
                             TextStyle(fontSize: 12, color: p.ink2)))
-                : ListView.separated(
+                : Listener(
+                    // Mouse-wheel translates vertical wheel ticks into
+                    // horizontal scroll on the strip, so a desktop user
+                    // can flick through pages with the wheel without
+                    // touching the trackpad.
+                    onPointerSignal: (signal) {
+                      if (signal is PointerScrollEvent &&
+                          _ctrl.hasClients) {
+                        final dy = signal.scrollDelta.dy;
+                        final dx = signal.scrollDelta.dx;
+                        final delta = dy.abs() > dx.abs() ? dy : dx;
+                        final next = (_ctrl.offset + delta).clamp(
+                          0.0,
+                          _ctrl.position.maxScrollExtent,
+                        );
+                        _ctrl.jumpTo(next);
+                      }
+                    },
+                    child: ListView.separated(
                     controller: _ctrl,
                     scrollDirection: Axis.horizontal,
                     itemCount: widget.pageNumbers.length,
@@ -756,8 +778,12 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
                         number: n,
                         selected: selected,
                         onTap: () => widget.onPageTap(n),
+                        onSecondary: widget.onPageSecondary == null
+                            ? null
+                            : (pos) => widget.onPageSecondary!(n, pos),
                       );
                     },
+                  ),
                   ),
           ),
           const SizedBox(width: 12),
@@ -778,10 +804,14 @@ class _PageThumb extends StatelessWidget {
   final int number;
   final bool selected;
   final VoidCallback onTap;
+  /// Right-click / long-press → contextual menu. Receives the global
+  /// pointer position so the caller can anchor the menu correctly.
+  final void Function(Offset globalPosition)? onSecondary;
   const _PageThumb({
     required this.number,
     required this.selected,
     required this.onTap,
+    this.onSecondary,
   });
 
   @override
@@ -791,6 +821,12 @@ class _PageThumb extends StatelessWidget {
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: onTap,
+        onSecondaryTapDown: onSecondary == null
+            ? null
+            : (d) => onSecondary!(d.globalPosition),
+        onLongPressStart: onSecondary == null
+            ? null
+            : (d) => onSecondary!(d.globalPosition),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 140),
           width: 50,

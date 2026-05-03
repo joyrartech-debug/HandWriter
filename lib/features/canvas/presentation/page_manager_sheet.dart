@@ -34,7 +34,24 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
   /// Document indices of currently selected pages.
   final Set<int> _selected = {};
 
-  bool get _isSelecting => _selected.isNotEmpty;
+  /// Sticky selection mode — activated by tapping the checklist button.
+  /// When true the grid is in selection mode even with zero pages
+  /// selected (so the user can pick the first page with a single tap
+  /// instead of having to long-press first).
+  bool _selectionModeActive = false;
+
+  bool get _isSelecting => _selectionModeActive || _selected.isNotEmpty;
+
+  void _toggleSelectionMode() {
+    setState(() {
+      if (_selectionModeActive || _selected.isNotEmpty) {
+        _selectionModeActive = false;
+        _selected.clear();
+      } else {
+        _selectionModeActive = true;
+      }
+    });
+  }
 
   void _toggleSelect(int docIdx) {
     setState(() {
@@ -46,7 +63,10 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
     });
   }
 
-  void _clearSelection() => setState(() => _selected.clear());
+  void _clearSelection() => setState(() {
+        _selected.clear();
+        _selectionModeActive = false;
+      });
 
   void _selectAll(List<int> visibleIndices) =>
       setState(() => _selected.addAll(visibleIndices));
@@ -226,16 +246,18 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                             onPressed: () => _promptJumpToPage(ctx, liveState),
                           ),
                         IconButton(
-                          icon: const Icon(Icons.checklist_rounded),
-                          tooltip: 'Seleziona pagine',
-                          onPressed: () {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Tieni premuto su una pagina per selezionarla.'),
-                                duration: Duration(seconds: 2),
-                              ),
-                            );
-                          },
+                          icon: Icon(
+                            _selectionModeActive
+                                ? Icons.checklist_rtl_rounded
+                                : Icons.checklist_rounded,
+                            color: _selectionModeActive
+                                ? Theme.of(context).colorScheme.primary
+                                : null,
+                          ),
+                          tooltip: _selectionModeActive
+                              ? 'Esci dalla selezione'
+                              : 'Seleziona pagine',
+                          onPressed: _toggleSelectionMode,
                         ),
                         // Paste pages from clipboard if available
                         if (ref.watch(pageClipboardProvider) != null)
