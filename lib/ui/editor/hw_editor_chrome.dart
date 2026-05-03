@@ -856,11 +856,20 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
                     separatorBuilder: (_, __) =>
                         const SizedBox(width: _itemSpacing),
                     itemBuilder: (_, i) {
+                      // n = global 1-based page number (used for navigation
+                      // and right-click menu); displayLabel = position
+                      // within the chapter (1..N). Showing the chapter
+                      // position avoids confusing "gaps" in the displayed
+                      // numbers when a chapter's pages are not contiguous
+                      // in the overall notebook (e.g. simulations 185–207
+                      // followed by 212+ when 208–211 belong elsewhere).
                       final n = widget.pageNumbers[i];
                       final selected = n == widget.currentPage;
+                      final displayLabel = i + 1;
                       return _PageThumb(
-                        number: n,
+                        number: displayLabel,
                         selected: selected,
+                        globalPageNumber: n,
                         onTap: () => widget.onPageTap(n),
                         onSecondary: widget.onPageSecondary == null
                             ? null
@@ -885,7 +894,11 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
 /// Single thumbnail in the bottom strip — renders a mini ruled "page" so the
 /// strip reads as content rather than empty boxes.
 class _PageThumb extends StatelessWidget {
+  /// Label shown inside the thumbnail (chapter-local position, 1..N).
   final int number;
+  /// Real notebook page number (1-based) — used only for the tooltip
+  /// so the user can still find the page in the global numbering.
+  final int? globalPageNumber;
   final bool selected;
   final VoidCallback onTap;
   /// Right-click / long-press → contextual menu. Receives the global
@@ -895,13 +908,20 @@ class _PageThumb extends StatelessWidget {
     required this.number,
     required this.selected,
     required this.onTap,
+    this.globalPageNumber,
     this.onSecondary,
   });
 
   @override
   Widget build(BuildContext context) {
     final p = HwThemeScope.of(context);
-    return MouseRegion(
+    final tooltip = globalPageNumber != null && globalPageNumber != number
+        ? 'Pagina $number del capitolo · pagina $globalPageNumber del taccuino'
+        : 'Pagina $number';
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 600),
+      child: MouseRegion(
       cursor: SystemMouseCursors.click,
       child: GestureDetector(
         onTap: onTap,
@@ -954,6 +974,7 @@ class _PageThumb extends StatelessWidget {
           ),
         ),
       ),
+    ),
     );
   }
 }
