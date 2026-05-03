@@ -177,12 +177,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   final _activeStrokeNotifier = ActiveStrokeNotifier();
   // ── High-performance lasso path notifier (avoids Riverpod rebuild per point) ──
   final _lassoPathNotifier = LassoPathNotifier();
+  // ── High-performance lasso transform notifier (drag/rotate/scale of an
+  // already-committed selection — bypasses Riverpod so the page isn't
+  // re-rendered on every pointer-move).
+  final _lassoTransformNotifier = LassoTransformNotifier();
   // Cached Listenable.merge for the CustomPaint.repaintNotifier — avoids
   // rebuilding the composite on every parent rebuild (each new merge re-
   // subscribes to both underlying notifiers, which is non-trivial work on
   // the hot draw path).
-  late final Listenable _repaintNotifier =
-      Listenable.merge([_activeStrokeNotifier, _lassoPathNotifier]);
+  late final Listenable _repaintNotifier = Listenable.merge([
+    _activeStrokeNotifier,
+    _lassoPathNotifier,
+    _lassoTransformNotifier,
+  ]);
 
   // ── Auto-save (debounced) ──
   //
@@ -292,6 +299,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
     _activeStrokeNotifier.dispose();
     _lassoPathNotifier.dispose();
+    _lassoTransformNotifier.dispose();
     _autoSaveDebounce?.cancel();
     _autoSaveMaxWait?.cancel();
     _holdRecognizeTimer?.cancel();
@@ -1128,6 +1136,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         if (bounds.inflate(10).contains(pagePos)) {
           _isDraggingSelection = true;
           _lastLassoDragPos = pagePos;
+          // Snapshot the current Riverpod transform into the local
+          // notifier so subsequent drag deltas accumulate locally
+          // (no per-frame Riverpod rebuild).
+          _lassoTransformNotifier.begin(
+            dragOffset: sel.dragOffset,
+            rotation: sel.rotation,
+            scale: sel.scale,
+          );
           return;
         }
       }
@@ -1243,7 +1259,9 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
       final delta = pagePos - _lastLassoDragPos;
       _lastLassoDragPos = pagePos;
-      ref.read(canvasProvider.notifier).moveSelection(delta);
+      // Update local notifier (no Riverpod). Painter listens via
+      // _repaintNotifier and only the canvas layer repaints.
+      _lassoTransformNotifier.translate(delta);
       return;
     }
 
@@ -1378,8 +1396,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     if (_isDraggingSelection) {
       _isDraggingSelection = false;
-      // Removed immediate applySelectionTransform to allow cumulative transforms
-      // It will be baked into the canvas when the user clicks away or changes tools.
+      // Commit the locally-tracked drag offset back to Riverpod in one
+      // shot. During the drag _lassoTransformNotifier received every
+      // delta; now Riverpod catches up exactly once per gesture.
+      _commitLassoTransform();
+      // The full transform (rotation/scale + drag) stays in lassoSelection
+      // and is baked into the canvas when the user clicks away or
+      // changes tool, same as before.
       return;
     }
 
@@ -2613,6 +2636,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             activeColor: canvasState.toolSettings.color,
                             activeWidth: canvasState.toolSettings.strokeWidth,
                             lassoSelection: canvasState.lassoSelection,
+                            // Live transform during drag/rotate/scale —
+                            // bypasses Riverpod so the page repaints
+                            // without rebuilding the widget tree.
+                            liveLassoTransform: _lassoTransformNotifier.isActive
+                                ? () => _lassoTransformNotifier.snapshot()
+                                : null,
                             lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
                                 ? _lassoPathNotifier.points
                                 : (canvasState.lassoPath.isNotEmpty ? canvasState.lassoPath : null),
@@ -3244,6 +3273,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             onPanStart: (d) {
               _resizeDragStart = d.globalPosition;
               _resizeInitialScale = sel.scale;
+              _lassoTransformNotifier.begin(
+                dragOffset: sel.dragOffset,
+                rotation: sel.rotation,
+                scale: sel.scale,
+              );
             },
             onPanUpdate: (d) {
               // Convert screenRect.center to global coordinates via the canvas Stack
@@ -3255,9 +3289,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               final currentDist = (d.globalPosition - centerGlobal).distance;
               if (startDist > 5) {
                 final newScale = _resizeInitialScale * (currentDist / startDist);
-                ref.read(canvasProvider.notifier).scaleSelectionPreview(newScale.clamp(0.1, 10.0));
+                _lassoTransformNotifier.setScale(newScale.clamp(0.1, 10.0));
               }
             },
+            onPanEnd: (_) => _commitLassoTransform(),
+            onPanCancel: _commitLassoTransform,
             child: Container(
               width: 14, height: 14,
               decoration: BoxDecoration(
@@ -3290,6 +3326,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             mainAxisSize: MainAxisSize.min,
             children: [
               GestureDetector(
+                onPanStart: (_) {
+                  _lassoTransformNotifier.begin(
+                    dragOffset: sel.dragOffset,
+                    rotation: sel.rotation,
+                    scale: sel.scale,
+                  );
+                },
                 onPanUpdate: (d) {
                   // Use the canvas Stack's RenderBox for proper coordinate conversion
                   final stackBox = _canvasStackKey.currentContext?.findRenderObject() as RenderBox?;
@@ -3302,8 +3345,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   var deltaAngle = currentAngle - startAngle;
                   if (deltaAngle > pi) deltaAngle -= 2 * pi;
                   if (deltaAngle < -pi) deltaAngle += 2 * pi;
-                  ref.read(canvasProvider.notifier).rotateSelection(deltaAngle);
+                  _lassoTransformNotifier.rotateBy(deltaAngle);
                 },
+                onPanEnd: (_) => _commitLassoTransform(),
+                onPanCancel: _commitLassoTransform,
                 child: Container(
                   width: 28, height: 28,
                   decoration: BoxDecoration(
@@ -3327,6 +3372,22 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // Fields for resize drag tracking
   Offset _resizeDragStart = Offset.zero;
   double _resizeInitialScale = 1.0;
+
+  /// Snapshot the live transform from [_lassoTransformNotifier] back into
+  /// Riverpod state and clear the notifier. Called from drag/rotate/scale
+  /// onPanEnd / onPanCancel so the Riverpod state catches up exactly once
+  /// per gesture instead of once per pointer-move event.
+  void _commitLassoTransform() {
+    if (!_lassoTransformNotifier.isActive) return;
+    final snap = _lassoTransformNotifier.snapshot();
+    final notifier = ref.read(canvasProvider.notifier);
+    notifier.commitSelectionTransform(
+      dragOffset: snap.dragOffset,
+      rotation: snap.rotation,
+      scale: snap.scale,
+    );
+    _lassoTransformNotifier.end();
+  }
 
   // ── Context menu (right-click) ──
 

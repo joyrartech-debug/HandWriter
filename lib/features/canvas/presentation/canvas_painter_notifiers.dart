@@ -179,6 +179,79 @@ class ActiveStrokeNotifier extends ChangeNotifier {
   }
 }
 
+/// Live transform of an existing lasso selection (drag offset / rotation /
+/// scale) tracked locally so every pointer-move event doesn't fire a full
+/// Riverpod state update. The painter reads the live values via [snapshot]
+/// and the CustomPaint listens on [this] to schedule repaint without
+/// rebuilding the widget tree above it.
+///
+/// Lifecycle:
+///   begin(initial)   → on pan/rotate/scale start
+///   updateXxx(...)   → on pan/rotate/scale update  (high frequency)
+///   end()            → on pan/rotate/scale end; caller commits the final
+///                      values back to Riverpod with one state update.
+class LassoTransformNotifier extends ChangeNotifier {
+  bool _active = false;
+  Offset _dragOffset = Offset.zero;
+  double _rotation = 0.0;
+  double _scale = 1.0;
+
+  bool get isActive => _active;
+  Offset get dragOffset => _dragOffset;
+  double get rotation => _rotation;
+  double get scale => _scale;
+
+  /// Snapshot the current live transform — caller passes this to
+  /// LassoSelection.copyWith when committing to Riverpod.
+  ({Offset dragOffset, double rotation, double scale}) snapshot() =>
+      (dragOffset: _dragOffset, rotation: _rotation, scale: _scale);
+
+  void begin({
+    Offset dragOffset = Offset.zero,
+    double rotation = 0.0,
+    double scale = 1.0,
+  }) {
+    _active = true;
+    _dragOffset = dragOffset;
+    _rotation = rotation;
+    _scale = scale;
+    notifyListeners();
+  }
+
+  void translate(Offset delta) {
+    if (!_active) return;
+    _dragOffset += delta;
+    notifyListeners();
+  }
+
+  void setRotation(double r) {
+    if (!_active) return;
+    _rotation = r;
+    notifyListeners();
+  }
+
+  void rotateBy(double delta) {
+    if (!_active) return;
+    _rotation += delta;
+    notifyListeners();
+  }
+
+  void setScale(double s) {
+    if (!_active) return;
+    _scale = s;
+    notifyListeners();
+  }
+
+  void end() {
+    if (!_active) return;
+    _active = false;
+    _dragOffset = Offset.zero;
+    _rotation = 0.0;
+    _scale = 1.0;
+    notifyListeners();
+  }
+}
+
 /// Local lasso path tracker — zero Riverpod rebuilds during drawing.
 /// At pointer-up the collected path is committed to the provider in one shot.
 class LassoPathNotifier extends ChangeNotifier {
