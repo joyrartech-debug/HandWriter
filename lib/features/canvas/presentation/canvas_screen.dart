@@ -177,6 +177,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _deferredCommitLastScreenPos = null;
     _deferredCommitTimer?.cancel();
     _deferredCommitTimer = null;
+    // Clear the live notifier BEFORE the commit so the painter, which
+    // pulls from the notifier when it has points, doesn't keep drawing
+    // the old stroke as "live" alongside the freshly-committed one.
+    // Forgetting this clear was the cause of the "phantom segment from
+    // a previous stroke when I start drawing again" bug — if the next
+    // pointer event arrived as a MOVE rather than a fresh DOWN (iPad
+    // sometimes resumes from a hovering pen this way), the move would
+    // append to the still-active notifier and the user saw a line from
+    // the old end-point stretching to where they really wrote.
+    _activeStrokeNotifier.clear();
+    _justContinuedFromDefer = false;
     ref.read(canvasProvider.notifier).commitAndEndStroke(pts);
     _activeStrokeNotifier.clear();
     _markStrokeEnded('pointerUp.commit');
