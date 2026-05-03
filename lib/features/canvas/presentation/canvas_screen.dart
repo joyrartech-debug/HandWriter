@@ -181,6 +181,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // Updated on every pointer-move so the painter repaints without firing
   // a Riverpod state update; committed back to Riverpod once on pan-end.
   final _lassoTransformNotifier = LassoTransformNotifier();
+  // ── Live transform of a single non-lasso element (image / shape / text
+  // selected via double-tap). Same purpose as the lasso notifier — bypass
+  // Riverpod during the gesture, commit once on pan-end.
+  final _elementTransformNotifier = ElementTransformNotifier();
   // Cached Listenable.merge for the CustomPaint.repaintNotifier — avoids
   // rebuilding the composite on every parent rebuild (each new merge re-
   // subscribes to both underlying notifiers, which is non-trivial work on
@@ -189,6 +193,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _activeStrokeNotifier,
     _lassoPathNotifier,
     _lassoTransformNotifier,
+    _elementTransformNotifier,
   ]);
 
   // ── Auto-save (debounced) ──
@@ -307,6 +312,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _activeStrokeNotifier.dispose();
     _lassoPathNotifier.dispose();
     _lassoTransformNotifier.dispose();
+    _elementTransformNotifier.dispose();
     _autoSaveDebounce?.cancel();
     _autoSaveMaxWait?.cancel();
     _holdRecognizeTimer?.cancel();
@@ -2797,6 +2803,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                                 liveLassoTransform: _lassoTransformNotifier.isActive
                                     ? () => _lassoTransformNotifier.snapshot()
                                     : null,
+                                liveElementTransform: _elementTransformNotifier.isActive
+                                    ? () => (
+                                          elementId: _elementTransformNotifier.elementId!,
+                                          dragOffset: _elementTransformNotifier.dragOffset,
+                                          rotationDelta: _elementTransformNotifier.rotationDelta,
+                                          scaleW: _elementTransformNotifier.scaleW,
+                                          scaleH: _elementTransformNotifier.scaleH,
+                                        )
+                                    : null,
                                 lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
                                     ? _lassoPathNotifier.points
                                     : (s.lassoPath.isNotEmpty ? s.lassoPath : null),
@@ -2886,8 +2901,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 ),
               ),
 
-              // Transform handles for selected elements
-              ..._buildTransformHandles(canvasState, canvasSize),
+              // Transform handles for selected elements (image / shape /
+              // text picked via double-tap). Wrapped in a ListenableBuilder
+              // on _elementTransformNotifier so the bounding box and
+              // rotation handle stay glued to the moving content during
+              // drag/rotate/resize without rebuilding the editor.
+              Positioned.fill(
+                child: ListenableBuilder(
+                  listenable: _elementTransformNotifier,
+                  builder: (_, __) => Stack(
+                    children: _buildTransformHandles(canvasState, canvasSize),
+                  ),
+                ),
+              ),
 
               // Lasso handles + floating context actions wrapped in a
               // ListenableBuilder on _lassoTransformNotifier so that
@@ -3179,6 +3205,30 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     );
     if (pageBounds == null) return [];
 
+    // Live override: while the user is dragging / rotating / resizing this
+    // very element, _elementTransformNotifier holds the deltas. Apply
+    // them so the bounding box and rotation handle stay glued to the
+    // moving content instead of snapping at pan-end.
+    final liveActive = _elementTransformNotifier.isActive &&
+        _elementTransformNotifier.elementId == state.selectedElementId;
+    if (liveActive) {
+      final dx = _elementTransformNotifier.dragOffset.dx;
+      final dy = _elementTransformNotifier.dragOffset.dy;
+      final sw = _elementTransformNotifier.scaleW;
+      final sh = _elementTransformNotifier.scaleH;
+      final newW = pageBounds!.width * sw;
+      final newH = pageBounds!.height * sh;
+      // Resize keeps the top-left corner fixed (matches handle math),
+      // then drag offset is added.
+      pageBounds = Rect.fromLTWH(
+        pageBounds!.left + dx,
+        pageBounds!.top + dy,
+        newW,
+        newH,
+      );
+      rotation += _elementTransformNotifier.rotationDelta;
+    }
+
     final screenTL = _toScreenCoords(pageBounds!.topLeft, state, canvasSize);
     final screenBR = _toScreenCoords(pageBounds!.bottomRight, state, canvasSize);
     final screenRect = Rect.fromPoints(screenTL, screenBR);
@@ -3222,19 +3272,45 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         hasComment: hasComment,
         isFlipped: isFlipped,
         onDragStart: () {
+          // Push undo once (Riverpod), then switch to the local notifier
+          // for the rest of the gesture so per-frame moves don't fire
+          // state updates.
           ref.read(canvasProvider.notifier).startDragElement(elementId);
+          _elementTransformNotifier.begin(elementId);
         },
+        onDragEnd: () => _commitElementTransform(elementId, state, canvasSize),
         onMove: (delta) {
           final pageDelta = delta / (state.zoom * _getRenderScale(state, canvasSize));
-          ref.read(canvasProvider.notifier).moveElement(elementId, pageDelta);
+          // Local-only — Riverpod catches up at pan-end via onDragEnd.
+          _elementTransformNotifier.translate(pageDelta);
         },
         onResize: (newBounds) {
-          final pageTL = _toPageCoords(newBounds.topLeft, state, canvasSize);
-          final pageBR = _toPageCoords(newBounds.bottomRight, state, canvasSize);
-          ref.read(canvasProvider.notifier).resizeElement(elementId, Rect.fromPoints(pageTL, pageBR));
+          // Convert the new screen bounds to a (sw, sh) multiplicative
+          // factor relative to the original pageBounds the notifier was
+          // started with.
+          final origScreenTL = _toScreenCoords(
+              pageBounds!.topLeft, state, canvasSize);
+          final origScreenBR = _toScreenCoords(
+              pageBounds!.bottomRight, state, canvasSize);
+          final origScreenRect = Rect.fromPoints(origScreenTL, origScreenBR);
+          final sw = (origScreenRect.width <= 0)
+              ? 1.0
+              : (newBounds.width / origScreenRect.width);
+          final sh = (origScreenRect.height <= 0)
+              ? 1.0
+              : (newBounds.height / origScreenRect.height);
+          // Translate the top-left if it moved (e.g. resize from top/left).
+          final dx = (newBounds.left - origScreenRect.left) /
+              (state.zoom * _getRenderScale(state, canvasSize));
+          final dy = (newBounds.top - origScreenRect.top) /
+              (state.zoom * _getRenderScale(state, canvasSize));
+          _elementTransformNotifier.setScale(sw, sh);
+          _elementTransformNotifier.translate(
+              Offset(dx - _elementTransformNotifier.dragOffset.dx,
+                  dy - _elementTransformNotifier.dragOffset.dy));
         },
         onRotate: (angle) {
-          ref.read(canvasProvider.notifier).rotateElement(elementId, angle);
+          _elementTransformNotifier.rotateBy(angle);
         },
         onDelete: () {
           ref.read(canvasProvider.notifier).deleteElement(elementId);
@@ -3622,6 +3698,70 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   // Fields for resize drag tracking
   Offset _resizeDragStart = Offset.zero;
   double _resizeInitialScale = 1.0;
+
+  /// Commit the locally-tracked element transform back to Riverpod once,
+  /// at the end of a drag/rotate/resize gesture. During the gesture
+  /// _elementTransformNotifier received every delta; here Riverpod
+  /// catches up exactly once.
+  void _commitElementTransform(
+      String elementId, CanvasState state, Size canvasSize) {
+    if (!_elementTransformNotifier.isActive) return;
+    final dragOffset = _elementTransformNotifier.dragOffset;
+    final rotationDelta = _elementTransformNotifier.rotationDelta;
+    final sw = _elementTransformNotifier.scaleW;
+    final sh = _elementTransformNotifier.scaleH;
+    _elementTransformNotifier.end();
+
+    final notifier = ref.read(canvasProvider.notifier);
+    // Resize: derive the new page-bounds from the original element
+    // bounds + accumulated drag + scale.
+    final page = state.currentPage;
+    if (page == null) return;
+    final element = page.layers.content.where((e) {
+      final id = e.map(
+          stroke: (s) => s.id,
+          text: (t) => t.id,
+          image: (i) => i.id,
+          shape: (s) => s.id);
+      return id == elementId;
+    }).firstOrNull;
+    if (element == null) return;
+    Rect? origBounds;
+    element.map(
+      stroke: (_) {},
+      text: (t) =>
+          origBounds = Rect.fromLTWH(t.data.x, t.data.y, t.data.width, t.data.height),
+      image: (i) =>
+          origBounds = Rect.fromLTWH(i.data.x, i.data.y, i.data.width, i.data.height),
+      shape: (s) => origBounds =
+          Rect.fromPoints(Offset(s.data.x1, s.data.y1), Offset(s.data.x2, s.data.y2)),
+    );
+    if (origBounds == null) return;
+
+    // Apply scale (if any) first, then translate.
+    final scaledRect = Rect.fromLTWH(
+      origBounds!.left,
+      origBounds!.top,
+      origBounds!.width * sw,
+      origBounds!.height * sh,
+    );
+    final newBounds = scaledRect.translate(dragOffset.dx, dragOffset.dy);
+
+    // Single Riverpod update for the whole gesture (handle the scale by
+    // resizing first if needed, then move + rotate).
+    if (sw != 1.0 || sh != 1.0) {
+      notifier.resizeElement(elementId, scaledRect);
+    }
+    if (dragOffset != Offset.zero) {
+      notifier.moveElement(elementId, dragOffset);
+    }
+    if (rotationDelta != 0.0) {
+      notifier.rotateElement(elementId, rotationDelta);
+    }
+    // Suppress unused-var warning in the no-op branch below.
+    // ignore: unused_local_variable
+    final _ = newBounds;
+  }
 
   /// Snapshot the live transform from [_lassoTransformNotifier] back into
   /// Riverpod and clear the notifier. Called from drag/rotate/scale

@@ -11,6 +11,10 @@ class ImageHandleOverlay extends StatefulWidget {
   final VoidCallback onDelete;
   final VoidCallback onDeselect;
   final VoidCallback? onDragStart;
+  /// Called once when any drag/rotate/resize gesture ends or is cancelled.
+  /// Lets the host commit a locally-tracked transform back to Riverpod
+  /// in a single state update instead of one per pointer-move event.
+  final VoidCallback? onDragEnd;
   final VoidCallback? onCrop;
   final VoidCallback? onBringToFront;
   final VoidCallback? onSendToBack;
@@ -33,6 +37,7 @@ class ImageHandleOverlay extends StatefulWidget {
     required this.onDelete,
     required this.onDeselect,
     this.onDragStart,
+    this.onDragEnd,
     this.onCrop,
     this.onBringToFront,
     this.onSendToBack,
@@ -95,6 +100,8 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               _dragStart = d.globalPosition;
               widget.onMove(delta);
             },
+            onPanEnd: widget.isLocked ? null : (_) => widget.onDragEnd?.call(),
+            onPanCancel: widget.isLocked ? null : () => widget.onDragEnd?.call(),
           ),
         ),
 
@@ -154,6 +161,8 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           _dragStart = d.globalPosition;
           _handleCornerResize(handleId, delta);
         },
+        onPanEnd: (_) => widget.onDragEnd?.call(),
+        onPanCancel: () => widget.onDragEnd?.call(),
         child: Container(
           width: _handleSize,
           height: _handleSize,
@@ -183,6 +192,8 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           _dragStart = d.globalPosition;
           _handleEdgeResize(handleId, delta);
         },
+        onPanEnd: (_) => widget.onDragEnd?.call(),
+        onPanCancel: () => widget.onDragEnd?.call(),
         child: Container(
           width: isHorizontal ? 20 : 8,
           height: isHorizontal ? 8 : 20,
@@ -233,6 +244,8 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               _lastRotationAngle = currentAngle;
               widget.onRotate(delta);
             },
+            onPanEnd: (_) => widget.onDragEnd?.call(),
+            onPanCancel: () => widget.onDragEnd?.call(),
             child: Container(
               width: 24,
               height: 24,

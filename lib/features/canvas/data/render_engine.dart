@@ -21,6 +21,17 @@ class CanvasRenderEngine extends CustomPainter {
   /// on the same source.
   final ({Offset dragOffset, double rotation, double scale}) Function()?
       liveLassoTransform;
+  /// Optional live override for a single non-lasso element being
+  /// dragged / rotated / resized. Same purpose as liveLassoTransform.
+  /// scaleW/scaleH are multiplicative on the element's stored size
+  /// (top-left fixed, then dragOffset translates).
+  final ({
+    String elementId,
+    Offset dragOffset,
+    double rotationDelta,
+    double scaleW,
+    double scaleH,
+  }) Function()? liveElementTransform;
   final List<Offset>? lassoPath;
   final List<Offset> Function()? lassoPathGetter;
   final (Offset, Offset, String)? shapePreview;
@@ -37,6 +48,7 @@ class CanvasRenderEngine extends CustomPainter {
     this.activeWidth,
     this.lassoSelection,
     this.liveLassoTransform,
+    this.liveElementTransform,
     this.lassoPath,
     this.lassoPathGetter,
     this.shapePreview,
@@ -101,9 +113,20 @@ class CanvasRenderEngine extends CustomPainter {
         selRotation != 0.0 ||
         selScale != 1.0;
 
-    // While the lasso is being dragged/rotated/scaled, the selected
-    // strokes move every frame — bypass the cache and draw inline.
-    if (hasTransform) {
+    // Live override for a single (non-lasso) element being dragged or
+    // rotated. When present, also bypass the picture cache because the
+    // element moves every frame.
+    final liveEl = liveElementTransform?.call();
+    final hasLiveEl = liveEl != null &&
+        (liveEl.dragOffset != Offset.zero ||
+            liveEl.rotationDelta != 0.0 ||
+            liveEl.scaleW != 1.0 ||
+            liveEl.scaleH != 1.0);
+
+    // While the lasso is being dragged/rotated/scaled OR a single
+    // element is being live-transformed, bypass the cache and draw
+    // inline so the moving element follows pointer at vsync.
+    if (hasTransform || hasLiveEl) {
       _paintStaticLayers(
         canvas,
         selectedIdsSet,
@@ -112,6 +135,7 @@ class CanvasRenderEngine extends CustomPainter {
         selScale,
         selCenter,
         hasTransform,
+        liveEl: liveEl,
       );
     } else {
       // Idle / non-drag path: cache or rebuild the strokes-and-shapes
@@ -157,6 +181,7 @@ class CanvasRenderEngine extends CustomPainter {
         selScale,
         selCenter,
         hasTransform,
+        liveEl: liveEl,
       );
     }
 
@@ -215,6 +240,13 @@ class CanvasRenderEngine extends CustomPainter {
     Offset selCenter,
     bool hasTransform, {
     bool includeImages = true,
+    ({
+      String elementId,
+      Offset dragOffset,
+      double rotationDelta,
+      double scaleW,
+      double scaleH,
+    })? liveEl,
   }) {
     // 0. Page shadow — three flat offset rects of decreasing alpha.
     // Replaces a `MaskFilter.blur(sigma:8)` Gaussian which Skia
@@ -246,6 +278,8 @@ class CanvasRenderEngine extends CustomPainter {
       final isImage = element.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false);
       if (!includeImages && isImage) continue;
 
+      final isLiveTarget = liveEl != null && liveEl.elementId == id;
+
       // If this element is being moved/rotated/scaled via lasso, apply transform
       if (isSelected && hasTransform) {
         canvas.save();
@@ -259,6 +293,18 @@ class CanvasRenderEngine extends CustomPainter {
         }
         canvas.translate(-selCenter.dx, -selCenter.dy);
       }
+      // Single-element live transform (drag/rotate/resize via image handles).
+      if (isLiveTarget) {
+        canvas.save();
+        final c = _elementCenter(element);
+        canvas.translate(liveEl.dragOffset.dx, liveEl.dragOffset.dy);
+        canvas.translate(c.dx, c.dy);
+        if (liveEl.rotationDelta != 0.0) canvas.rotate(liveEl.rotationDelta);
+        if (liveEl.scaleW != 1.0 || liveEl.scaleH != 1.0) {
+          canvas.scale(liveEl.scaleW, liveEl.scaleH);
+        }
+        canvas.translate(-c.dx, -c.dy);
+      }
 
       element.map(
         stroke: (e) => _paintStroke(canvas, e.data),
@@ -267,10 +313,33 @@ class CanvasRenderEngine extends CustomPainter {
         shape: (e) => _paintShape(canvas, e.data),
       );
 
+      if (isLiveTarget) canvas.restore();
       if (isSelected && hasTransform) {
         canvas.restore();
       }
     }
+  }
+
+  /// Geometric center of an element on the page (used as the rotation /
+  /// scale anchor for the single-element live transform).
+  Offset _elementCenter(ContentElement element) {
+    return element.map(
+      stroke: (s) {
+        if (s.data.points.isEmpty) return Offset.zero;
+        double minX = s.data.points.first.x, maxX = minX;
+        double minY = s.data.points.first.y, maxY = minY;
+        for (final p in s.data.points) {
+          if (p.x < minX) minX = p.x;
+          if (p.x > maxX) maxX = p.x;
+          if (p.y < minY) minY = p.y;
+          if (p.y > maxY) maxY = p.y;
+        }
+        return Offset((minX + maxX) / 2, (minY + maxY) / 2);
+      },
+      text: (t) => Offset(t.data.x + t.data.width / 2, t.data.y + t.data.height / 2),
+      image: (i) => Offset(i.data.x + i.data.width / 2, i.data.y + i.data.height / 2),
+      shape: (s) => Offset((s.data.x1 + s.data.x2) / 2, (s.data.y1 + s.data.y2) / 2),
+    );
   }
 
   /// Walk image elements only and draw them inline. Cheap (each call is
@@ -284,8 +353,15 @@ class CanvasRenderEngine extends CustomPainter {
     double selRotation,
     double selScale,
     Offset selCenter,
-    bool hasTransform,
-  ) {
+    bool hasTransform, {
+    ({
+      String elementId,
+      Offset dragOffset,
+      double rotationDelta,
+      double scaleW,
+      double scaleH,
+    })? liveEl,
+  }) {
     // Fast path: most pages have 0 images. Cache the answer on
     // pageData via Expando — without the cache this `.any` walks all
     // 200 elements with 4 closure allocations per `.map(...)` call
@@ -307,6 +383,8 @@ class CanvasRenderEngine extends CustomPainter {
       final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
       final isSelected = selectedIdsSet.contains(id);
 
+      final isLiveTarget = liveEl != null && liveEl.elementId == id;
+
       if (isSelected && hasTransform) {
         canvas.save();
         canvas.translate(selDragOffset.dx, selDragOffset.dy);
@@ -315,12 +393,24 @@ class CanvasRenderEngine extends CustomPainter {
         if (selRotation != 0.0) canvas.rotate(selRotation);
         canvas.translate(-selCenter.dx, -selCenter.dy);
       }
+      if (isLiveTarget) {
+        canvas.save();
+        final c = _elementCenter(element);
+        canvas.translate(liveEl.dragOffset.dx, liveEl.dragOffset.dy);
+        canvas.translate(c.dx, c.dy);
+        if (liveEl.rotationDelta != 0.0) canvas.rotate(liveEl.rotationDelta);
+        if (liveEl.scaleW != 1.0 || liveEl.scaleH != 1.0) {
+          canvas.scale(liveEl.scaleW, liveEl.scaleH);
+        }
+        canvas.translate(-c.dx, -c.dy);
+      }
       element.map(
         stroke: (_) {},
         text: (_) {},
         image: (e) => _paintImage(canvas, e.data),
         shape: (_) {},
       );
+      if (isLiveTarget) canvas.restore();
       if (isSelected && hasTransform) canvas.restore();
     }
   }

@@ -238,6 +238,70 @@ class LassoTransformNotifier extends ChangeNotifier {
   }
 }
 
+/// Live drag/rotate/resize of a single non-lasso selected element
+/// (image / shape / text picked via double-tap). Same pattern as
+/// LassoTransformNotifier: pan-update writes go here instead of into
+/// Riverpod, the painter reads the live values each frame, and Riverpod
+/// catches up exactly once on pan-end.
+class ElementTransformNotifier extends ChangeNotifier {
+  String? _elementId;
+  // Live page-space delta applied to the element's stored (x, y).
+  Offset _dragOffset = Offset.zero;
+  // Live rotation delta added to the element's stored rotation.
+  double _rotationDelta = 0.0;
+  // Live multiplicative scale applied to the element's stored
+  // (width, height) — only used by resize.
+  double _scaleW = 1.0;
+  double _scaleH = 1.0;
+
+  bool get isActive => _elementId != null;
+  String? get elementId => _elementId;
+  Offset get dragOffset => _dragOffset;
+  double get rotationDelta => _rotationDelta;
+  double get scaleW => _scaleW;
+  double get scaleH => _scaleH;
+
+  void begin(String elementId) {
+    _elementId = elementId;
+    _dragOffset = Offset.zero;
+    _rotationDelta = 0.0;
+    _scaleW = 1.0;
+    _scaleH = 1.0;
+    notifyListeners();
+  }
+
+  void translate(Offset delta) {
+    if (_elementId == null) return;
+    _dragOffset += delta;
+    notifyListeners();
+  }
+
+  void rotateBy(double delta) {
+    if (_elementId == null) return;
+    _rotationDelta += delta;
+    notifyListeners();
+  }
+
+  /// Replace the live scale (e.g. when the user drags a corner handle —
+  /// the screen helper has already converted the new bounds back to a
+  /// (sw, sh) factor relative to the original bounds).
+  void setScale(double sw, double sh) {
+    if (_elementId == null) return;
+    _scaleW = sw;
+    _scaleH = sh;
+    notifyListeners();
+  }
+
+  void end() {
+    _elementId = null;
+    _dragOffset = Offset.zero;
+    _rotationDelta = 0.0;
+    _scaleW = 1.0;
+    _scaleH = 1.0;
+    notifyListeners();
+  }
+}
+
 /// Local lasso path tracker — zero Riverpod rebuilds during drawing.
 /// At pointer-up the collected path is committed to the provider in one shot.
 class LassoPathNotifier extends ChangeNotifier {
