@@ -2999,36 +2999,50 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 ),
               ),
 
-              // Transform handles for selected elements (image / shape /
-              // text picked via double-tap). Wrapped in a ListenableBuilder
-              // on _elementTransformNotifier so the bounding box and
-              // rotation handle stay glued to the moving content during
-              // drag/rotate/resize without rebuilding the editor.
+              // Transform handles for selected elements + lasso handles.
+              // Wrapped in a Consumer that watches (zoom, panOffset) so
+              // the handles re-anchor as the viewport pans/zooms — the
+              // chrome's parent select EXCLUDES those fields (perf), so
+              // without this Consumer the handles would freeze in their
+              // build-time screen positions during a pan and only catch
+              // up when something else triggered a parent rebuild ("the
+              // dashed border stays put but the corner circles move in
+              // jumps"). _elementTransformNotifier handles the
+              // drag/rotate/resize live values via its own listenable.
               Positioned.fill(
-                child: ListenableBuilder(
-                  listenable: _elementTransformNotifier,
-                  builder: (_, __) => Stack(
-                    children: _buildTransformHandles(canvasState, canvasSize),
-                  ),
+                child: Consumer(
+                  builder: (_, ref2, __) {
+                    ref2.watch(canvasProvider.select((s) => s == null
+                        ? const (zoom: 1.0, panOffset: Offset.zero)
+                        : (zoom: s.zoom, panOffset: s.panOffset)));
+                    final live = ref2.read(canvasProvider) ?? canvasState;
+                    return ListenableBuilder(
+                      listenable: _elementTransformNotifier,
+                      builder: (_, __) => Stack(
+                        children: _buildTransformHandles(live, canvasSize),
+                      ),
+                    );
+                  },
                 ),
               ),
-
-              // Lasso handles + floating context actions wrapped in a
-              // ListenableBuilder on _lassoTransformNotifier so that
-              // during drag/rotate/scale they re-position at vsync from
-              // the live notifier values — without rebuilding the whole
-              // editor tree. _buildLassoHandles itself reads the live
-              // values when the notifier is active.
               Positioned.fill(
-                child: ListenableBuilder(
-                  listenable: _lassoTransformNotifier,
-                  builder: (_, __) => Stack(
-                    children: [
-                      ..._buildLassoHandles(canvasState, canvasSize),
-                      if (canvasState.lassoSelection != null)
-                        _buildFloatingSelectionActions(canvasState, canvasSize),
-                    ],
-                  ),
+                child: Consumer(
+                  builder: (_, ref2, __) {
+                    ref2.watch(canvasProvider.select((s) => s == null
+                        ? const (zoom: 1.0, panOffset: Offset.zero)
+                        : (zoom: s.zoom, panOffset: s.panOffset)));
+                    final live = ref2.read(canvasProvider) ?? canvasState;
+                    return ListenableBuilder(
+                      listenable: _lassoTransformNotifier,
+                      builder: (_, __) => Stack(
+                        children: [
+                          ..._buildLassoHandles(live, canvasSize),
+                          if (live.lassoSelection != null)
+                            _buildFloatingSelectionActions(live, canvasSize),
+                        ],
+                      ),
+                    );
+                  },
                 ),
               ),
 
@@ -3604,9 +3618,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 }
                 _toast('Selezione copiata');
               }),
-              _FloatingActionBtn(Icons.screenshot_rounded, 'Screenshot', () {
-                _copySelectionAsScreenshot();
-              }),
               _FloatingActionBtn(Icons.content_cut_rounded, 'Taglia', () {
                 ref.read(canvasProvider.notifier).cutSelection();
                 _toast('Selezione tagliata');
@@ -3615,28 +3626,135 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                 ref.read(canvasProvider.notifier).duplicateSelection();
                 _toast('Selezione duplicata');
               }),
-              _FloatingActionBtn(Icons.flip_rounded, 'Rifletti H', () {
-                ref.read(canvasProvider.notifier).flipSelectionHorizontal();
-              }),
-              _FloatingActionBtn(Icons.flip_rounded, 'Rifletti V', () {
-                ref.read(canvasProvider.notifier).flipSelectionVertical();
-              }, rotation: 1.5708), // 90° so the icon points vertically
+              // Quick color picker — restores the workflow from the
+              // previous UI (select stroke → tap color to recolor).
+              _FloatingActionBtn(Icons.palette_rounded, 'Cambia colore',
+                  () => _showSelectionColorPicker()),
               if (state.clipboard != null)
                 _FloatingActionBtn(Icons.paste_rounded, 'Incolla', () {
                   ref.read(canvasProvider.notifier).paste();
                 }),
-              if (state.clipboard != null)
-                _FloatingActionBtn(Icons.drive_file_move_outlined, 'Incolla in...', () {
-                  _pasteInAnotherNotebook(context, state.clipboard!);
-                }),
               _FloatingActionBtn(Icons.delete_outline, 'Elimina', () {
                 ref.read(canvasProvider.notifier).deleteSelection();
               }, color: Colors.red),
+              // Less-used actions folded into a "more" menu (Rifletti H/V,
+              // Screenshot, Incolla in altro notebook).
+              _FloatingActionBtn(Icons.more_horiz, 'Altro',
+                  () => _showSelectionMoreMenu(state)),
               _FloatingActionBtn(Icons.close, null, () {
                 ref.read(canvasProvider.notifier).clearSelection();
               }),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Quick color picker for an existing lasso selection — restores the
+  /// "select stroke → tap colour to recolour" workflow that the previous
+  /// UI had via the toolbar palette.
+  Future<void> _showSelectionColorPicker() async {
+    final presets = ref.read(presetColorsProvider);
+    if (!mounted) return;
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Cambia colore selezione',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  for (final c in presets)
+                    GestureDetector(
+                      onTap: () => Navigator.of(ctx).pop(c),
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: Color(c),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                              color: const Color(0x1A000000), width: 1),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (picked != null) {
+      ref.read(canvasProvider.notifier).changeSelectionColor(picked);
+    }
+  }
+
+  /// "Altro" menu for lass selection — surfaces the less-used actions
+  /// (flip H/V, screenshot to clipboard, paste into another notebook).
+  Future<void> _showSelectionMoreMenu(CanvasState state) async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(height: 12),
+            ListTile(
+              leading: const Icon(Icons.flip_rounded),
+              title: const Text('Rifletti orizzontalmente'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                ref.read(canvasProvider.notifier).flipSelectionHorizontal();
+              },
+            ),
+            ListTile(
+              leading: Transform.rotate(
+                angle: 1.5708,
+                child: const Icon(Icons.flip_rounded),
+              ),
+              title: const Text('Rifletti verticalmente'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                ref.read(canvasProvider.notifier).flipSelectionVertical();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.screenshot_rounded),
+              title: const Text('Copia come immagine'),
+              onTap: () {
+                Navigator.of(ctx).pop();
+                _copySelectionAsScreenshot();
+              },
+            ),
+            if (state.clipboard != null)
+              ListTile(
+                leading: const Icon(Icons.drive_file_move_outlined),
+                title: const Text('Incolla in un altro taccuino…'),
+                onTap: () {
+                  Navigator.of(ctx).pop();
+                  _pasteInAnotherNotebook(context, state.clipboard!);
+                },
+              ),
+          ],
         ),
       ),
     );
@@ -4276,6 +4394,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     return groups;
   }
 
+  /// Anchor rect for the iPad share-sheet popover. SharePlus rejects a
+  /// zero rect with "sharePositionOrigin must be non-zero and within
+  /// coordinates of source view". Use a small box at the screen centre.
+  Rect _shareOriginRect() {
+    final size = MediaQuery.of(context).size;
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    return Rect.fromCenter(center: Offset(cx, cy), width: 40, height: 40);
+  }
+
   /// Save or share a file cross-platform.
   /// On iOS/macOS, uses the system share sheet (FilePicker.saveFile is broken).
   /// On other platforms, uses FilePicker.saveFile.
@@ -4288,6 +4416,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         ShareParams(
           files: [XFile(file.path, mimeType: mimeType)],
           subject: fileName,
+          // iPad requires a non-zero anchor rect for the share-sheet
+          // popover; SharePlus throws "PlatformException(error,
+          // sharePositionOrigin must be non-zero...)" otherwise. Use
+          // the centre of the screen — it's always within the view.
+          sharePositionOrigin: _shareOriginRect(),
         ),
       );
     } else {
@@ -4344,7 +4477,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         if (files.isNotEmpty) {
           if (io.Platform.isIOS || io.Platform.isMacOS) {
             await SharePlus.instance.share(
-              ShareParams(files: files, subject: state.metadata.title),
+              ShareParams(
+                files: files,
+                subject: state.metadata.title,
+                sharePositionOrigin: _shareOriginRect(),
+              ),
             );
           } else {
             // Desktop: let user pick folder, save all
@@ -5437,10 +5574,8 @@ class _FloatingActionBtn extends StatelessWidget {
   final String? label;
   final VoidCallback onTap;
   final Color? color;
-  final double rotation;
 
-  const _FloatingActionBtn(this.icon, this.label, this.onTap,
-      {this.color, this.rotation = 0.0});
+  const _FloatingActionBtn(this.icon, this.label, this.onTap, {this.color});
 
   @override
   Widget build(BuildContext context) {
@@ -5456,9 +5591,7 @@ class _FloatingActionBtn extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              rotation == 0.0
-                  ? iconWidget
-                  : Transform.rotate(angle: rotation, child: iconWidget),
+              iconWidget,
               if (label != null)
                 Text(label!, style: TextStyle(fontSize: 9, color: c)),
             ],

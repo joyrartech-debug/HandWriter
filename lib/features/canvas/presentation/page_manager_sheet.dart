@@ -358,6 +358,11 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                                       padding: const EdgeInsets.only(right: 6),
                                       child: GestureDetector(
                                         onSecondaryTap: () => _showChapterEditMenuLocal(ctx2, chapter),
+                                        // Long-press = secondary on touch
+                                        // devices (iPad has no right
+                                        // click). Opens the same
+                                        // rename / delete menu.
+                                        onLongPress: () => _showChapterEditMenuLocal(ctx2, chapter),
                                         child: accepted.isNotEmpty
                                             ? Container(
                                                 decoration: BoxDecoration(
