@@ -347,6 +347,7 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
                   isFav ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti',
                   'fav'),
               _menuItem(ctx, 'pen', 'Rinomina', 'rename'),
+              _menuItem(ctx, 'palette', 'Cambia copertina', 'cover'),
               _menuItem(ctx, 'trash', 'Elimina', 'delete', danger: true),
             ],
           ),
@@ -366,6 +367,19 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
           await ref
               .read(notebookListProvider.notifier)
               .renameNotebook(entry, t);
+        }
+        break;
+      case 'cover':
+        final newColor = await _pickCoverColor(
+            initial: Color(entry.metadata.coverColor));
+        if (newColor != null) {
+          final argb = (newColor.a * 255).round() << 24 |
+              (newColor.r * 255).round() << 16 |
+              (newColor.g * 255).round() << 8 |
+              (newColor.b * 255).round();
+          await ref
+              .read(notebookListProvider.notifier)
+              .updateNotebookCover(entry, argb);
         }
         break;
       case 'delete':
@@ -410,6 +424,55 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
                     color: danger ? HwTheme.syncConflict : p.ink0,
                     fontSize: 14)),
           ],
+        ),
+      ),
+    );
+  }
+
+  /// Bottom sheet to pick one of the 8 preset cover colours.
+  Future<Color?> _pickCoverColor({Color? initial}) async {
+    return showModalBottomSheet<Color>(
+      context: context,
+      backgroundColor: HwThemeScope.of(context).paper0,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Cambia copertina',
+                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  for (final c in HwTheme.covers)
+                    GestureDetector(
+                      onTap: () => Navigator.of(ctx).pop(c),
+                      child: Container(
+                        width: 56,
+                        height: 56,
+                        decoration: BoxDecoration(
+                          color: c,
+                          borderRadius: BorderRadius.circular(8),
+                          border: initial?.toARGB32() == c.toARGB32()
+                              ? Border.all(
+                                  color:
+                                      HwThemeScope.of(context).ink0,
+                                  width: 2)
+                              : null,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );

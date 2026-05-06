@@ -33,6 +33,9 @@ enum CanvasTool {
   shape,
   image,
   pan,
+  /// Presentation laser pointer — strokes fade out and are NEVER
+  /// committed to the page. Useful while presenting a notebook.
+  laser,
 }
 
 enum EraserSize { small, medium, large }

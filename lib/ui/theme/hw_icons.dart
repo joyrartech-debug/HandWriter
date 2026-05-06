@@ -360,6 +360,12 @@ class _HwIconPainter extends CustomPainter {
         circle(7, 15, 0.9, filled: true);
         circle(13, 15, 0.9, filled: true);
         break;
+      case 'laser':
+        // Pen body angled top-right to bottom-left + a glowing dot near
+        // the tip — laser-pointer style.
+        p('M14 4l2 2-9 9-3 1 1-3 9-9z');
+        circle(5, 15, 1.6, filled: true);
+        break;
       case 'fit':
         p('M4 7V4h3');
         p('M16 7V4h-3');

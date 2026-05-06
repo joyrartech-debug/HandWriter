@@ -204,6 +204,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   final _activeStrokeNotifier = ActiveStrokeNotifier();
   // ── High-performance lasso path notifier (avoids Riverpod rebuild per point) ──
   final _lassoPathNotifier = LassoPathNotifier();
+  // ── Laser pointer trail (fades out, never committed) ──
+  final _laserStrokeNotifier = LaserStrokeNotifier();
   // ── Live transform of an existing lasso selection (drag/rotate/scale) ──
   // Updated on every pointer-move so the painter repaints without firing
   // a Riverpod state update; committed back to Riverpod once on pan-end.
@@ -221,6 +223,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _lassoPathNotifier,
     _lassoTransformNotifier,
     _elementTransformNotifier,
+    _laserStrokeNotifier,
   ]);
 
   // ── Auto-save (debounced) ──
@@ -340,6 +343,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _lassoPathNotifier.dispose();
     _lassoTransformNotifier.dispose();
     _elementTransformNotifier.dispose();
+    _laserStrokeNotifier.dispose();
     _autoSaveDebounce?.cancel();
     _autoSaveMaxWait?.cancel();
     _holdRecognizeTimer?.cancel();
@@ -945,7 +949,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         tool == CanvasTool.eraserStandard ||
         tool == CanvasTool.eraserStroke ||
         tool == CanvasTool.lasso ||
-        tool == CanvasTool.shape;
+        tool == CanvasTool.shape ||
+        tool == CanvasTool.laser;
   }
 
   bool _shouldTouchPan(PointerDeviceKind kind, CanvasTool tool) {
@@ -1260,6 +1265,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       return;
     }
 
+    // Laser pointer: append to the fading-trail notifier ONLY. Never
+    // touches Riverpod, never commits a stroke; the trail evaporates
+    // on its own after a couple of seconds.
+    if (tool == CanvasTool.laser) {
+      _laserStrokeNotifier.addPoint(pagePos);
+      return;
+    }
+
     // Shape tool: only set start pos, no visual stroke
     if (tool == CanvasTool.shape) {
       ref.read(canvasProvider.notifier).startStroke(pagePos, pressure);
@@ -1352,6 +1365,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     if (tool == CanvasTool.lasso) {
       _onLassoPointerMove(pagePos);
+      return;
+    }
+
+    // Laser: keep appending to the fading trail, never start a real
+    // stroke. Bypasses Riverpod entirely; the painter listens on
+    // _laserStrokeNotifier via _repaintNotifier.
+    if (tool == CanvasTool.laser) {
+      _laserStrokeNotifier.addPoint(pagePos);
       return;
     }
 
@@ -2916,6 +2937,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                                 lassoPathGetter: _lassoPathNotifier.isActive
                                     ? () => _lassoPathNotifier.points
                                     : null,
+                                laserTrailGetter: () =>
+                                    _laserStrokeNotifier.points,
                                 shapePreview: (s.shapeStartPos != null && s.shapeEndPos != null)
                                     ? (s.shapeStartPos!, s.shapeEndPos!, s.toolSettings.shapeType)
                                     : null,

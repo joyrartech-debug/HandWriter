@@ -46,6 +46,10 @@ class CanvasRenderEngine extends CustomPainter {
   })? Function()? liveElementTransform;
   final List<Offset>? lassoPath;
   final List<Offset> Function()? lassoPathGetter;
+  /// Laser-pointer trail — list of (x, y, t-millis) tuples. The painter
+  /// computes per-point opacity from `now − t` so the trail visually
+  /// fades. Never written to disk; presentation only.
+  final List<({double x, double y, int t})> Function()? laserTrailGetter;
   final (Offset, Offset, String)? shapePreview;
   final ShapeData? recognizedShapePreview;
   final double zoom;
@@ -64,6 +68,7 @@ class CanvasRenderEngine extends CustomPainter {
     this.liveElementTransform,
     this.lassoPath,
     this.lassoPathGetter,
+    this.laserTrailGetter,
     this.shapePreview,
     this.recognizedShapePreview,
     this.zoom = 1.0,
@@ -227,6 +232,12 @@ class CanvasRenderEngine extends CustomPainter {
     final currentLassoPath = lassoPathGetter?.call() ?? lassoPath;
     if (currentLassoPath != null && currentLassoPath.length >= 2) {
       _paintLassoPathFromPoints(canvas, currentLassoPath);
+    }
+
+    // 6b. Laser pointer trail — fades over LaserStrokeNotifier.trailMs.
+    final laserPts = laserTrailGetter?.call();
+    if (laserPts != null && laserPts.isNotEmpty) {
+      _paintLaserTrail(canvas, laserPts);
     }
 
     // 7. Lasso selection bounds — pass through the resolved live
@@ -1444,6 +1455,51 @@ class CanvasRenderEngine extends CustomPainter {
           accumulator = 0;
         }
       }
+    }
+  }
+
+  /// Render the laser-pointer trail. Each point fades over a short
+  /// window — the head of the trail is painted as a glowing red dot
+  /// and the body as a polyline whose alpha drops with age.
+  void _paintLaserTrail(
+      Canvas canvas, List<({double x, double y, int t})> pts) {
+    if (pts.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    const fadeMs = 1500;
+    // Polyline body
+    if (pts.length >= 2) {
+      for (int i = 1; i < pts.length; i++) {
+        final age = now - pts[i].t;
+        if (age > fadeMs) continue;
+        final alpha = (1.0 - (age / fadeMs)).clamp(0.0, 1.0);
+        // Soft outer glow + sharp inner stroke.
+        final glow = Paint()
+          ..color = const Color(0xFFFF3B30).withValues(alpha: alpha * 0.30)
+          ..strokeWidth = 12
+          ..strokeCap = StrokeCap.round
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6);
+        final core = Paint()
+          ..color = const Color(0xFFFF3B30).withValues(alpha: alpha)
+          ..strokeWidth = 4
+          ..strokeCap = StrokeCap.round;
+        final p1 = Offset(pts[i - 1].x, pts[i - 1].y);
+        final p2 = Offset(pts[i].x, pts[i].y);
+        canvas.drawLine(p1, p2, glow);
+        canvas.drawLine(p1, p2, core);
+      }
+    }
+    // Bright head dot at the latest point
+    final last = pts.last;
+    final headAge = now - last.t;
+    if (headAge < fadeMs) {
+      final headAlpha = (1.0 - (headAge / fadeMs)).clamp(0.0, 1.0);
+      canvas.drawCircle(
+        Offset(last.x, last.y),
+        7,
+        Paint()
+          ..color = const Color(0xFFFF3B30).withValues(alpha: headAlpha)
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
+      );
     }
   }
 

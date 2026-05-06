@@ -881,6 +881,73 @@ class NotebookListNotifier
     }).toList());
   }
 
+  /// Change a notebook's cover colour. Same flow as [renameNotebook]:
+  /// rebuild the local .ncnote with the new metadata, persist, mark
+  /// dirty, and best-effort push to the server.
+  Future<void> updateNotebookCover(
+      NotebookEntry entry, int newCoverColor) async {
+    final syncService = _ref.read(syncServiceProvider);
+    final webdav = _ref.read(webdavServiceProvider);
+    final fileService = _ref.read(fileServiceProvider);
+
+    final localData = await fileService.readNotebookFile(entry.metadata.id);
+    if (localData == null || syncService == null) return;
+
+    final result = syncService.parseNcnoteMetadata(localData);
+    final allPages = syncService.extractAllPages(localData);
+    final allAssets = syncService.extractAllAssets(localData);
+    final symbolLibraries = syncService.extractSymbolLibraries(localData);
+
+    final updatedMeta = result.metadata.copyWith(
+      coverColor: newCoverColor,
+      modifiedAt: DateTime.now(),
+    );
+
+    final package = syncService.createNcnotePackage(
+      metadata: updatedMeta,
+      document: result.document,
+      pages: allPages,
+      assets: allAssets.isNotEmpty ? allAssets : null,
+      symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
+    );
+    await fileService.saveNotebookFile(updatedMeta.id, package);
+    await fileService.upsertNotebookMeta(
+      id: updatedMeta.id,
+      title: updatedMeta.title,
+      remotePath: entry.remotePath,
+      localModifiedAt: updatedMeta.modifiedAt,
+      syncStatus: 'modified',
+      coverColor: updatedMeta.coverColor,
+      paperType: updatedMeta.paperType,
+      pageCount: updatedMeta.pageCount,
+      createdAt: updatedMeta.createdAt,
+    );
+
+    try {
+      if (webdav != null) {
+        final etag = await syncService.uploadNotebook(
+          remotePath: entry.remotePath,
+          metadata: updatedMeta,
+          document: result.document,
+          pages: allPages,
+          assets: allAssets.isNotEmpty ? allAssets : null,
+          symbolLibraries: symbolLibraries.isNotEmpty ? symbolLibraries : null,
+        );
+        await fileService.markNotebookSynced(updatedMeta.id, etag);
+      }
+    } catch (e) {
+      debugPrint('[Library] Cover change saved locally, remote sync deferred: $e');
+    }
+
+    final current = state.valueOrNull ?? [];
+    state = AsyncValue.data(current.map((e) {
+      if (e.metadata.id == entry.metadata.id) {
+        return e.copyWith(metadata: updatedMeta);
+      }
+      return e;
+    }).toList());
+  }
+
   /// Rinomina un notebook.
   Future<void> renameNotebook(NotebookEntry entry, String newTitle) async {
     final syncService = _ref.read(syncServiceProvider);

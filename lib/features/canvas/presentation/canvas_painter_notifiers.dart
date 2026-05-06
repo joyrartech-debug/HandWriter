@@ -6,6 +6,7 @@
 //  Extracted from canvas_screen.dart.
 // ═══════════════════════════════════════════════════════════════
 
+import 'dart:async';
 import 'dart:io' as io;
 import 'dart:math' show sqrt;
 import 'package:flutter/foundation.dart';
@@ -299,6 +300,70 @@ class ElementTransformNotifier extends ChangeNotifier {
     _scaleW = 1.0;
     _scaleH = 1.0;
     notifyListeners();
+  }
+}
+
+/// Laser-pointer trail — points are tagged with timestamps and the
+/// painter renders them with an opacity that fades to zero over
+/// [trailMs]. Once a point has fully faded it's pruned from the
+/// buffer. Never committed to a page (this is presentation ink, not
+/// annotation ink).
+class LaserStrokeNotifier extends ChangeNotifier {
+  /// Total fade-out window in ms. ~1.5 s feels right — long enough to
+  /// follow the user pointing out something on a page, short enough not
+  /// to clutter when they sweep around.
+  static const int trailMs = 1500;
+
+  final List<({double x, double y, int t})> _points = [];
+  Timer? _ticker;
+
+  List<({double x, double y, int t})> get points => _points;
+
+  /// Append a point. Starts a periodic ticker that prunes faded points
+  /// and re-paints. Idempotent.
+  void addPoint(Offset pos) {
+    _points.add((
+      x: pos.dx,
+      y: pos.dy,
+      t: DateTime.now().millisecondsSinceEpoch,
+    ));
+    _ticker ??= Timer.periodic(const Duration(milliseconds: 30), (_) {
+      _prune();
+    });
+    notifyListeners();
+  }
+
+  void _prune() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final cutoff = now - trailMs;
+    var pruned = false;
+    while (_points.isNotEmpty && _points.first.t < cutoff) {
+      _points.removeAt(0);
+      pruned = true;
+    }
+    if (_points.isEmpty) {
+      _ticker?.cancel();
+      _ticker = null;
+    }
+    if (pruned || _points.isNotEmpty) {
+      // Always notify while there are points so the painter can
+      // re-render them at lower opacity each tick.
+      notifyListeners();
+    }
+  }
+
+  /// Cancel the trail outright (e.g. when the user switches tools).
+  void clear() {
+    _points.clear();
+    _ticker?.cancel();
+    _ticker = null;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    super.dispose();
   }
 }
 

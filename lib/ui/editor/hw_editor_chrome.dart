@@ -1,3 +1,6 @@
+import 'dart:io' as io;
+
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:handwriter/core/providers/canvas_state.dart';
@@ -47,11 +50,20 @@ class HwEditorTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = HwThemeScope.of(context);
+    // On iPad the front camera / dynamic island sits centred along the
+    // long edge — in landscape that's right above the start of the top
+    // bar. Push the back button rightwards by a small amount so it
+    // doesn't sit directly under the lens.
+    final isIPad = !kIsWeb &&
+        io.Platform.isIOS &&
+        MediaQuery.of(context).size.shortestSide >= 600;
     return LayoutBuilder(builder: (ctx, c) {
       final isCompact = c.maxWidth < 720;
+      final leftPad = (isCompact ? 6.0 : 12.0) + (isIPad ? 28.0 : 0.0);
       return Container(
         height: 52,
-        padding: EdgeInsets.symmetric(horizontal: isCompact ? 6 : 12),
+        padding: EdgeInsets.fromLTRB(
+            leftPad, 0, isCompact ? 6 : 12, 0),
         decoration: BoxDecoration(
           color: p.paper0,
           border: Border(bottom: BorderSide(color: p.paper3)),
@@ -282,6 +294,7 @@ class HwFloatingDock extends StatelessWidget {
           _toolBtn(context, CanvasTool.lasso, 'lasso', 'Lasso · L'),
           _toolBtn(context, CanvasTool.text, 'text', 'Testo · T'),
           _toolBtn(context, CanvasTool.shape, 'shape', 'Forma · S'),
+          _toolBtn(context, CanvasTool.laser, 'laser', 'Laser'),
           _toolBtn(context, CanvasTool.pan, 'hand', 'Mano · H'),
           _gap(isVert, context),
           _shapeGuessBtn(context),
@@ -435,12 +448,14 @@ class HwToolPopup extends StatelessWidget {
         CanvasTool.eraserStroke,
         CanvasTool.lasso,
         CanvasTool.pan,
+        CanvasTool.laser,
       }.contains(tool);
 
   bool get _showThickness => !{
         CanvasTool.lasso,
         CanvasTool.pan,
         CanvasTool.text,
+        CanvasTool.laser,
       }.contains(tool);
 
   bool get _isEraser =>
@@ -471,6 +486,8 @@ class HwToolPopup extends StatelessWidget {
         return 'Immagine';
       case CanvasTool.pan:
         return 'Mano';
+      case CanvasTool.laser:
+        return 'Laser';
     }
   }
 
