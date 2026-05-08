@@ -679,6 +679,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// its decode lands).
   final Set<String> _onDemandDecodeQueued = <String>{};
 
+  /// Decode every image asset referenced by the current page, fire-
+  /// and-forget. Called by the canvas screen at the end of a bulk
+  /// import (PDF) so the page the user lands on actually shows its
+  /// imagery — during the bulk import itself decoding is skipped to
+  /// keep GPU pressure bounded (every decoded `ui.Image` is ~3-5 MB
+  /// of GPU memory, which pegged the host at ~40-page mark on long
+  /// PDF imports).
+  void ensureCurrentPageImagesDecoded() {
+    if (state == null) return;
+    final page = state!.currentPage;
+    if (page == null) return;
+    for (final el in page.layers.content) {
+      if (el is ImageElement) {
+        ensureAssetDecodedForThumbnail(el.data.assetPath);
+      }
+    }
+  }
+
   /// Public hook for the page manager / library: ensure the asset
   /// behind a thumbnail is decoded, fire-and-forget. Cheap when the
   /// asset is already cached; otherwise queues a single decode that
@@ -3953,10 +3971,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[pageFileName] = updatedPage;
 
-    // Store raw bytes for persistence and decode for rendering
+    // Store raw bytes for persistence and decode for rendering.
     final newAssetBytes = Map<String, Uint8List>.from(s.assetBytes);
     newAssetBytes[assetId] = bytes;
-    _decodeAndCacheImage(assetId, bytes);
+    // Skip eager decode during bulk operations (PDF import). Each
+    // decoded `ui.Image` lives on the GPU at ~3-5 MB; eagerly
+    // decoding 78 PDF pages while importing was the OOM that
+    // crashed the host. The thumbnail / current-page render path
+    // calls `ensureAssetDecodedForThumbnail` lazily for what's
+    // actually visible, so deferring is correct — the user is on
+    // ONE page during the import, and only that page's image needs
+    // to be decoded.
+    if (!_bulkOperationInProgress) {
+      _decodeAndCacheImage(assetId, bytes);
+    }
     _markAssetDirty(assetId);
 
     state = s.copyWith(

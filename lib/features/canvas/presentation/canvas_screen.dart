@@ -2033,6 +2033,22 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
   }
 
+  /// Dedicated PDF picker — surfaced as its own menu entry so the user
+  /// doesn't have to discover that "Inserisci immagine" also accepts
+  /// PDFs.
+  Future<void> _pickAndInsertPdf(Offset pagePos) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      withData: true,
+    );
+    if (result == null || result.files.isEmpty) return;
+    final file = result.files.first;
+    final bytes = file.bytes;
+    if (bytes == null) return;
+    await _insertPdf(bytes, file.name, pagePos);
+  }
+
   void _insertImage(Uint8List bytes, String name, Offset pagePos) {
     final dims = _decodeImageDimensions(bytes);
     double w = dims?.width.toDouble() ?? 300;
@@ -2153,10 +2169,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
         // Yield to the event loop between pages so the engine can reclaim
         // the raster's native pixel buffer before we grab the next one.
-        await Future<void>.delayed(Duration.zero);
+        // 50 ms is generous but pays for itself: gives Dart's GC a real
+        // chance to free the previous page's RGBA buffer + PNG bytes
+        // before we allocate the next one. With ~3-5 MB GPU per page +
+        // PNG bytes accumulating in state.assetBytes, this is what
+        // separates "78 pages imported cleanly" from "host OOM at
+        // ~page 40". Bulk-skip of imageCache decode (canvas_provider's
+        // `_bulkOperationInProgress` guard in `addImageElement`) does
+        // the rest of the heavy lifting.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
       }
 
       notifier.endBulkOperation();
+      // Decode the current page's images now that bulk import is done.
+      // During import we skipped decode to keep GPU pressure bounded;
+      // the user is on the last imported page and expects to see it
+      // populated. Background-pull / thumbnail paths handle the rest.
+      notifier.ensureCurrentPageImagesDecoded();
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).clearSnackBars();
@@ -4060,6 +4089,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         const PopupMenuItem(value: 'paste_clipboard_image', child: _MenuRow(Icons.content_paste_rounded, 'Incolla immagine', null)),
         // Insert
         const PopupMenuItem(value: 'insert_image', child: _MenuRow(Icons.image_rounded, 'Inserisci immagine', null)),
+        const PopupMenuItem(value: 'insert_pdf', child: _MenuRow(Icons.picture_as_pdf_rounded, 'Importa PDF', null)),
         const PopupMenuItem(value: 'insert_camera', child: _MenuRow(Icons.camera_alt_rounded, 'Scatta foto', null)),
         const PopupMenuItem(value: 'insert_text', child: _MenuRow(Icons.text_fields_rounded, 'Inserisci testo', null)),
         // Symbols
@@ -4090,6 +4120,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         case 'select_all': notifier.selectAll(); break;
         case 'clear_page': _confirmClearPage(); break;
         case 'insert_image': _pickAndInsertImage(pagePos); break;
+        case 'insert_pdf': _pickAndInsertPdf(pagePos); break;
         case 'insert_camera': _captureAndInsertImage(pagePos); break;
         case 'insert_text': _handleTextTool(localPos, state, canvasSize); break;
         case 'select_element':
