@@ -314,21 +314,38 @@ class WebDavService {
         }
 
         final bytes = response.bodyBytes;
-        final declared = response.contentLength;
-        int? expectedSize = declared;
 
-        // Header-less response (chunked transfer): if the caller flagged
-        // this as a critical file, fall back to PROPFIND so we still have
-        // a number to compare against.
-        if (expectedSize == null && criticalVerify) {
+        // Detect gzipped responses. dart:io decompresses transparently
+        // (autoUncompress=true) but does NOT update the Content-Length
+        // header — it still reflects the *compressed* wire size, while
+        // bodyBytes contains decompressed bytes. Documented explicitly in
+        // dart:io HttpClientResponseCompressionState: "Content-Length
+        // cannot be trusted [when decompressed]". Comparing them blindly
+        // would throw WebDavTruncatedDownloadException on EVERY successful
+        // gzipped JSON download. Skip the header check in that case.
+        final encoding = (response.headers['content-encoding'] ?? '')
+            .toLowerCase();
+        final isDecompressed = encoding.contains('gzip') ||
+            encoding.contains('deflate') || encoding.contains('br');
+        final declared = response.contentLength;
+        int? expectedSize =
+            (isDecompressed || declared == null) ? null : declared;
+
+        // criticalVerify (metadata.json / document.json): always confirm
+        // via PROPFIND. The header check above can't be trusted under
+        // gzip and Nextcloud frequently chunks these — without an
+        // independent size source a truncated GET sneaks past as a valid
+        // (parseable up to the cut) JSON and then strands _lastPageEtags
+        // forever. +1 RTT for these two files is a fair price.
+        if (criticalVerify) {
           try {
-            expectedSize = await getContentLength(remotePath)
+            final propfindSize = await getContentLength(remotePath)
                 .timeout(const Duration(seconds: 10));
+            if (propfindSize != null) expectedSize = propfindSize;
           } catch (e) {
             // ignore: avoid_print
             print('[WebDAV] downloadFile critical-verify: PROPFIND failed '
                 'for $remotePath: $e — trusting body');
-            expectedSize = null;
           }
         }
 
