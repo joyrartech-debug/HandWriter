@@ -319,7 +319,7 @@ class WebDavService {
   /// The verification is skipped only for files small enough that no
   /// real-world HTTP buffer/proxy would truncate them ([_uploadVerifyMin]).
   Future<String?> uploadFile(String remotePath, Uint8List data,
-      {int? timeoutSeconds}) async {
+      {int? timeoutSeconds, bool criticalVerify = false}) async {
     Object? lastError;
     for (var attempt = 0; attempt < _uploadMaxAttempts; attempt++) {
       try {
@@ -342,7 +342,11 @@ class WebDavService {
 
         // Post-PUT size verification. PROPFIND (not HEAD) so we read the
         // uncompressed on-disk byte count regardless of mod_deflate.
-        if (data.length >= _uploadVerifyMin) {
+        // criticalVerify lowers the size gate to 0 — used for commit-marker
+        // files (document.json, metadata.json) which can be just a few KB
+        // but whose corruption breaks the whole notebook for every device.
+        final verifyThreshold = criticalVerify ? 0 : _uploadVerifyMin;
+        if (data.length >= verifyThreshold) {
           int? remoteSize;
           try {
             // 30 s default verify timeout (was 8 s, which on a Tailscale
@@ -355,11 +359,20 @@ class WebDavService {
                 .timeout(const Duration(seconds: 30));
           } catch (e) {
             // Verification itself failed (network blip on the PROPFIND).
-            // Treat as a soft warning and trust the PUT — re-running the
-            // PROPFIND on the next pull's PROPFIND batch will surface any
-            // real corruption. Do NOT retry the upload here; a successful
-            // PUT followed by a flaky PROPFIND is a far more common case
-            // than a silent truncation, and re-PUTting wastes bandwidth.
+            // For critical files (document.json/metadata.json) we cannot
+            // afford to "trust the PUT" — a truncated commit marker
+            // poisons every other device. Retry the upload until verify
+            // succeeds or attempts run out.
+            if (criticalVerify && attempt < _uploadMaxAttempts - 1) {
+              // ignore: avoid_print
+              print('[WebDAV] uploadFile verify: PROPFIND failed for '
+                  '$remotePath: $e — retrying PUT (critical)');
+              await Future.delayed(
+                  Duration(milliseconds: 400 * (1 << attempt)));
+              continue;
+            }
+            // Non-critical: trust the PUT, next pull will catch any real
+            // truncation via FormatException.
             // ignore: avoid_print
             print('[WebDAV] uploadFile verify: PROPFIND failed for '
                 '$remotePath: $e — trusting PUT');

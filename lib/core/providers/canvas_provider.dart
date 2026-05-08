@@ -469,6 +469,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // Pre-populate page ETags so the first pull doesn't see every page as
     // "changed" (empty cache vs all remote ETags → false positives).
     _initPageEtags(metadata.id);
+    _loadPendingDeletes(metadata.id);
     _startPullTimer();
 
     // If there's a cross-notebook clipboard pending, apply it to this canvas
@@ -656,6 +657,80 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       );
     }
     return refs;
+  }
+
+  /// Returns the set of asset keys referenced by ANY page in the document.
+  /// Used to detect orphan entries in `assetBytes`/`imageCache` left behind
+  /// after the pages that referenced them were deleted (e.g. when the user
+  /// re-imports a PDF after dropping the prior pages — the new pages get
+  /// fresh asset IDs and the old bytes would otherwise sit in storage and
+  /// keep showing up in corrupt-asset logs forever).
+  Set<String> _allReferencedAssetIds(
+      DocumentStructure doc, Map<String, PageData> pages) {
+    final refs = <String>{};
+    for (final entry in doc.pages) {
+      final page = pages[entry.fileName];
+      if (page == null) continue;
+      refs.addAll(page.assetReferences);
+      for (final el in page.layers.content) {
+        if (el is ImageElement) {
+          final p = el.data.assetPath;
+          if (p.isNotEmpty) refs.add(p);
+        }
+      }
+    }
+    return refs;
+  }
+
+  /// Removes asset entries no longer referenced by any page from
+  /// `state.assetBytes`, `state.imageCache`, and the local corrupt-id set.
+  /// Stages orphan IDs into [_pendingAssetDeletes] so the next save —
+  /// even if this one's remote upload throws — will retry the server-side
+  /// delete. Symbol assets (assetPath prefixed with `symbol_`) are kept as
+  /// they live in `imageCache` only and are never stored in `assetBytes`
+  /// to begin with — the difference here naturally excludes them.
+  void _pruneOrphanAssets() {
+    final s = state;
+    if (s == null) return;
+    final referenced = _allReferencedAssetIds(s.document, s.pages);
+    final orphans = <String>[];
+    for (final key in s.assetBytes.keys) {
+      if (!referenced.contains(key)) orphans.add(key);
+    }
+    // Also catch imageCache entries with no assetBytes backing AND no page
+    // reference — these come from symbol elements that get deleted; we
+    // don't return them as server deletes (no server-side asset file
+    // exists for symbols), just dispose locally.
+    final cacheOnlyOrphans = <String>[];
+    for (final key in s.imageCache.keys) {
+      if (!referenced.contains(key) && !s.assetBytes.containsKey(key)) {
+        cacheOnlyOrphans.add(key);
+      }
+    }
+    if (orphans.isEmpty && cacheOnlyOrphans.isEmpty) return;
+
+    final newAssets = Map<String, Uint8List>.from(s.assetBytes);
+    final newCache = Map<String, ui.Image>.from(s.imageCache);
+    for (final id in orphans) {
+      newAssets.remove(id);
+      newCache.remove(id)?.dispose();
+      _corruptAssetIds.remove(id);
+      _dirtyAssetKeys.remove(id);
+      _onDemandDecodeQueued.remove(id);
+    }
+    for (final id in cacheOnlyOrphans) {
+      newCache.remove(id)?.dispose();
+      _corruptAssetIds.remove(id);
+    }
+    state = s.copyWith(
+      assetBytes: newAssets,
+      imageCache: newCache,
+    );
+    // Stage server-side deletes into the pending queue (persisted) so they
+    // survive a thrown remote sync and get retried until the server confirms.
+    _pendingAssetDeletes.addAll(orphans);
+    print('[Canvas] Pruned ${orphans.length} orphan assets '
+        '(${cacheOnlyOrphans.length} cache-only) — freeing storage');
   }
 
   /// Sequentially decodes [assets] that are NOT in [skip], waiting for each
@@ -903,6 +978,49 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     } catch (e) {
       debugPrint('[Canvas] Could not init page ETags: $e');
     }
+  }
+
+  /// Server-side deletes that the last sync attempt failed to commit
+  /// (e.g. Tailscale connection drop). Replayed on every subsequent save
+  /// until the server returns 404 or the delete succeeds, so an orphan
+  /// can never be "lost in transit" and stay on the server forever.
+  final Set<String> _pendingPageDeletes = <String>{};
+  final Set<String> _pendingAssetDeletes = <String>{};
+
+  static String _pendingPageDeletesPrefsKey(String notebookId) =>
+      'pending_page_deletes_$notebookId';
+  static String _pendingAssetDeletesPrefsKey(String notebookId) =>
+      'pending_asset_deletes_$notebookId';
+
+  Future<void> _loadPendingDeletes(String notebookId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final p = prefs.getStringList(_pendingPageDeletesPrefsKey(notebookId));
+      final a = prefs.getStringList(_pendingAssetDeletesPrefsKey(notebookId));
+      _pendingPageDeletes
+        ..clear()
+        ..addAll(p ?? const []);
+      _pendingAssetDeletes
+        ..clear()
+        ..addAll(a ?? const []);
+      if (_pendingPageDeletes.isNotEmpty || _pendingAssetDeletes.isNotEmpty) {
+        debugPrint('[Canvas] Loaded pending deletes: '
+            '${_pendingPageDeletes.length} pages, '
+            '${_pendingAssetDeletes.length} assets');
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistPendingDeletes(String notebookId) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+          _pendingPageDeletesPrefsKey(notebookId),
+          _pendingPageDeletes.toList());
+      await prefs.setStringList(
+          _pendingAssetDeletesPrefsKey(notebookId),
+          _pendingAssetDeletes.toList());
+    } catch (_) {}
   }
 
   /// Persist [_lastPageEtags] to disk. Called after every pull/save cycle
@@ -5432,6 +5550,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
+    // ── Compact orphan assets before snapshotting ──
+    // Prunes assetBytes/imageCache entries no longer referenced by any
+    // page (e.g. after PDF re-import replaced the original pages). Server-
+    // side deletes are staged into _pendingAssetDeletes and retried by
+    // _remoteSync until the server confirms; persisted across launches.
+    _pruneOrphanAssets();
+
     final s = state!;
     final syncService = _ref.read(syncServiceProvider);
     final fileService = _ref.read(fileServiceProvider);
@@ -5475,6 +5600,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         deletedPages.add(key);
       }
     }
+    // Stage into the persistent pending queue so a thrown remote sync
+    // doesn't lose the deletion request — _remoteSync merges these and
+    // clears them on confirmed success.
+    _pendingPageDeletes.addAll(deletedPages);
 
     debugPrint('[Canvas] Dirty: ${changedPages.length} pages, '
         '${changedAssets.length} assets, ${deletedPages.length} deleted');
@@ -5665,7 +5794,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     List<Map<String, dynamic>>? symbolLibraries,
     List<String>? deletedPages,
   }) async {
-    debugPrint('[Canvas] Starting delta sync: ${dirtyPages.length} pages');
+    // Pending sets carry every delete request — both this save's and any
+    // from prior saves whose DELETE drops on flaky networks (Tailscale).
+    // We replay the full set every save until the server confirms 404 or
+    // success, which is the only way a one-shot DELETE can be made
+    // reliable without bidirectional protocol support.
+    final mergedDeletedPages = _pendingPageDeletes.toList();
+    final mergedDeletedAssets = _pendingAssetDeletes.toList();
+
+    debugPrint('[Canvas] Starting delta sync: ${dirtyPages.length} pages '
+        '(retrying ${_pendingPageDeletes.length} pending page deletes, '
+        '${_pendingAssetDeletes.length} pending asset deletes)');
     final result = await syncService.syncDelta(
       notebookId: updatedMeta.id,
       metadata: updatedMeta,
@@ -5673,8 +5812,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       dirtyPages: dirtyPages,
       dirtyAssets: dirtyAssets,
       symbolLibraries: symbolLibraries,
-      deletedPageFileNames: deletedPages,
+      deletedPageFileNames: mergedDeletedPages.isNotEmpty
+          ? mergedDeletedPages : null,
+      deletedAssetFileNames: mergedDeletedAssets.isNotEmpty
+          ? mergedDeletedAssets : null,
     );
+
+    // Anything we asked the server to delete and didn't see a failure for
+    // is now confirmed gone (or 404, which we treat as success). Drop those
+    // from the pending sets; re-add anything that failed.
+    final attemptedPageDeletes = mergedDeletedPages.toSet();
+    final attemptedAssetDeletes = mergedDeletedAssets.toSet();
+    _pendingPageDeletes
+      ..removeAll(attemptedPageDeletes)
+      ..addAll(result.failedPageDeletes);
+    _pendingAssetDeletes
+      ..removeAll(attemptedAssetDeletes)
+      ..addAll(result.failedAssetDeletes);
+    await _persistPendingDeletes(updatedMeta.id);
 
     _remoteMetaEtag = result.metaEtag;
     // Clear corrupt-ETag dedup entries for any page we just uploaded:

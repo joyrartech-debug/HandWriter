@@ -638,7 +638,12 @@ class SyncService {
   /// replace it — replacing would swallow concurrent uploads from other
   /// devices (the next pull would treat those pages as unchanged and
   /// silently miss remote edits).
-  Future<({String? metaEtag, Map<String, String> pageEtags})> syncDelta({
+  Future<({
+    String? metaEtag,
+    Map<String, String> pageEtags,
+    List<String> failedPageDeletes,
+    List<String> failedAssetDeletes,
+  })> syncDelta({
     required String notebookId,
     required NotebookMetadata metadata,
     required DocumentStructure document,
@@ -646,21 +651,37 @@ class SyncService {
     Map<String, Uint8List>? dirtyAssets,
     List<Map<String, dynamic>>? symbolLibraries,
     List<String>? deletedPageFileNames,
+    List<String>? deletedAssetFileNames,
   }) async {
     await _ensureDeltaDir(notebookId);
     final dir = _deltaDir(notebookId);
 
     // ── Phase 0: Delete removed pages from server (fire in parallel) ──
+    // Track which deletes actually failed (vs 404 = already-deleted) so
+    // the caller can persist them and retry next save. Without this the
+    // request was silently lost on flaky networks and the orphan stayed
+    // on the server forever.
     final deleteFutures = <Future<void>>[];
+    final failedPageDeletes = <String>[];
+    final failedAssetDeletes = <String>[];
     if (deletedPageFileNames != null && deletedPageFileNames.isNotEmpty) {
       for (final fileName in deletedPageFileNames) {
         deleteFutures.add(
           _webdav.delete('${dir}pages/$fileName').catchError((Object e) {
-            // Swallow 404 (already gone) but surface real failures in logs so
-            // they don't disappear silently — the upstream Future.wait doesn't
-            // propagate them either because of this catchError.
             if (e is WebDavException && e.statusCode == 404) return;
+            failedPageDeletes.add(fileName);
             debugPrint('[Sync] Delete of pages/$fileName failed: $e');
+          }),
+        );
+      }
+    }
+    if (deletedAssetFileNames != null && deletedAssetFileNames.isNotEmpty) {
+      for (final assetName in deletedAssetFileNames) {
+        deleteFutures.add(
+          _webdav.delete('${dir}assets/$assetName').catchError((Object e) {
+            if (e is WebDavException && e.statusCode == 404) return;
+            failedAssetDeletes.add(assetName);
+            debugPrint('[Sync] Delete of assets/$assetName failed: $e');
           }),
         );
       }
@@ -718,14 +739,15 @@ class SyncService {
     final docBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(document.toJson())),
     );
-    await _webdav.uploadFile('${dir}document.json', docBytes, timeoutSeconds: dt);
+    await _webdav.uploadFile('${dir}document.json', docBytes,
+        timeoutSeconds: dt, criticalVerify: true);
 
     // ── Phase 2: Upload metadata.json LAST (commit marker) ──
     final metaBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(metadata.toJson())),
     );
     final metaEtag = await _webdav.uploadFile('${dir}metadata.json', metaBytes,
-        timeoutSeconds: dt);
+        timeoutSeconds: dt, criticalVerify: true);
 
     // Harvest per-page ETags from successful PUT responses.
     final pageEtags = <String, String>{};
@@ -743,7 +765,12 @@ class SyncService {
     debugPrint('[Sync] Delta sync: ${dirtyPages.length} pages, '
         '${dirtyAssets?.length ?? 0} assets → $dir');
 
-    return (metaEtag: metaEtag, pageEtags: pageEtags);
+    return (
+      metaEtag: metaEtag,
+      pageEtags: pageEtags,
+      failedPageDeletes: failedPageDeletes,
+      failedAssetDeletes: failedAssetDeletes,
+    );
   }
 
   /// Gets ETags for all pages in the exploded folder.
