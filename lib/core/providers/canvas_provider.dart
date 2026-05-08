@@ -81,6 +81,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Mutex: serializes save() and _pullRemoteChanges() so they never
   /// race each other. Only one can modify state at a time.
   Completer<void>? _syncLock;
+  /// Generation token bumped on every acquire AND every force-release.
+  /// [_releaseSyncLock] takes the caller's token and only nulls
+  /// `_syncLock` if the token matches the current generation. Without
+  /// this, a slow holder timed out by force-release would later call
+  /// `_releaseSyncLock` and erase the NEW holder's lock, letting a third
+  /// caller race the new one — exactly the cross-stomp three audits
+  /// flagged.
+  int _syncLockGeneration = 0;
   bool _disposed = false;
 
   /// Incremented every time [openNotebook] runs. A deferred [closeNotebook]
@@ -117,7 +125,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// stuck, WebDAV socket frozen), we'd otherwise block every future save
   /// and pull forever. On timeout we force-release the stale lock and grab
   /// it ourselves so the notifier recovers instead of wedging the UI.
-  Future<bool> _acquireSyncLock({
+  /// Acquire returns a generation TOKEN that must be passed back to
+  /// [_releaseSyncLock]. A token is only valid until either (a) the
+  /// matching release call, or (b) a force-release that bumps the
+  /// generation. Use the boolean-style helpers below for compatibility
+  /// with existing callers — internally they thread the token.
+  Future<int?> _acquireSyncLock({
     Duration timeout = const Duration(seconds: 30),
   }) async {
     final deadline = DateTime.now().add(timeout);
@@ -138,22 +151,29 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         break;
       }
     }
-    if (_disposed) return false;
+    if (_disposed) return null;
     _syncLock = Completer<void>();
-    return true;
+    _syncLockGeneration++;
+    return _syncLockGeneration;
   }
 
-  /// Release sync lock.
-  void _releaseSyncLock() {
+  /// Release sync lock. Only releases when the caller's token matches
+  /// the current generation — a stale token (the prior holder timed out
+  /// and force-release bumped the gen) becomes a no-op so the new
+  /// holder's lock isn't erased.
+  void _releaseSyncLock(int token) {
+    if (token != _syncLockGeneration) return;
     final lock = _syncLock;
     _syncLock = null;
     if (lock != null && !lock.isCompleted) lock.complete();
   }
 
-  /// Force-release lock and cancel pending waiters (used on close/dispose).
+  /// Force-release lock and bump generation, invalidating any in-flight
+  /// holder's release call. Used on close/dispose and on acquire timeout.
   void _forceReleaseSyncLock() {
     final lock = _syncLock;
     _syncLock = null;
+    _syncLockGeneration++;
     if (lock != null && !lock.isCompleted) lock.complete();
   }
 
@@ -163,6 +183,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   /// Asset keys modified since last sync (e.g. "images/foo.png").
   final Set<String> _dirtyAssetKeys = {};
+
+  /// Asset keys that were successfully uploaded at least once during this
+  /// session (or seeded from a remote pull). Used by [_pruneOrphanAssets]
+  /// to decide whether an orphan should generate a server-side DELETE:
+  /// a local-only asset (created and orphaned without ever syncing) MUST
+  /// NOT produce a DELETE — the server has nothing to delete and a 404
+  /// loop or worse, a cross-device collision (another device created an
+  /// asset with the same id), would result. Persisted? No — re-seeded
+  /// each notebook open from the remote asset listing during the first
+  /// successful pull (every key in pulled `state.assetBytes` is by
+  /// definition server-confirmed at that moment).
+  final Set<String> _uploadedAssetKeys = <String>{};
 
   /// Snapshot of page map references from the last sync.
   /// Used for identity-based dirty detection: if `pages[fileName]` is a
@@ -726,11 +758,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       assetBytes: newAssets,
       imageCache: newCache,
     );
-    // Stage server-side deletes into the pending queue (persisted) so they
-    // survive a thrown remote sync and get retried until the server confirms.
-    _pendingAssetDeletes.addAll(orphans);
+    // Stage server-side deletes for orphans we're CONFIDENT exist on the
+    // server (we successfully uploaded them at least once in this session
+    // or pulled them from remote). Local-only orphans (created but never
+    // synced) skip the queue — issuing a DELETE for an asset the server
+    // never had can race a concurrent upload from another device that
+    // happens to use the same id, or just spin in a 404 retry.
+    final serverConfirmed =
+        orphans.where(_uploadedAssetKeys.contains).toList();
+    _pendingAssetDeletes.addAll(serverConfirmed);
+    // Drop the no-longer-tracked orphan ids from the uploaded set so it
+    // doesn't grow unbounded over a long session.
+    for (final id in orphans) {
+      _uploadedAssetKeys.remove(id);
+    }
     print('[Canvas] Pruned ${orphans.length} orphan assets '
-        '(${cacheOnlyOrphans.length} cache-only) — freeing storage');
+        '(${serverConfirmed.length} queued for server delete, '
+        '${cacheOnlyOrphans.length} cache-only) — freeing storage');
   }
 
   /// Sequentially decodes [assets] that are NOT in [skip], waiting for each
@@ -1755,14 +1799,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // silently rejected circles drawn from 12 o'clock or 6 o'clock:
     // Douglas-Peucker on a closure-deduped circle starting from the top
     // commonly produces 4-6 corners (cardinal-quartet collapse), failing
-    // the gate; the shape then fell through to the rhombus check
-    // (4 cardinal corners + equal edges + perpendicular diagonals
-    // + fillRatio<0.75 — all true for a cardinalised circle) and was
-    // recognized as a rhombus, looking visually smaller than the user's
-    // stroke. radialCV<0.15 + aspectRatio>0.60 are already strict
-    // enough: a real rhombus has CV ≈ 0.20+, a real rectangle violates
-    // aspect or CV. Trust the radial fit.
-    final isCircleCandidate = radialCV < 0.15 && aspectRatio > 0.60;
+    // the gate; the shape then fell through to the rhombus check and
+    // was recognized as a rhombus, looking visually smaller than the
+    // user's stroke. radialCV<0.20 covers natural hand jitter at slow
+    // start/end points (a typical hand-drawn circle has CV in the
+    // 0.10-0.18 range; 0.15 was rejecting top-started ones whose start
+    // density spiked CV slightly). aspectRatio>0.60 is enough to
+    // exclude genuine ovals; further refinement (rectangle disambig)
+    // is handled by the polygon branches that follow when this gate
+    // fails.
+    final isCircleCandidate = radialCV < 0.20 && aspectRatio > 0.60;
 
     if (isCircleCandidate) {
       // Radius from the LARGER bbox half-axis. (width+height)/4 (the
@@ -5594,13 +5640,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   Future<void> save() async {
     if (state == null || !state!.isDirty) return;
-    final locked = await _acquireSyncLock();
-    if (!locked || state == null) return;
+    final token = await _acquireSyncLock();
+    if (token == null || state == null) return;
     bool lockTransferred = false;
     try {
-      lockTransferred = await _saveInner();
+      lockTransferred = await _saveInner(token);
     } finally {
-      if (!lockTransferred) _releaseSyncLock();
+      if (!lockTransferred) _releaseSyncLock(token);
     }
   }
 
@@ -5610,7 +5656,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Returns `true` if the background task has taken ownership of the
   /// sync lock (caller must NOT release it). Returns `false` if the
   /// caller must release the lock itself (nothing scheduled).
-  Future<bool> _saveInner() async {
+  Future<bool> _saveInner(int lockToken) async {
     if (state == null || !state!.isDirty) return false;
 
     // ── Pre-flight integrity guard ──
@@ -5721,6 +5767,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // doesn't lose the deletion request — _remoteSync merges these and
     // clears them on confirmed success.
     _pendingPageDeletes.addAll(deletedPages);
+
+    // Drop pending DELETEs that conflict with what we're about to PUT.
+    // Without this guard, Phase 0 of syncDelta (DELETE) fires in
+    // parallel with Phase 1 (PUT) — a stale pending delete for
+    // page_010.json could race the new page_010.json PUT and leave the
+    // server without the just-uploaded content. _nextPageFileName
+    // reuses numeric suffixes after deletion, so this collision is
+    // realistic when the user re-imports a PDF after deleting the prior.
+    if (changedPages.isNotEmpty) {
+      _pendingPageDeletes.removeWhere((fn) => changedPages.containsKey(fn));
+    }
+    if (changedAssets.isNotEmpty) {
+      _pendingAssetDeletes.removeWhere((id) => changedAssets.containsKey(id));
+    }
 
     // Now it's safe to compact orphan assets: we have a stable view of
     // which pages were just deleted, and we only run prune at all when
@@ -5851,6 +5911,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         _lastSyncedPages = Map.of(s.pages);
         for (final k in snapshotDirtyAssetKeys) {
           _dirtyAssetKeys.remove(k);
+          // Mark these asset IDs as having a server-side counterpart.
+          // _pruneOrphanAssets uses this set to decide whether to queue
+          // a server DELETE — a local-only asset (never uploaded) must
+          // never produce a DELETE because the server might 404 forever
+          // OR delete a totally unrelated file with the same name created
+          // by another device.
+          _uploadedAssetKeys.add(k);
+        }
+        // Persist the per-page ETag map and meta-ETag ONLY after the
+        // local ZIP rebuild has landed on disk. If we persist before the
+        // ZIP write completes (the previous behaviour) and the process
+        // is killed in-between (iOS jetsam, OOM, force-quit), the cold
+        // boot reads "we're synced at these ETags" but the .ncnote on
+        // disk is the pre-save bundle — the next pull's "ETag matches,
+        // skip" path then leaves the user with stale local content
+        // forever, an undetectable form of silent data loss.
+        try {
+          final localOk = await localSaveFuture;
+          if (!localOk) {
+            debugPrint('[Canvas] Local save reported failure — '
+                'skipping ETag persist to avoid lying about sync state');
+          } else {
+            await _persistRemoteMetaEtag(updatedMeta.id);
+            await _persistLastPageEtags(updatedMeta.id);
+          }
+        } catch (e) {
+          debugPrint('[Canvas] Local save errored, skipping ETag '
+              'persist: $e');
         }
       } catch (e) {
         debugPrint('[Canvas] Remote sync deferred (offline?): $e');
@@ -5860,7 +5948,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           await fileService.markNotebookDirty(updatedMeta.id);
         } catch (_) {}
       } finally {
-        _releaseSyncLock();
+        _releaseSyncLock(lockToken);
       }
     }();
     // Clear the tracking slot when this particular save settles — a later
@@ -5990,11 +6078,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     await fileService.markNotebookSynced(updatedMeta.id, result.metaEtag);
-    await _persistRemoteMetaEtag(updatedMeta.id);
-    // Persist per-page ETags so a cold restart doesn't silently mistake
-    // 'server has moved since we last pulled' for 'server matches our
-    // local state'.
-    await _persistLastPageEtags(updatedMeta.id);
+    // ETag persistence is INTENTIONALLY deferred: the caller chains it
+    // to the local-ZIP write completion in the _pendingRemoteSave block.
+    // Persisting here would race the local write — a process kill in
+    // between leaves us advertising synced state that the on-disk ZIP
+    // contradicts, producing silent stale-content on next open.
     print('[Canvas] Delta synced: ${dirtyPages.length} pages → server '
         '(${result.pageEtags.length} etags captured)');
   }
@@ -6357,8 +6445,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // for nothing. The reset now happens deeper in the function, only
       // when [changeState.metaEtag != _remoteMetaEtag] (true work to
       // do).
-      final locked = await _acquireSyncLock();
-      if (!locked) return;
+      final pullLockToken = await _acquireSyncLock();
+      if (pullLockToken == null) return;
       try {
         if (state == null || state!.metadata.id != pullNotebookId) return;
         final s = state!;
@@ -6491,7 +6579,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         //   • the _pageJsonCache would be re-populated out of order
         final pendingSave = _pendingPulledLocalSave;
         if (pendingSave == null) {
-          _releaseSyncLock();
+          _releaseSyncLock(pullLockToken);
         } else {
           () async {
             try {
@@ -6504,7 +6592,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
               if (identical(_pendingPulledLocalSave, pendingSave)) {
                 _pendingPulledLocalSave = null;
               }
-              _releaseSyncLock();
+              _releaseSyncLock(pullLockToken);
             }
           }();
         }
@@ -7094,6 +7182,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             final merged = Map<String, Uint8List>.from(state!.assetBytes)
               ..addAll(bgDownloaded);
             state = state!.copyWith(assetBytes: merged);
+            // Anything we just pulled from the server is by definition
+            // server-confirmed. Mark these as eligible for future
+            // server-side DELETE (used by _pruneOrphanAssets).
+            _uploadedAssetKeys.addAll(bgDownloaded.keys);
           }
         }());
       }
@@ -7569,6 +7661,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     for (final entry in s.assetBytes.entries) {
       mergedAssets.putIfAbsent(entry.key, () => entry.value);
     }
+    // pending.assets came from a remote PROPFIND/GET — every key is
+    // server-confirmed. Track them so prune knows it's safe to issue a
+    // DELETE for them later if they become orphans.
+    _uploadedAssetKeys.addAll(pending.assets.keys);
 
     // Stamp the actual merged page count so the library card is always
     // accurate — remote metadata.pageCount may be stale if local pages
@@ -7738,12 +7834,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     Map<String, PageData> pages,
     Map<String, Uint8List> assets,
   ) async {
-    final locked = await _acquireSyncLock();
-    if (!locked) return;
+    final pulledSaveToken = await _acquireSyncLock();
+    if (pulledSaveToken == null) return;
     try {
       await _savePulledChangesLocally(metadata, document, pages, assets);
     } finally {
-      _releaseSyncLock();
+      _releaseSyncLock(pulledSaveToken);
     }
   }
 

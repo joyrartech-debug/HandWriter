@@ -335,14 +335,32 @@ class CanvasRenderEngine extends CustomPainter {
       // Single-element live transform (drag/rotate/resize via image handles).
       if (isLiveTarget) {
         canvas.save();
-        final c = _elementCenter(element);
         canvas.translate(liveEl.dragOffset.dx, liveEl.dragOffset.dy);
-        canvas.translate(c.dx, c.dy);
-        if (liveEl.rotationDelta != 0.0) canvas.rotate(liveEl.rotationDelta);
-        if (liveEl.scaleW != 1.0 || liveEl.scaleH != 1.0) {
-          canvas.scale(liveEl.scaleW, liveEl.scaleH);
+        // Anchor: rotation pivots around the element's CENTER, but
+        // scale must pivot around its TOP-LEFT to match the resize
+        // handle's math (newBounds = orig.tl + (sw*W, sh*H), where the
+        // handle keeps top-left fixed and the dragOffset captures any
+        // top/left edge displacement). Using center as the scale anchor
+        // (the prior behaviour) made the image grow symmetrically from
+        // the centre while the handle tracked top-left → image visually
+        // drifted off the handle frame as the user dragged. Choose the
+        // anchor based on which transform is active; for the typical
+        // "drag a corner" gesture this is scale-only, so top-left
+        // anchor applies and the image sticks to the handles.
+        final hasScale = liveEl.scaleW != 1.0 || liveEl.scaleH != 1.0;
+        final hasRotation = liveEl.rotationDelta != 0.0;
+        if (hasRotation) {
+          final c = _elementCenter(element);
+          canvas.translate(c.dx, c.dy);
+          canvas.rotate(liveEl.rotationDelta);
+          canvas.translate(-c.dx, -c.dy);
         }
-        canvas.translate(-c.dx, -c.dy);
+        if (hasScale) {
+          final tl = _elementTopLeft(element);
+          canvas.translate(tl.dx, tl.dy);
+          canvas.scale(liveEl.scaleW, liveEl.scaleH);
+          canvas.translate(-tl.dx, -tl.dy);
+        }
       }
 
       element.map(
@@ -378,6 +396,27 @@ class CanvasRenderEngine extends CustomPainter {
       text: (t) => Offset(t.data.x + t.data.width / 2, t.data.y + t.data.height / 2),
       image: (i) => Offset(i.data.x + i.data.width / 2, i.data.y + i.data.height / 2),
       shape: (s) => Offset((s.data.x1 + s.data.x2) / 2, (s.data.y1 + s.data.y2) / 2),
+    );
+  }
+
+  /// Top-left corner of an element on the page. Used as the scale anchor
+  /// for live resize so the rendered shape keeps its top-left at
+  /// element.tl + dragOffset (matching the resize handle's bbox math).
+  Offset _elementTopLeft(ContentElement element) {
+    return element.map(
+      stroke: (s) {
+        if (s.data.points.isEmpty) return Offset.zero;
+        double minX = s.data.points.first.x;
+        double minY = s.data.points.first.y;
+        for (final p in s.data.points) {
+          if (p.x < minX) minX = p.x;
+          if (p.y < minY) minY = p.y;
+        }
+        return Offset(minX, minY);
+      },
+      text: (t) => Offset(t.data.x, t.data.y),
+      image: (i) => Offset(i.data.x, i.data.y),
+      shape: (s) => Offset(min(s.data.x1, s.data.x2), min(s.data.y1, s.data.y2)),
     );
   }
 
