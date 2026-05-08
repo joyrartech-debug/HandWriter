@@ -1555,8 +1555,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final veryStrongCircle = radialCV < 0.08;
 
     if (isCircleCandidate && (notPolygonRange || veryStrongCircle)) {
-      // Use avgR (mean distance from center to drawn points) to preserve drawn size
-      final r = avgR;
+      // Radius from bbox dimensions, NOT from `avgR`. avgR (mean
+      // point-to-bbox-centre distance) was biased by point density:
+      // when the user drew faster on one side of the circle (fewer
+      // samples) and slower on the other (denser samples), the dense
+      // side dragged the average down — so circles drawn starting
+      // from the right or top often came back too small. (width +
+      // height) / 4 is the bbox's mean half-diameter, which depends
+      // only on the extents and not on where the user started or how
+      // they paced the gesture.
+      final r = (width + height) / 4;
       return ShapeData(
         shapeType: 'circle',
         x1: cx - r, y1: cy - r,
@@ -1567,29 +1575,47 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
 
     // ── TRIANGLE ──
+    // Preserve the user's apex orientation. The renderer draws an
+    // "apex up" triangle inside the bbox and applies `rotation` around
+    // the bbox centre, so we encode the actual apex direction as a
+    // rotation angle. Without this, every triangle was canonicalised
+    // to apex-up regardless of how the user drew it (op-amps drawn
+    // pointing right became pointing up, etc).
     if (corners.length == 3) {
-      // Anchor (x1,y1) = corner opposite the pen; Free (x2,y2) = pen's corner.
-      // This lets the user drag x2,y2 naturally after recognition.
-      final endPoint = Offset(points.last.x, points.last.y);
-      final boxCorners = [
-        Offset(minX, minY), Offset(maxX, minY),
-        Offset(maxX, maxY), Offset(minX, maxY)
-      ];
-      int closestIdx = 0;
-      double closestDist = double.infinity;
-      for (int i = 0; i < 4; i++) {
-        final d = (boxCorners[i] - endPoint).distance;
-        if (d < closestDist) {
-          closestDist = d;
-          closestIdx = i;
+      final centroid = Offset(
+        (corners[0].dx + corners[1].dx + corners[2].dx) / 3,
+        (corners[0].dy + corners[1].dy + corners[2].dy) / 3,
+      );
+      // Apex = corner farthest from the centroid (a triangle's apex is
+      // always farther from the centroid than the two base corners).
+      int apexIdx = 0;
+      double maxDist = -1;
+      for (int i = 0; i < 3; i++) {
+        final d = (corners[i] - centroid).distance;
+        if (d > maxDist) {
+          maxDist = d;
+          apexIdx = i;
         }
+      }
+      final apex = corners[apexIdx];
+      // Canvas y is flipped (down=positive). Apex-up corresponds to
+      // angle = -π/2 from centroid. Required rotation to produce the
+      // user's apex direction = (drawn angle) − (canonical −π/2).
+      final drawnAngle =
+          atan2(apex.dy - centroid.dy, apex.dx - centroid.dx);
+      double rotation = drawnAngle + pi / 2;
+      // Snap to cardinal direction if within ~11° — most users draw
+      // op-amps / pyramids pointing exactly along an axis, and the
+      // tiny natural skew shouldn't be preserved.
+      const cardinalSnap = 0.2;
+      final nearestQuarter = (rotation / (pi / 2)).round() * (pi / 2);
+      if ((rotation - nearestQuarter).abs() < cardinalSnap) {
+        rotation = nearestQuarter;
       }
       return ShapeData(
         shapeType: 'triangle',
-        x1: boxCorners[(closestIdx + 2) % 4].dx,
-        y1: boxCorners[(closestIdx + 2) % 4].dy,
-        x2: boxCorners[closestIdx].dx,
-        y2: boxCorners[closestIdx].dy,
+        x1: minX, y1: minY, x2: maxX, y2: maxY,
+        rotation: rotation,
         strokeColor: color, strokeWidth: visualWidth,
         fillColor: autoFill,
       );
@@ -1654,8 +1680,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         }
       }
 
+      // Snap-to-cardinal threshold: was 0.2 rad (≈11.5°) which
+      // flattened any rectangle drawn with a small intentional tilt
+      // back to axis-aligned. 0.157 rad ≈ 9°: enough margin for
+      // "tried to draw straight but was a bit off" while preserving
+      // anything visibly tilted as the user intended.
       final snappedAngle = (angle / (pi / 2)).round() * (pi / 2);
-      if ((angle - snappedAngle).abs() < 0.2) angle = snappedAngle;
+      if ((angle - snappedAngle).abs() < 0.157) angle = snappedAngle;
 
       // For axis-aligned rectangles (angle is multiple of π/2), use the
       // simple bounding box directly. The OBB rotation is only needed for
