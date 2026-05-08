@@ -59,6 +59,16 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
   Offset _dragStart = Offset.zero;
   Offset _rotationCenter = Offset.zero;
   double _lastRotationAngle = 0;
+  // Bounds captured at corner-resize gesture START. We use this as the
+  // stable divisor in the projection math because widget.bounds is
+  // LIVE — it's recomputed by the parent on every notifier tick. If the
+  // parent rebuild lagged behind the gesture (one frame ≈ 16 ms but
+  // pan events fire faster), per-tick math against widget.bounds would
+  // see stale bounds and produce a frozen newBounds, never advancing
+  // beyond the first tick. Using the immutable origBounds + the
+  // CUMULATIVE pointer travel solves this regardless of rebuild rate.
+  Rect? _resizeOrigBounds;
+  Offset _resizeGestureOrigin = Offset.zero;
 
   static const _handleSize = 12.0;
   static const _rotateHandleDistance = 30.0;
@@ -154,15 +164,26 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
       child: GestureDetector(
         onPanStart: (d) {
           _dragStart = d.globalPosition;
+          // Snapshot the bounds at gesture start; the resize math uses
+          // the cumulative pointer travel against this snapshot, NOT
+          // the live widget.bounds (which lags by one frame and would
+          // freeze the scale at the first tick's value).
+          _resizeOrigBounds = widget.bounds;
+          _resizeGestureOrigin = d.globalPosition;
           widget.onDragStart?.call();
         },
         onPanUpdate: (d) {
-          final delta = d.globalPosition - _dragStart;
-          _dragStart = d.globalPosition;
-          _handleCornerResize(handleId, delta);
+          final cumulative = d.globalPosition - _resizeGestureOrigin;
+          _handleCornerResize(handleId, cumulative);
         },
-        onPanEnd: (_) => widget.onDragEnd?.call(),
-        onPanCancel: () => widget.onDragEnd?.call(),
+        onPanEnd: (_) {
+          _resizeOrigBounds = null;
+          widget.onDragEnd?.call();
+        },
+        onPanCancel: () {
+          _resizeOrigBounds = null;
+          widget.onDragEnd?.call();
+        },
         child: Container(
           width: _handleSize,
           height: _handleSize,
@@ -423,17 +444,21 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
     );
   }
 
-  void _handleCornerResize(String handle, Offset delta) {
-    final b = widget.bounds;
+  void _handleCornerResize(String handle, Offset cumulativeDelta) {
+    // Use the bounds CAPTURED at gesture start, not widget.bounds.
+    // widget.bounds is LIVE (recomputed by the parent each frame from
+    // notifier values). Computing per-tick newBounds against widget.bounds
+    // would freeze growth at the first tick whenever the parent rebuild
+    // lagged behind a fast pan stream — the visible bbox stayed small
+    // while the user dragged on. Cumulative travel against the immutable
+    // origBounds gives a stable, frame-rate-independent computation.
+    final b = _resizeOrigBounds ?? widget.bounds;
     if (b.width <= 0 || b.height <= 0) return;
 
-    // Project the dragged-corner displacement onto the diagonal direction
-    // anchor→corner. This gives a smooth, monotonic scale factor: small
-    // wobbles produce small scale changes (no flicker), pure-axis drags
-    // grow at full speed (no 50% sluggishness), and opposite-direction
-    // jitter never cancels to zero (the previous diag-sum bug). Aspect
-    // ratio is preserved by definition because we scale along the
-    // diagonal of the current bounds.
+    // Project the (origCorner + cumulativeDelta) point onto the
+    // original anchor→corner diagonal direction. scale = projection /
+    // diag_length² is the cumulative-vs-original scale factor; smooth
+    // and monotonic regardless of pointer wobble or rebuild cadence.
     late Offset anchor;
     late Offset corner;
     switch (handle) {
@@ -443,17 +468,14 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
       case 'br': anchor = b.topLeft;     corner = b.bottomRight; break;
       default: return;
     }
-    final diag = corner - anchor;          // original diagonal vector
+    final diag = corner - anchor;
     final diagLenSq = diag.dx * diag.dx + diag.dy * diag.dy;
     if (diagLenSq <= 0) return;
 
-    // Where the corner would be after this tick's delta.
-    final newCorner = corner + delta;
+    final newCorner = corner + cumulativeDelta;
     final newVec = newCorner - anchor;
-    // Projection of new vector onto the original diagonal, expressed as
-    // a fraction of the original length: scale = (new·diag) / |diag|².
     final scale = (newVec.dx * diag.dx + newVec.dy * diag.dy) / diagLenSq;
-    if (scale <= 0) return;  // would invert the rect
+    if (scale <= 0) return;
 
     final newW = b.width * scale;
     final newH = b.height * scale;

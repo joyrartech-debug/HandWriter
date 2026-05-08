@@ -1811,15 +1811,20 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final isCircleCandidate = radialCV < 0.20 && aspectRatio > 0.60;
 
     if (isCircleCandidate) {
-      // Radius from the LARGER bbox half-axis. (width+height)/4 (the
-      // mean) silently shrunk slightly-oval circles below the user's
-      // visible stroke ("parte da piccola" when starting from top or
-      // bottom — natural hand-drawn circles aren't perfectly round and
-      // averaging biases the result down). Using max/2 ensures the
-      // recognized shape never visibly shrinks under the user's gesture
-      // and matches expectation regardless of starting point. The
-      // aspectRatio>0.60 gate above already filters genuine ovals away.
-      final r = max(width, height) / 2;
+      // Radius is the LARGER of two estimates: half the bigger bbox
+      // dimension, OR the mean point-to-centre distance. When a user
+      // starts from 12/6 o'clock and ergonomically curves back early
+      // before reaching the full bottom/top extent, the bbox shrinks
+      // (undershoots the intended circle) but the mean radius still
+      // reflects the user's curvature — most points sit at the
+      // intended radius even if the bbox doesn't capture the full
+      // diameter. Taking the max of the two estimates absorbs this
+      // asymmetry: perfect circle → both equal, no change; under-
+      // shoot from top/bottom → avgR > bbox/2, use avgR (the user's
+      // curvature wins); slightly-oval drawn fully → bbox/2 ≥ avgR,
+      // bbox/2 wins. Either way the recognized circle never shrinks
+      // below what the user's stroke physically traces.
+      final r = max(max(width, height) / 2, avgR);
       return ShapeData(
         shapeType: 'circle',
         x1: cx - r, y1: cy - r,
