@@ -4182,7 +4182,15 @@ mixin _$ShapeData {
   int get strokeColor => throw _privateConstructorUsedError;
   double get strokeWidth => throw _privateConstructorUsedError;
   int? get fillColor => throw _privateConstructorUsedError;
-  double get rotation => throw _privateConstructorUsedError;
+  double get rotation =>
+      throw _privateConstructorUsedError; // For oblique (non-cardinal) triangles: explicit absolute-page-space
+// vertices [apexX, apexY, base1X, base1Y, base2X, base2Y]. When
+// present the renderer draws this path directly; when empty it falls
+// back to the canonical bbox-relative path with `rotation` applied.
+// Cardinal triangles leave this empty (the bbox + rotation already
+// describes them exactly via the cardinal-special-case render path).
+// Stored on resize via affine bbox-to-bbox vertex remap.
+  List<double> get vertices => throw _privateConstructorUsedError;
 
   /// Serializes this ShapeData to a JSON map.
   Map<String, dynamic> toJson() => throw _privateConstructorUsedError;
@@ -4208,7 +4216,8 @@ abstract class $ShapeDataCopyWith<$Res> {
       int strokeColor,
       double strokeWidth,
       int? fillColor,
-      double rotation});
+      double rotation,
+      List<double> vertices});
 }
 
 /// @nodoc
@@ -4235,6 +4244,7 @@ class _$ShapeDataCopyWithImpl<$Res, $Val extends ShapeData>
     Object? strokeWidth = null,
     Object? fillColor = freezed,
     Object? rotation = null,
+    Object? vertices = null,
   }) {
     return _then(_value.copyWith(
       shapeType: null == shapeType
@@ -4273,6 +4283,10 @@ class _$ShapeDataCopyWithImpl<$Res, $Val extends ShapeData>
           ? _value.rotation
           : rotation // ignore: cast_nullable_to_non_nullable
               as double,
+      vertices: null == vertices
+          ? _value.vertices
+          : vertices // ignore: cast_nullable_to_non_nullable
+              as List<double>,
     ) as $Val);
   }
 }
@@ -4294,7 +4308,8 @@ abstract class _$$ShapeDataImplCopyWith<$Res>
       int strokeColor,
       double strokeWidth,
       int? fillColor,
-      double rotation});
+      double rotation,
+      List<double> vertices});
 }
 
 /// @nodoc
@@ -4319,6 +4334,7 @@ class __$$ShapeDataImplCopyWithImpl<$Res>
     Object? strokeWidth = null,
     Object? fillColor = freezed,
     Object? rotation = null,
+    Object? vertices = null,
   }) {
     return _then(_$ShapeDataImpl(
       shapeType: null == shapeType
@@ -4357,6 +4373,10 @@ class __$$ShapeDataImplCopyWithImpl<$Res>
           ? _value.rotation
           : rotation // ignore: cast_nullable_to_non_nullable
               as double,
+      vertices: null == vertices
+          ? _value._vertices
+          : vertices // ignore: cast_nullable_to_non_nullable
+              as List<double>,
     ));
   }
 }
@@ -4373,7 +4393,9 @@ class _$ShapeDataImpl implements _ShapeData {
       this.strokeColor = 0xFF000000,
       this.strokeWidth = 2.0,
       this.fillColor,
-      this.rotation = 0.0});
+      this.rotation = 0.0,
+      final List<double> vertices = const <double>[]})
+      : _vertices = vertices;
 
   factory _$ShapeDataImpl.fromJson(Map<String, dynamic> json) =>
       _$$ShapeDataImplFromJson(json);
@@ -4400,10 +4422,32 @@ class _$ShapeDataImpl implements _ShapeData {
   @override
   @JsonKey()
   final double rotation;
+// For oblique (non-cardinal) triangles: explicit absolute-page-space
+// vertices [apexX, apexY, base1X, base1Y, base2X, base2Y]. When
+// present the renderer draws this path directly; when empty it falls
+// back to the canonical bbox-relative path with `rotation` applied.
+// Cardinal triangles leave this empty (the bbox + rotation already
+// describes them exactly via the cardinal-special-case render path).
+// Stored on resize via affine bbox-to-bbox vertex remap.
+  final List<double> _vertices;
+// For oblique (non-cardinal) triangles: explicit absolute-page-space
+// vertices [apexX, apexY, base1X, base1Y, base2X, base2Y]. When
+// present the renderer draws this path directly; when empty it falls
+// back to the canonical bbox-relative path with `rotation` applied.
+// Cardinal triangles leave this empty (the bbox + rotation already
+// describes them exactly via the cardinal-special-case render path).
+// Stored on resize via affine bbox-to-bbox vertex remap.
+  @override
+  @JsonKey()
+  List<double> get vertices {
+    if (_vertices is EqualUnmodifiableListView) return _vertices;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_vertices);
+  }
 
   @override
   String toString() {
-    return 'ShapeData(shapeType: $shapeType, x1: $x1, y1: $y1, x2: $x2, y2: $y2, strokeColor: $strokeColor, strokeWidth: $strokeWidth, fillColor: $fillColor, rotation: $rotation)';
+    return 'ShapeData(shapeType: $shapeType, x1: $x1, y1: $y1, x2: $x2, y2: $y2, strokeColor: $strokeColor, strokeWidth: $strokeWidth, fillColor: $fillColor, rotation: $rotation, vertices: $vertices)';
   }
 
   @override
@@ -4424,13 +4468,24 @@ class _$ShapeDataImpl implements _ShapeData {
             (identical(other.fillColor, fillColor) ||
                 other.fillColor == fillColor) &&
             (identical(other.rotation, rotation) ||
-                other.rotation == rotation));
+                other.rotation == rotation) &&
+            const DeepCollectionEquality().equals(other._vertices, _vertices));
   }
 
   @JsonKey(includeFromJson: false, includeToJson: false)
   @override
-  int get hashCode => Object.hash(runtimeType, shapeType, x1, y1, x2, y2,
-      strokeColor, strokeWidth, fillColor, rotation);
+  int get hashCode => Object.hash(
+      runtimeType,
+      shapeType,
+      x1,
+      y1,
+      x2,
+      y2,
+      strokeColor,
+      strokeWidth,
+      fillColor,
+      rotation,
+      const DeepCollectionEquality().hash(_vertices));
 
   /// Create a copy of ShapeData
   /// with the given fields replaced by the non-null parameter values.
@@ -4458,7 +4513,8 @@ abstract class _ShapeData implements ShapeData {
       final int strokeColor,
       final double strokeWidth,
       final int? fillColor,
-      final double rotation}) = _$ShapeDataImpl;
+      final double rotation,
+      final List<double> vertices}) = _$ShapeDataImpl;
 
   factory _ShapeData.fromJson(Map<String, dynamic> json) =
       _$ShapeDataImpl.fromJson;
@@ -4480,7 +4536,16 @@ abstract class _ShapeData implements ShapeData {
   @override
   int? get fillColor;
   @override
-  double get rotation;
+  double
+      get rotation; // For oblique (non-cardinal) triangles: explicit absolute-page-space
+// vertices [apexX, apexY, base1X, base1Y, base2X, base2Y]. When
+// present the renderer draws this path directly; when empty it falls
+// back to the canonical bbox-relative path with `rotation` applied.
+// Cardinal triangles leave this empty (the bbox + rotation already
+// describes them exactly via the cardinal-special-case render path).
+// Stored on resize via affine bbox-to-bbox vertex remap.
+  @override
+  List<double> get vertices;
 
   /// Create a copy of ShapeData
   /// with the given fields replaced by the non-null parameter values.

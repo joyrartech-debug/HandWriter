@@ -254,6 +254,15 @@ class ElementTransformNotifier extends ChangeNotifier {
   // (width, height) — only used by resize.
   double _scaleW = 1.0;
   double _scaleH = 1.0;
+  // Element's bounds at gesture-start, in page coords. Captured once on
+  // [begin] and held immutable until [end]. The resize handler divides
+  // newBounds.width by toScreen(_origBounds).width to compute a TRUE
+  // cumulative scale relative to the original element. Without this, the
+  // handler used the live (already-scaled) bounds as the divisor and
+  // produced per-tick relative scales — which the [setScale] (replace
+  // semantics) overwrote each tick, making the image jiggle around 110%
+  // regardless of how far the user dragged.
+  Rect? _origBounds;
 
   bool get isActive => _elementId != null;
   String? get elementId => _elementId;
@@ -261,9 +270,11 @@ class ElementTransformNotifier extends ChangeNotifier {
   double get rotationDelta => _rotationDelta;
   double get scaleW => _scaleW;
   double get scaleH => _scaleH;
+  Rect? get origBounds => _origBounds;
 
-  void begin(String elementId) {
+  void begin(String elementId, {Rect? origBounds}) {
     _elementId = elementId;
+    _origBounds = origBounds;
     _dragOffset = Offset.zero;
     _rotationDelta = 0.0;
     _scaleW = 1.0;
@@ -295,6 +306,7 @@ class ElementTransformNotifier extends ChangeNotifier {
 
   void end() {
     _elementId = null;
+    _origBounds = null;
     _dragOffset = Offset.zero;
     _rotationDelta = 0.0;
     _scaleW = 1.0;

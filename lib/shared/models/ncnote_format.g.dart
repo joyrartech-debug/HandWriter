@@ -360,6 +360,10 @@ _$ShapeDataImpl _$$ShapeDataImplFromJson(Map<String, dynamic> json) =>
       strokeWidth: (json['strokeWidth'] as num?)?.toDouble() ?? 2.0,
       fillColor: (json['fillColor'] as num?)?.toInt(),
       rotation: (json['rotation'] as num?)?.toDouble() ?? 0.0,
+      vertices: (json['vertices'] as List<dynamic>?)
+              ?.map((e) => (e as num).toDouble())
+              .toList() ??
+          const <double>[],
     );
 
 Map<String, dynamic> _$$ShapeDataImplToJson(_$ShapeDataImpl instance) =>
@@ -373,6 +377,7 @@ Map<String, dynamic> _$$ShapeDataImplToJson(_$ShapeDataImpl instance) =>
       'strokeWidth': instance.strokeWidth,
       'fillColor': instance.fillColor,
       'rotation': instance.rotation,
+      'vertices': instance.vertices,
     };
 
 _$SyncMetadataImpl _$$SyncMetadataImplFromJson(Map<String, dynamic> json) =>

@@ -748,6 +748,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
   }
 
+  /// Apply a point transform to each vertex pair in [v] (length 6 = 3
+  /// vertices). Returns the input unchanged when empty. Used to keep
+  /// oblique-triangle vertices coherent under translate / scale / rotate
+  /// / flip operations on a shape — without this, transforms updated the
+  /// bbox + rotation field but the absolute-coord vertices stayed frozen
+  /// and the triangle rendered at the OLD position/orientation.
+  static List<double> _transformVertices(
+      List<double> v, Offset Function(Offset) fn) {
+    if (v.length != 6) return v;
+    final out = List<double>.filled(6, 0);
+    for (var i = 0; i < 6; i += 2) {
+      final p = fn(Offset(v[i], v[i + 1]));
+      out[i] = p.dx;
+      out[i + 1] = p.dy;
+    }
+    return out;
+  }
+
   /// Tracks which on-demand thumbnail decodes are already queued so the
   /// page manager doesn't fire the same decode N times when multiple
   /// thumbnails share the same asset (or a thumbnail re-builds before
@@ -1732,13 +1750,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final radialCV = avgR > 0 ? sqrt(radialVariance) / avgR : 0.0;
     final aspectRatio = min(width, height) / max(width, height);
 
-    // Accept circle if: good radial fit AND either not in rectangle corner range,
-    // or radial fit is very strong (CV < 0.08 overrides corner count).
+    // Accept circle on radial fit + aspect alone. The previous corner-
+    // count gate (`notPolygonRange = corners.length < 4 || > 6`)
+    // silently rejected circles drawn from 12 o'clock or 6 o'clock:
+    // Douglas-Peucker on a closure-deduped circle starting from the top
+    // commonly produces 4-6 corners (cardinal-quartet collapse), failing
+    // the gate; the shape then fell through to the rhombus check
+    // (4 cardinal corners + equal edges + perpendicular diagonals
+    // + fillRatio<0.75 — all true for a cardinalised circle) and was
+    // recognized as a rhombus, looking visually smaller than the user's
+    // stroke. radialCV<0.15 + aspectRatio>0.60 are already strict
+    // enough: a real rhombus has CV ≈ 0.20+, a real rectangle violates
+    // aspect or CV. Trust the radial fit.
     final isCircleCandidate = radialCV < 0.15 && aspectRatio > 0.60;
-    final notPolygonRange = corners.length < 4 || corners.length > 6;
-    final veryStrongCircle = radialCV < 0.08;
 
-    if (isCircleCandidate && (notPolygonRange || veryStrongCircle)) {
+    if (isCircleCandidate) {
       // Radius from the LARGER bbox half-axis. (width+height)/4 (the
       // mean) silently shrunk slightly-oval circles below the user's
       // visible stroke ("parte da piccola" when starting from top or
@@ -1798,13 +1824,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // the bbox without rotation transform (see _paintShape).
       const cardinalSnap = 0.44;  // ~25°
       final nearestQuarter = (rotation / (pi / 2)).round() * (pi / 2);
-      if ((rotation - nearestQuarter).abs() < cardinalSnap) {
+      final isCardinal = (rotation - nearestQuarter).abs() < cardinalSnap;
+      if (isCardinal) {
         rotation = nearestQuarter % (2 * pi);
       }
+      // For oblique (non-cardinal) triangles the canonical apex-up +
+      // canvas.rotate path was geometrically wrong: the canonical apex
+      // sat at distance H/2 from bbox center, but the user's actual
+      // apex sat at (corner_to_centroid) distance, generally not H/2.
+      // The rendered apex landed inside or outside the bbox at the
+      // wrong place. Fix: store the user's three actual vertices and
+      // render them directly. On resize, an affine bbox→bbox remap
+      // preserves geometry exactly.
+      final base1 = corners[(apexIdx + 1) % 3];
+      final base2 = corners[(apexIdx + 2) % 3];
+      final vertices = isCardinal
+          ? const <double>[]
+          : <double>[apex.dx, apex.dy, base1.dx, base1.dy, base2.dx, base2.dy];
       return ShapeData(
         shapeType: 'triangle',
         x1: minX, y1: minY, x2: maxX, y2: maxY,
         rotation: rotation,
+        vertices: vertices,
         strokeColor: color, strokeWidth: visualWidth,
         fillColor: autoFill,
       );
@@ -2938,6 +2979,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
             fillColor: e.data.fillColor,
             rotation: -e.data.rotation,
+            vertices: _transformVertices(e.data.vertices,
+                (p) => Offset(reflectX(p.dx), reflectY(p.dy))),
           ),
         ),
       );
@@ -3044,6 +3087,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         final rCenter = rotatePoint(oldCx, oldCy);
         final dx = rCenter.dx - oldCx;
         final dy = rCenter.dy - oldCy;
+        // For vertex triangles, rotate each vertex around the new bbox
+        // centre too — the bbox translation alone wouldn't carry the
+        // shape's orientation through.
+        final cosA = cos(angle);
+        final sinA = sin(angle);
+        final newCx = oldCx + dx;
+        final newCy = oldCy + dy;
+        final newVertices = _transformVertices(e.data.vertices, (p) {
+          final ddx = p.dx + dx - newCx;
+          final ddy = p.dy + dy - newCy;
+          return Offset(newCx + ddx * cosA - ddy * sinA,
+                        newCy + ddx * sinA + ddy * cosA);
+        });
         return ContentElement.shape(
           id: e.id, zIndex: e.zIndex,
           data: ShapeData(
@@ -3052,6 +3108,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             x2: e.data.x2 + dx, y2: e.data.y2 + dy,
             strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
             fillColor: e.data.fillColor, rotation: e.data.rotation + angle,
+            vertices: newVertices,
           ),
         );
       },
@@ -3662,6 +3719,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           x2: e.data.x2 + offset.dx, y2: e.data.y2 + offset.dy,
           strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
           fillColor: e.data.fillColor, rotation: e.data.rotation,
+          vertices: _transformVertices(
+              e.data.vertices, (p) => p + offset),
         ),
       ),
     );
@@ -3730,6 +3789,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           y2: center.dy + (e.data.y2 - center.dy) * scale,
           strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth * scale,
           fillColor: e.data.fillColor, rotation: e.data.rotation,
+          vertices: _transformVertices(e.data.vertices,
+              (p) => Offset(
+                  center.dx + (p.dx - center.dx) * scale,
+                  center.dy + (p.dy - center.dy) * scale)),
         ),
       ),
     );
@@ -3820,16 +3883,48 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             locked: e.data.locked, comment: e.data.comment,
           ),
         ),
-        shape: (e) => ContentElement.shape(
-          id: e.id, zIndex: e.zIndex,
-          data: ShapeData(
-            shapeType: e.data.shapeType,
-            x1: newBounds.left, y1: newBounds.top,
-            x2: newBounds.right, y2: newBounds.bottom,
-            strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
-            fillColor: e.data.fillColor, rotation: e.data.rotation,
-          ),
-        ),
+        shape: (e) {
+          // Triangles with explicit vertices: remap each vertex via the
+          // bbox→bbox affine so the shape stretches/translates with the
+          // new bbox while preserving relative geometry. Without this,
+          // resize would change the bbox but the absolute-coord vertices
+          // would stay frozen at the original position, producing a
+          // mismatched shape.
+          List<double> remappedVertices = e.data.vertices;
+          if (e.data.vertices.length == 6) {
+            final oldL = min(e.data.x1, e.data.x2);
+            final oldT = min(e.data.y1, e.data.y2);
+            final oldR = max(e.data.x1, e.data.x2);
+            final oldB = max(e.data.y1, e.data.y2);
+            final oldW = oldR - oldL;
+            final oldH = oldB - oldT;
+            final newW = newBounds.width;
+            final newH = newBounds.height;
+            double mapX(double x) => oldW <= 0
+                ? newBounds.left
+                : newBounds.left + (x - oldL) / oldW * newW;
+            double mapY(double y) => oldH <= 0
+                ? newBounds.top
+                : newBounds.top + (y - oldT) / oldH * newH;
+            final v = e.data.vertices;
+            remappedVertices = [
+              mapX(v[0]), mapY(v[1]),
+              mapX(v[2]), mapY(v[3]),
+              mapX(v[4]), mapY(v[5]),
+            ];
+          }
+          return ContentElement.shape(
+            id: e.id, zIndex: e.zIndex,
+            data: ShapeData(
+              shapeType: e.data.shapeType,
+              x1: newBounds.left, y1: newBounds.top,
+              x2: newBounds.right, y2: newBounds.bottom,
+              strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
+              fillColor: e.data.fillColor, rotation: e.data.rotation,
+              vertices: remappedVertices,
+            ),
+          );
+        },
       );
     }).toList();
 
@@ -3870,16 +3965,32 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             locked: e.data.locked, comment: e.data.comment,
           ),
         ),
-        shape: (e) => ContentElement.shape(
-          id: e.id, zIndex: e.zIndex,
-          data: ShapeData(
-            shapeType: e.data.shapeType,
-            x1: e.data.x1, y1: e.data.y1, x2: e.data.x2, y2: e.data.y2,
-            strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
-            fillColor: e.data.fillColor,
-            rotation: e.data.rotation + deltaAngle,
-          ),
-        ),
+        shape: (e) {
+          // Vertex triangles ignore the rotation field (render path uses
+          // the absolute vertices). Apply the rotation directly to the
+          // vertices around the bbox center so the visible shape rotates.
+          final cx = (e.data.x1 + e.data.x2) / 2;
+          final cy = (e.data.y1 + e.data.y2) / 2;
+          final cosA = cos(deltaAngle);
+          final sinA = sin(deltaAngle);
+          final newVertices = _transformVertices(e.data.vertices, (p) {
+            final dx = p.dx - cx;
+            final dy = p.dy - cy;
+            return Offset(cx + dx * cosA - dy * sinA,
+                          cy + dx * sinA + dy * cosA);
+          });
+          return ContentElement.shape(
+            id: e.id, zIndex: e.zIndex,
+            data: ShapeData(
+              shapeType: e.data.shapeType,
+              x1: e.data.x1, y1: e.data.y1, x2: e.data.x2, y2: e.data.y2,
+              strokeColor: e.data.strokeColor, strokeWidth: e.data.strokeWidth,
+              fillColor: e.data.fillColor,
+              rotation: e.data.rotation + deltaAngle,
+              vertices: newVertices,
+            ),
+          );
+        },
       );
     }).toList();
 

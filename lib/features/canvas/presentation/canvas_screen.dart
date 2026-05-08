@@ -3438,9 +3438,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         onDragStart: () {
           // Push undo once (Riverpod), then switch to the local notifier
           // for the rest of the gesture so per-frame moves don't fire
-          // state updates.
+          // state updates. Pass the ORIGINAL element bounds so onResize
+          // can compute true cumulative scale (vs. the live, already-
+          // scaled bounds the parent rebuilds with each setScale tick).
           ref.read(canvasProvider.notifier).startDragElement(elementId);
-          _elementTransformNotifier.begin(elementId);
+          _elementTransformNotifier.begin(elementId, origBounds: pageBounds);
         },
         onDragEnd: () => _commitElementTransform(elementId, state, canvasSize),
         onMove: (delta) {
@@ -3449,13 +3451,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           _elementTransformNotifier.translate(pageDelta);
         },
         onResize: (newBounds) {
-          // Convert the new screen bounds to a (sw, sh) multiplicative
-          // factor relative to the original pageBounds the notifier was
-          // started with.
+          // Compute a CUMULATIVE scale relative to the element's bounds
+          // at gesture-start (captured in the notifier on begin), NOT
+          // relative to the current pageBounds — pageBounds was already
+          // multiplied by the previous tick's notifier scale during the
+          // ListenableBuilder rebuild, so dividing by it would yield a
+          // per-tick relative scale that the replace-semantic setScale
+          // would then overwrite the cumulative growth with. The image
+          // jiggled around ~110% no matter how far you dragged.
+          final orig = _elementTransformNotifier.origBounds ?? pageBounds!;
           final origScreenTL = _toScreenCoords(
-              pageBounds!.topLeft, state, canvasSize);
+              orig.topLeft, state, canvasSize);
           final origScreenBR = _toScreenCoords(
-              pageBounds!.bottomRight, state, canvasSize);
+              orig.bottomRight, state, canvasSize);
           final origScreenRect = Rect.fromPoints(origScreenTL, origScreenBR);
           final sw = (origScreenRect.width <= 0)
               ? 1.0

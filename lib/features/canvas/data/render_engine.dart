@@ -1134,14 +1134,17 @@ class CanvasRenderEngine extends CustomPainter {
 
     // For triangles with a CARDINAL rotation (multiples of π/2) we
     // bake the apex direction into the path inside the 'triangle' case
-    // below — applying canvas.rotate here would double-rotate. Detect
-    // and skip the outer rotation in that case. Non-cardinal rotations
-    // still go through the standard rotate.
+    // below — applying canvas.rotate here would double-rotate. For
+    // OBLIQUE triangles with explicit vertices stored, the vertices are
+    // already in absolute page coords, so canvas.rotate would also
+    // double-rotate. Skip the outer rotation in both cases.
     final isCardinalTriangle = shape.shapeType == 'triangle' &&
         ((shape.rotation % (pi / 2)).abs() < 1e-3 ||
          ((shape.rotation % (pi / 2)) - (pi / 2)).abs() < 1e-3);
+    final isVertexTriangle = shape.shapeType == 'triangle' &&
+        shape.vertices.length == 6;
     canvas.save();
-    if (shape.rotation != 0 && !isCardinalTriangle) {
+    if (shape.rotation != 0 && !isCardinalTriangle && !isVertexTriangle) {
       final cx = (shape.x1 + shape.x2) / 2;
       final cy = (shape.y1 + shape.y2) / 2;
       canvas.translate(cx, cy);
@@ -1169,6 +1172,21 @@ class CanvasRenderEngine extends CustomPainter {
         _paintArrowHead(canvas, shape, strokePaint);
         break;
       case 'triangle': {
+        // Highest-priority path: oblique triangles store explicit
+        // vertices captured at recognition time. Render them directly —
+        // no rotation transform (the outer canvas.rotate guard above
+        // already skipped). Resizing remaps these via affine bbox→bbox.
+        if (shape.vertices.length == 6) {
+          final v = shape.vertices;
+          final tPath = Path()
+            ..moveTo(v[0], v[1])
+            ..lineTo(v[2], v[3])
+            ..lineTo(v[4], v[5])
+            ..close();
+          if (fillPaint != null) canvas.drawPath(tPath, fillPaint);
+          canvas.drawPath(tPath, strokePaint);
+          break;
+        }
         final tLeft = min(shape.x1, shape.x2);
         final tRight = max(shape.x1, shape.x2);
         final tTop = min(shape.y1, shape.y2);

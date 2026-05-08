@@ -244,6 +244,14 @@ class ShapeData with _$ShapeData {
     @Default(2.0) double strokeWidth,
     int? fillColor,
     @Default(0.0) double rotation,
+    // For oblique (non-cardinal) triangles: explicit absolute-page-space
+    // vertices [apexX, apexY, base1X, base1Y, base2X, base2Y]. When
+    // present the renderer draws this path directly; when empty it falls
+    // back to the canonical bbox-relative path with `rotation` applied.
+    // Cardinal triangles leave this empty (the bbox + rotation already
+    // describes them exactly via the cardinal-special-case render path).
+    // Stored on resize via affine bbox-to-bbox vertex remap.
+    @Default(<double>[]) List<double> vertices,
   }) = _ShapeData;
 
   factory ShapeData.fromJson(Map<String, dynamic> json) =>
