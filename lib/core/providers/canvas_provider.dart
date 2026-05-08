@@ -1739,16 +1739,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final veryStrongCircle = radialCV < 0.08;
 
     if (isCircleCandidate && (notPolygonRange || veryStrongCircle)) {
-      // Radius from bbox dimensions, NOT from `avgR`. avgR (mean
-      // point-to-bbox-centre distance) was biased by point density:
-      // when the user drew faster on one side of the circle (fewer
-      // samples) and slower on the other (denser samples), the dense
-      // side dragged the average down — so circles drawn starting
-      // from the right or top often came back too small. (width +
-      // height) / 4 is the bbox's mean half-diameter, which depends
-      // only on the extents and not on where the user started or how
-      // they paced the gesture.
-      final r = (width + height) / 4;
+      // Radius from the LARGER bbox half-axis. (width+height)/4 (the
+      // mean) silently shrunk slightly-oval circles below the user's
+      // visible stroke ("parte da piccola" when starting from top or
+      // bottom — natural hand-drawn circles aren't perfectly round and
+      // averaging biases the result down). Using max/2 ensures the
+      // recognized shape never visibly shrinks under the user's gesture
+      // and matches expectation regardless of starting point. The
+      // aspectRatio>0.60 gate above already filters genuine ovals away.
+      final r = max(width, height) / 2;
       return ShapeData(
         shapeType: 'circle',
         x1: cx - r, y1: cy - r,
@@ -1788,13 +1787,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final drawnAngle =
           atan2(apex.dy - centroid.dy, apex.dx - centroid.dx);
       double rotation = drawnAngle + pi / 2;
-      // Snap to cardinal direction if within ~11° — most users draw
-      // op-amps / pyramids pointing exactly along an axis, and the
-      // tiny natural skew shouldn't be preserved.
-      const cardinalSnap = 0.2;
+      // Normalize to [0, 2π) so the modular snap below is symmetric.
+      while (rotation < 0) { rotation += 2 * pi; }
+      while (rotation >= 2 * pi) { rotation -= 2 * pi; }
+      // Snap aggressively (within ~25°) to the nearest cardinal direction
+      // (0, π/2, π, 3π/2). Hand-drawn triangles vary much more than 11°
+      // (the previous threshold), and a slight tilt almost always means
+      // "the user wanted apex-up but drew at 18°", not "the user
+      // intended a 18° tilt". Cardinal results render cleanly inside
+      // the bbox without rotation transform (see _paintShape).
+      const cardinalSnap = 0.44;  // ~25°
       final nearestQuarter = (rotation / (pi / 2)).round() * (pi / 2);
       if ((rotation - nearestQuarter).abs() < cardinalSnap) {
-        rotation = nearestQuarter;
+        rotation = nearestQuarter % (2 * pi);
       }
       return ShapeData(
         shapeType: 'triangle',
@@ -7461,16 +7466,49 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       pageCount: repaired.document.pages.length,
     );
 
+    // ── Preserve strokes drawn during the pull window ──
+    // pending.pages was captured at pull-start. If the user kept drawing
+    // while the pull was in flight (slow Tailscale: 30-90s), state.pages[k]
+    // is now a NEW PageData instance while repaired.pages[k] is the
+    // pre-pull snapshot. Replacing pages directly silently overwrites
+    // those mid-pull strokes — active data loss exactly when the network
+    // is at its worst. Identity check against _lastSyncedPages tells us
+    // whether the user touched this page since last sync; if yes, keep
+    // local; if no, take remote.
+    final mergedPages = <String, PageData>{};
+    final newLastSynced = <String, PageData>{};
+    for (final entry in repaired.pages.entries) {
+      final k = entry.key;
+      final live = s.pages[k];
+      final lastSynced = _lastSyncedPages[k];
+      final userTouchedDuringPull =
+          live != null && !identical(live, lastSynced);
+      if (userTouchedDuringPull) {
+        // Keep local; do not advance _lastSyncedPages so save() will
+        // re-upload these strokes on the next cycle.
+        mergedPages[k] = live;
+        if (lastSynced != null) newLastSynced[k] = lastSynced;
+      } else {
+        mergedPages[k] = entry.value;
+        newLastSynced[k] = entry.value;
+      }
+    }
+    // Defense-in-depth: any local-only page (e.g. just-added by the user
+    // and not yet in the remote merge) must survive too.
+    for (final entry in s.pages.entries) {
+      mergedPages.putIfAbsent(entry.key, () => entry.value);
+    }
+
     state = s.copyWith(
       metadata: mergedMeta,
       document: repaired.document,
-      pages: repaired.pages,
+      pages: mergedPages,
       assetBytes: mergedAssets,
       currentPageIndex: newPageIndex,
       activeChapterId: mergedChapterId,
       clearPendingRemoteChanges: true,
     );
-    _lastSyncedPages = Map.of(repaired.pages);
+    _lastSyncedPages = newLastSynced;
     print('[Canvas] User accepted remote changes (landed on page $newPageIndex, '
         'chapter $mergedChapterId)');
 

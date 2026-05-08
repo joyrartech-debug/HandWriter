@@ -460,7 +460,13 @@ class WebDavService {
             print('[WebDAV] uploadFile verify: PROPFIND failed for '
                 '$remotePath: $verifyError — trusting PUT');
             _recordSuccess();
-            return response.headers['etag'];
+            // Nextcloud emits ETag wrapped in quotes per RFC 7232
+            // (e.g. `"abc123"`). Every other reader (getEtagFast,
+            // getEtag, page-etag harvest in syncDelta) strips them, so
+            // returning the raw header here causes _remoteMetaEtag to
+            // be persisted with quotes and mismatch every subsequent
+            // poll's dequoted ETag → forces slow PROPFIND path forever.
+            return response.headers['etag']?.replaceAll('"', '');
           }
           if (remoteSize != null && remoteSize != data.length) {
             // ignore: avoid_print
@@ -483,7 +489,7 @@ class WebDavService {
         }
 
         _recordSuccess();
-        return response.headers['etag'];
+        return response.headers['etag']?.replaceAll('"', '');
       } on WebDavSizeMismatchException {
         rethrow;
       } on WebDavException {

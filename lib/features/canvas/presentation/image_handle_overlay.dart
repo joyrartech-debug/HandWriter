@@ -425,62 +425,46 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
 
   void _handleCornerResize(String handle, Offset delta) {
     final b = widget.bounds;
-    final aspectRatio = b.width / b.height;
+    if (b.width <= 0 || b.height <= 0) return;
 
-    // Use the dominant drag axis to compute the other, preserving ratio
-    double dx = delta.dx;
-    double dy = delta.dy;
-    // Pick the larger movement and derive the other from aspect ratio
-    if (dx.abs() * b.height >= dy.abs() * b.width) {
-      dy = dx / aspectRatio;
-      // Invert for handles where axes oppose
-      if (handle == 'tl' || handle == 'bl') dy = -dy;
-      if (handle == 'tr' || handle == 'br') { /* same sign */ }
-      // Top handles: dy moves top edge
-      if (handle == 'tl') dy = -(dx.abs() / aspectRatio);
-      if (handle == 'tr') dy = -(dx.abs() / aspectRatio) * dx.sign * -1;
-    } else {
-      dx = dy * aspectRatio;
-      if (handle == 'tl' || handle == 'tr') dx = -dx;
-      if (handle == 'bl' || handle == 'br') { /* same sign */ }
-      if (handle == 'tl') dx = -(dy.abs() * aspectRatio);
-      if (handle == 'bl') dx = -(dy.abs() * aspectRatio) * dy.sign;
+    // Project the dragged-corner displacement onto the diagonal direction
+    // anchor→corner. This gives a smooth, monotonic scale factor: small
+    // wobbles produce small scale changes (no flicker), pure-axis drags
+    // grow at full speed (no 50% sluggishness), and opposite-direction
+    // jitter never cancels to zero (the previous diag-sum bug). Aspect
+    // ratio is preserved by definition because we scale along the
+    // diagonal of the current bounds.
+    late Offset anchor;
+    late Offset corner;
+    switch (handle) {
+      case 'tl': anchor = b.bottomRight; corner = b.topLeft;     break;
+      case 'tr': anchor = b.bottomLeft;  corner = b.topRight;    break;
+      case 'bl': anchor = b.topRight;    corner = b.bottomLeft;  break;
+      case 'br': anchor = b.topLeft;     corner = b.bottomRight; break;
+      default: return;
     }
+    final diag = corner - anchor;          // original diagonal vector
+    final diagLenSq = diag.dx * diag.dx + diag.dy * diag.dy;
+    if (diagLenSq <= 0) return;
 
-    // Simpler approach: use diagonal distance to scale uniformly
-    final diag = (delta.dx + delta.dy);
-    final scale = diag / (b.width + b.height);
+    // Where the corner would be after this tick's delta.
+    final newCorner = corner + delta;
+    final newVec = newCorner - anchor;
+    // Projection of new vector onto the original diagonal, expressed as
+    // a fraction of the original length: scale = (new·diag) / |diag|².
+    final scale = (newVec.dx * diag.dx + newVec.dy * diag.dy) / diagLenSq;
+    if (scale <= 0) return;  // would invert the rect
 
+    final newW = b.width * scale;
+    final newH = b.height * scale;
     Rect newBounds;
     switch (handle) {
-      case 'tl':
-        final newW = b.width - b.width * scale;
-        final newH = newW / aspectRatio;
-        newBounds = Rect.fromLTRB(b.right - newW, b.bottom - newH, b.right, b.bottom);
-        break;
-      case 'tr':
-        final dxVal = delta.dx - delta.dy;
-        final scaleTr = dxVal / (b.width + b.height);
-        final newW = b.width + b.width * scaleTr;
-        final newH = newW / aspectRatio;
-        newBounds = Rect.fromLTRB(b.left, b.bottom - newH, b.left + newW, b.bottom);
-        break;
-      case 'bl':
-        final dxVal = -delta.dx + delta.dy;
-        final scaleBl = dxVal / (b.width + b.height);
-        final newW = b.width + b.width * scaleBl;
-        final newH = newW / aspectRatio;
-        newBounds = Rect.fromLTRB(b.right - newW, b.top, b.right, b.top + newH);
-        break;
-      case 'br':
-        final newW = b.width + b.width * scale;
-        final newH = newW / aspectRatio;
-        newBounds = Rect.fromLTRB(b.left, b.top, b.left + newW, b.top + newH);
-        break;
-      default:
-        return;
+      case 'tl': newBounds = Rect.fromLTWH(anchor.dx - newW, anchor.dy - newH, newW, newH); break;
+      case 'tr': newBounds = Rect.fromLTWH(anchor.dx,        anchor.dy - newH, newW, newH); break;
+      case 'bl': newBounds = Rect.fromLTWH(anchor.dx - newW, anchor.dy,        newW, newH); break;
+      case 'br': newBounds = Rect.fromLTWH(anchor.dx,        anchor.dy,        newW, newH); break;
+      default: return;
     }
-    // Enforce minimum size
     if (newBounds.width > 20 && newBounds.height > 20) {
       widget.onResize(newBounds);
     }

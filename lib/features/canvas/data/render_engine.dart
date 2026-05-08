@@ -156,16 +156,24 @@ class CanvasRenderEngine extends CustomPainter {
         liveEl: liveEl,
       );
     } else {
-      // Idle / non-drag path: cache or rebuild the strokes-and-shapes
-      // Picture and replay it. Images are NOT in the picture (they're
-      // drawn inline via _paintImagesOnly below) so the cache key
-      // doesn't include imageCache, and asset decodes don't invalidate
-      // it.
-      final cached = _staticPictureCache.lookup(
-        pageData: pageData,
-        zoom: zoom,
-        lassoSelection: lassoSel,
-      );
+      // Idle / non-drag path: cache or rebuild the FULL static layers
+      // (strokes + images + shapes + text in zIndex order) into the
+      // Picture. Previously we split images out and painted them via
+      // _paintImagesOnly AFTER the cached picture — that always put
+      // images on top of strokes, ignoring zIndex (so a stroke drawn
+      // ON a PDF page rendered UNDER it). Including images in the
+      // cache restores correct layering. To avoid baking placeholders
+      // when assets are still decoding, we DON'T cache while any
+      // referenced image lacks bytes — once decoded, the next frame
+      // builds the cache and subsequent frames replay it.
+      final allImagesReady = _allImageAssetsDecoded();
+      final cached = allImagesReady
+          ? _staticPictureCache.lookup(
+              pageData: pageData,
+              zoom: zoom,
+              lassoSelection: lassoSel,
+            )
+          : null;
       if (cached != null) {
         canvas.drawPicture(cached);
       } else {
@@ -179,28 +187,23 @@ class CanvasRenderEngine extends CustomPainter {
           selScale,
           selCenter,
           hasTransform,
-          includeImages: false,
         );
         final pic = recorder.endRecording();
         canvas.drawPicture(pic);
-        _staticPictureCache.store(
-          pageData: pageData,
-          zoom: zoom,
-          lassoSelection: lassoSel,
-          picture: pic,
-        );
+        if (allImagesReady) {
+          _staticPictureCache.store(
+            pageData: pageData,
+            zoom: zoom,
+            lassoSelection: lassoSel,
+            picture: pic,
+          );
+        } else {
+          // Discard immediately — re-record next frame so freshly
+          // decoded images appear without waiting for an unrelated
+          // pageData identity change.
+          pic.dispose();
+        }
       }
-      // Draw images inline (cheap GPU op, uses live imageCache).
-      _paintImagesOnly(
-        canvas,
-        selectedIdsSet,
-        selDragOffset,
-        selRotation,
-        selScale,
-        selCenter,
-        hasTransform,
-        liveEl: liveEl,
-      );
     }
 
     // 4. Active stroke being drawn — fetch live from the getter when
@@ -376,79 +379,6 @@ class CanvasRenderEngine extends CustomPainter {
       image: (i) => Offset(i.data.x + i.data.width / 2, i.data.y + i.data.height / 2),
       shape: (s) => Offset((s.data.x1 + s.data.x2) / 2, (s.data.y1 + s.data.y2) / 2),
     );
-  }
-
-  /// Walk image elements only and draw them inline. Cheap (each call is
-  /// `canvas.drawImageRect`), and crucially uses the LIVE [imageCache] —
-  /// so image asset decodes don't have to invalidate the strokes/text/
-  /// shapes Picture cache. See [_paintStaticLayers] for the rationale.
-  void _paintImagesOnly(
-    Canvas canvas,
-    Set<String> selectedIdsSet,
-    Offset selDragOffset,
-    double selRotation,
-    double selScale,
-    Offset selCenter,
-    bool hasTransform, {
-    ({
-      String elementId,
-      Offset dragOffset,
-      double rotationDelta,
-      double scaleW,
-      double scaleH,
-    })? liveEl,
-  }) {
-    // Fast path: most pages have 0 images. Cache the answer on
-    // pageData via Expando — without the cache this `.any` walks all
-    // 200 elements with 4 closure allocations per `.map(...)` call
-    // (~800 closures per paint just to learn there are no images).
-    final cachedHasImages = _hasImageCache[pageData];
-    final bool hasAnyImage;
-    if (cachedHasImages != null) {
-      hasAnyImage = cachedHasImages;
-    } else {
-      hasAnyImage = pageData.layers.content.any((e) =>
-          e.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false));
-      _hasImageCache[pageData] = hasAnyImage;
-    }
-    if (!hasAnyImage) return;
-    final sortedContent = _getSortedContent(pageData.layers.content);
-    for (final element in sortedContent) {
-      final isImage = element.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false);
-      if (!isImage) continue;
-      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
-      final isSelected = selectedIdsSet.contains(id);
-
-      final isLiveTarget = liveEl != null && liveEl.elementId == id;
-
-      if (isSelected && hasTransform) {
-        canvas.save();
-        canvas.translate(selDragOffset.dx, selDragOffset.dy);
-        canvas.translate(selCenter.dx, selCenter.dy);
-        if (selScale != 1.0) canvas.scale(selScale);
-        if (selRotation != 0.0) canvas.rotate(selRotation);
-        canvas.translate(-selCenter.dx, -selCenter.dy);
-      }
-      if (isLiveTarget) {
-        canvas.save();
-        final c = _elementCenter(element);
-        canvas.translate(liveEl.dragOffset.dx, liveEl.dragOffset.dy);
-        canvas.translate(c.dx, c.dy);
-        if (liveEl.rotationDelta != 0.0) canvas.rotate(liveEl.rotationDelta);
-        if (liveEl.scaleW != 1.0 || liveEl.scaleH != 1.0) {
-          canvas.scale(liveEl.scaleW, liveEl.scaleH);
-        }
-        canvas.translate(-c.dx, -c.dy);
-      }
-      element.map(
-        stroke: (_) {},
-        text: (_) {},
-        image: (e) => _paintImage(canvas, e.data),
-        shape: (_) {},
-      );
-      if (isLiveTarget) canvas.restore();
-      if (isSelected && hasTransform) canvas.restore();
-    }
   }
 
   /// Paint the page content without zoom/pan transform.
@@ -1202,8 +1132,16 @@ class CanvasRenderEngine extends CustomPainter {
       fillPaint = Paint()..color = Color(shape.fillColor!)..style = PaintingStyle.fill;
     }
 
+    // For triangles with a CARDINAL rotation (multiples of π/2) we
+    // bake the apex direction into the path inside the 'triangle' case
+    // below — applying canvas.rotate here would double-rotate. Detect
+    // and skip the outer rotation in that case. Non-cardinal rotations
+    // still go through the standard rotate.
+    final isCardinalTriangle = shape.shapeType == 'triangle' &&
+        ((shape.rotation % (pi / 2)).abs() < 1e-3 ||
+         ((shape.rotation % (pi / 2)) - (pi / 2)).abs() < 1e-3);
     canvas.save();
-    if (shape.rotation != 0) {
+    if (shape.rotation != 0 && !isCardinalTriangle) {
       final cx = (shape.x1 + shape.x2) / 2;
       final cy = (shape.y1 + shape.y2) / 2;
       canvas.translate(cx, cy);
@@ -1230,19 +1168,66 @@ class CanvasRenderEngine extends CustomPainter {
         canvas.drawLine(Offset(shape.x1, shape.y1), Offset(shape.x2, shape.y2), strokePaint);
         _paintArrowHead(canvas, shape, strokePaint);
         break;
-      case 'triangle':
+      case 'triangle': {
         final tLeft = min(shape.x1, shape.x2);
         final tRight = max(shape.x1, shape.x2);
         final tTop = min(shape.y1, shape.y2);
         final tBottom = max(shape.y1, shape.y2);
-        final tPath = Path()
-          ..moveTo((tLeft + tRight) / 2, tTop)
-          ..lineTo(tLeft, tBottom)
-          ..lineTo(tRight, tBottom)
-          ..close();
-        if (fillPaint != null) canvas.drawPath(tPath, fillPaint);
-        canvas.drawPath(tPath, strokePaint);
+        final tCx = (tLeft + tRight) / 2;
+        final tCy = (tTop + tBottom) / 2;
+        // For cardinal apex directions (rotation ≈ 0, π/2, π, 3π/2) we
+        // pre-compute the apex/base inside the bbox directly. This
+        // avoids the previous behaviour where canvas.rotate(π/2) around
+        // the bbox center placed the apex at distance H/2 to the right
+        // of center — outside the bbox when H > W — and visually
+        // distorted the triangle on resize. For non-cardinal rotations
+        // (rare; user drew tilted apex outside the snap window) fall
+        // back to the rotation transform.
+        final isCardinal =
+            (shape.rotation % (pi / 2)).abs() < 1e-3 ||
+            ((shape.rotation % (pi / 2)) - (pi / 2)).abs() < 1e-3;
+        if (isCardinal) {
+          // Quadrant: 0=up, 1=right, 2=down, 3=left
+          var q = ((shape.rotation / (pi / 2)).round()) % 4;
+          if (q < 0) q += 4;
+          final tPath = Path();
+          switch (q) {
+            case 0: // apex up
+              tPath..moveTo(tCx, tTop)
+                   ..lineTo(tLeft, tBottom)
+                   ..lineTo(tRight, tBottom)..close();
+              break;
+            case 1: // apex right
+              tPath..moveTo(tRight, tCy)
+                   ..lineTo(tLeft, tTop)
+                   ..lineTo(tLeft, tBottom)..close();
+              break;
+            case 2: // apex down
+              tPath..moveTo(tCx, tBottom)
+                   ..lineTo(tRight, tTop)
+                   ..lineTo(tLeft, tTop)..close();
+              break;
+            case 3: // apex left
+              tPath..moveTo(tLeft, tCy)
+                   ..lineTo(tRight, tBottom)
+                   ..lineTo(tRight, tTop)..close();
+              break;
+          }
+          if (fillPaint != null) canvas.drawPath(tPath, fillPaint);
+          canvas.drawPath(tPath, strokePaint);
+        } else {
+          // Non-cardinal: the outer canvas.rotate handles the apex
+          // direction; render the canonical apex-up triangle.
+          final tPath = Path()
+            ..moveTo(tCx, tTop)
+            ..lineTo(tLeft, tBottom)
+            ..lineTo(tRight, tBottom)
+            ..close();
+          if (fillPaint != null) canvas.drawPath(tPath, fillPaint);
+          canvas.drawPath(tPath, strokePaint);
+        }
         break;
+      }
       case 'rhombus':
         final rLeft = min(shape.x1, shape.x2);
         final rRight = max(shape.x1, shape.x2);
@@ -1570,6 +1555,24 @@ class CanvasRenderEngine extends CustomPainter {
         d += dashLen + gapLen;
       }
     }
+  }
+
+  /// True iff every ImageElement on this page has a decoded ui.Image in
+  /// imageCache. Used by the picture-cache build to decide whether to
+  /// store the recorded picture: storing while images are still decoding
+  /// would bake placeholders that only refresh on the next pageData
+  /// identity change. A page with zero images returns true (nothing to
+  /// wait for).
+  bool _allImageAssetsDecoded() {
+    if (_hasImageCache[pageData] == false) return true;
+    for (final el in pageData.layers.content) {
+      if (el is ImageElement) {
+        final p = el.data.assetPath;
+        if (p.isEmpty) continue;
+        if (imageCache[p] == null) return false;
+      }
+    }
+    return true;
   }
 
   // Cached sort to avoid O(n log n) per paint frame

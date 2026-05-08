@@ -669,7 +669,15 @@ class _AdvancedSection extends ConsumerWidget {
       // delta diff from a clean slate (no stale ETags blocking refresh).
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('delta_meta_etag_$notebookId');
-      await prefs.remove('last_page_etags_$notebookId');
+      // Must match _pageEtagsPrefsKey in canvas_provider.dart — previously
+      // wrote 'last_page_etags_…' which silently no-op'd, leaving the user's
+      // last-resort recovery only half-effective.
+      await prefs.remove('page_etags_$notebookId');
+      // Also drain the persistent delete queue so a stale backlog from the
+      // wedged session doesn't immediately re-poison the freshly reloaded
+      // state.
+      await prefs.remove('pending_page_deletes_$notebookId');
+      await prefs.remove('pending_asset_deletes_$notebookId');
 
       // Refresh the library card to reflect the new pageCount immediately.
       await ref.read(notebookListProvider.notifier).refresh();
