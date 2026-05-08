@@ -345,8 +345,14 @@ class WebDavService {
         if (data.length >= _uploadVerifyMin) {
           int? remoteSize;
           try {
+            // 30 s default verify timeout (was 8 s, which on a Tailscale
+            // relayed link silently bailed on every PUT — every upload
+            // came back as "trusting PUT" without ever running the
+            // size check the verification was added for). 30 s is
+            // generous enough to ride out RTT spikes while still
+            // catching a stuck server.
             remoteSize = await getContentLength(remotePath)
-                .timeout(const Duration(seconds: 8));
+                .timeout(const Duration(seconds: 30));
           } catch (e) {
             // Verification itself failed (network blip on the PROPFIND).
             // Treat as a soft warning and trust the PUT — re-running the

@@ -712,7 +712,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (s.imageCache.containsKey(assetId)) return;
     if (_onDemandDecodeQueued.contains(assetId)) return;
     final bytes = s.assetBytes[assetId];
-    if (bytes == null) return;
+    if (bytes == null) {
+      // The asset is referenced by a page but its bytes aren't in
+      // memory — typically because the server never had them (404 on
+      // GET) or the .ncnote zip we downloaded was incomplete. Silently
+      // skipping leaves the user with blank thumbnails and no clue
+      // why; mark as corrupt so the broken-image overlay appears with
+      // the "re-import the source PDF/image" tooltip.
+      if (_corruptAssetIds.add(assetId)) {
+        // ignore: avoid_print
+        print('[Canvas] Asset $assetId has no bytes available — '
+            'likely missing on server (404) or never downloaded. '
+            'Re-import the source PDF/image to recover.');
+        // Bump state so widgets that look at corruptAssetIds rebuild.
+        state = s.copyWith(imageCache: s.imageCache);
+      }
+      return;
+    }
     _onDemandDecodeQueued.add(assetId);
     () async {
       try {
