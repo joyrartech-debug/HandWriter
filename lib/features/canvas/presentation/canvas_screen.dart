@@ -2453,7 +2453,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             children: [
               Column(
                 children: [
-                  HwEditorTopBar(
+                  ValueListenableBuilder<bool>(
+                    valueListenable: notifier.hasSyncFailure,
+                    builder: (_, syncFailing, __) {
+                      // Honest state: conflict > offline > pending > ok.
+                      // The previous binary "isDirty ? pending : ok" hid
+                      // 20-minute Tailscale flaps under the green cloud.
+                      final HwSyncState syncState;
+                      if (canvasState.pendingConflicts.isNotEmpty) {
+                        syncState = HwSyncState.conflict;
+                      } else if (syncFailing) {
+                        syncState = HwSyncState.offline;
+                      } else if (canvasState.isDirty) {
+                        syncState = HwSyncState.pending;
+                      } else {
+                        syncState = HwSyncState.ok;
+                      }
+                      return HwEditorTopBar(
                     notebookTitle: canvasState.metadata.title,
                     coverColor: Color(canvasState.metadata.coverColor),
                     currentPage: canvasState.currentPageIndex + 1,
@@ -2461,9 +2477,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                     dirty: canvasState.isDirty,
                     canUndo: notifier.canUndo,
                     canRedo: notifier.canRedo,
-                    syncState: canvasState.isDirty
-                        ? HwSyncState.pending
-                        : HwSyncState.ok,
+                    syncState: syncState,
                     onBack: () async {
                       await _onWillPop();
                     },
@@ -2474,6 +2488,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                         _showSymbolsDialog(_visibleCenterPagePos(canvasState)),
                     onExportTap: () => _showExportSheet(),
                     onMoreTap: () => _showMoreSheet(canvasState),
+                      );
+                    },
                   ),
                   Expanded(
                     child: GestureDetector(

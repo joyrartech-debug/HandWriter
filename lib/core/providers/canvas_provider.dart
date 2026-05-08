@@ -473,6 +473,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
     // Initialize delta sync tracking
     _disposed = false;
+    _consecutiveSyncFailures = 0;
+    hasSyncFailure.value = false;
     _lastSyncedPages = Map.of(repaired.pages);
     _pageJsonCache.clear();
     _dirtyPageFileNames.clear();
@@ -1049,10 +1051,33 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   final Set<String> _pendingPageDeletes = <String>{};
   final Set<String> _pendingAssetDeletes = <String>{};
 
+  /// Captured metadata.json bytes when [SyncService.syncDelta] reported
+  /// a half-commit ([MetadataCommitFailedException] — pages + document
+  /// landed on the server but the metadata commit-marker upload failed).
+  /// Replayed by [_retryPendingMetaCommit] on a periodic timer until
+  /// the upload succeeds. Without this, other devices would fast-path-
+  /// skip on the unchanged meta-ETag and never see the new content.
+  /// Persisted base64 in SharedPreferences so a process restart doesn't
+  /// drop the obligation.
+  Uint8List? _pendingMetaCommitBytes;
+  Timer? _pendingMetaCommitTimer;
+
+  /// True when the most recent remote sync attempt(s) have failed
+  /// OR there's a pending metadata-commit retry. Surfaced to the UI
+  /// so the top-bar pill can show OFFLINE instead of the misleading
+  /// "isDirty ? pending : ok" binary that hid 20-minute Tailscale
+  /// flaps under a green cloud icon. The UI combines this with
+  /// state.isDirty and state.pendingConflicts to pick the final
+  /// HwSyncState (conflict > offline > pending > ok).
+  final ValueNotifier<bool> hasSyncFailure = ValueNotifier<bool>(false);
+  int _consecutiveSyncFailures = 0;
+
   static String _pendingPageDeletesPrefsKey(String notebookId) =>
       'pending_page_deletes_$notebookId';
   static String _pendingAssetDeletesPrefsKey(String notebookId) =>
       'pending_asset_deletes_$notebookId';
+  static String _pendingMetaCommitPrefsKey(String notebookId) =>
+      'pending_meta_commit_$notebookId';
 
   Future<void> _loadPendingDeletes(String notebookId) async {
     try {
@@ -1070,6 +1095,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             '${_pendingPageDeletes.length} pages, '
             '${_pendingAssetDeletes.length} assets');
       }
+      // Pending metadata commit: a previous run may have left the server
+      // half-committed (pages + document landed but metadata.json
+      // upload failed). Pick up where we left off — retry every minute
+      // until it lands. Other devices' meta-ETag won't advance until
+      // this commits, so cross-device sync is stuck without it.
+      final metaB64 = prefs.getString(_pendingMetaCommitPrefsKey(notebookId));
+      if (metaB64 != null && metaB64.isNotEmpty) {
+        try {
+          _pendingMetaCommitBytes = base64Decode(metaB64);
+          debugPrint('[Canvas] Loaded pending metadata commit: '
+              '${_pendingMetaCommitBytes!.length} bytes');
+          _scheduleMetaCommitRetry();
+        } catch (_) {
+          await prefs.remove(_pendingMetaCommitPrefsKey(notebookId));
+        }
+      }
     } catch (_) {}
   }
 
@@ -1083,6 +1124,73 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           _pendingAssetDeletesPrefsKey(notebookId),
           _pendingAssetDeletes.toList());
     } catch (_) {}
+  }
+
+  Future<void> _persistPendingMetaCommit(
+      String notebookId, Uint8List? bytes) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (bytes == null) {
+        await prefs.remove(_pendingMetaCommitPrefsKey(notebookId));
+      } else {
+        await prefs.setString(
+            _pendingMetaCommitPrefsKey(notebookId), base64Encode(bytes));
+      }
+    } catch (_) {}
+  }
+
+  void _recomputeSyncStatus() {
+    final next = _consecutiveSyncFailures > 0 ||
+        _pendingMetaCommitBytes != null;
+    if (hasSyncFailure.value != next) hasSyncFailure.value = next;
+  }
+
+  /// Schedule a periodic retry of the pending metadata.json commit.
+  /// Idempotent: extending an active timer is a no-op. Cancelled when
+  /// the commit succeeds or the notebook closes.
+  void _scheduleMetaCommitRetry() {
+    if (_pendingMetaCommitTimer != null) return;
+    _pendingMetaCommitTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _retryPendingMetaCommit(),
+    );
+    // Also try once immediately so a fresh failure doesn't wait a
+    // full minute before its first retry.
+    Future.microtask(_retryPendingMetaCommit);
+  }
+
+  Future<void> _retryPendingMetaCommit() async {
+    final bytes = _pendingMetaCommitBytes;
+    if (bytes == null) {
+      _pendingMetaCommitTimer?.cancel();
+      _pendingMetaCommitTimer = null;
+      return;
+    }
+    if (state == null || _disposed) return;
+    final notebookId = state!.metadata.id;
+    final syncService = _ref.read(syncServiceProvider);
+    if (syncService == null) return;
+    try {
+      final etag = await syncService.replayMetadataCommit(
+        notebookId: notebookId,
+        metadataBytes: bytes,
+      );
+      // Success — clear the pending state.
+      _pendingMetaCommitBytes = null;
+      _pendingMetaCommitTimer?.cancel();
+      _pendingMetaCommitTimer = null;
+      await _persistPendingMetaCommit(notebookId, null);
+      if (etag != null && etag.isNotEmpty) {
+        _remoteMetaEtag = etag;
+        await _persistRemoteMetaEtag(notebookId);
+      }
+      _recomputeSyncStatus();
+      print('[Canvas] Pending metadata commit replayed successfully '
+          '(etag=$etag) — server is consistent again');
+    } catch (e) {
+      // Stay queued; next tick retries.
+      debugPrint('[Canvas] Pending metadata commit retry failed: $e');
+    }
   }
 
   /// Persist [_lastPageEtags] to disk. Called after every pull/save cycle
@@ -1196,6 +1304,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _disposed = true;
     _isPulling = false;
     isPullingFromRemote.value = false;
+    _pendingMetaCommitTimer?.cancel();
+    _pendingMetaCommitTimer = null;
     _forceReleaseSyncLock();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -5906,6 +6016,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _pendingRemoteSave = () async {
       try {
         await remoteSyncFuture;
+        // Remote commit succeeded — clear the failure streak so the
+        // pill flips back from offline to pending/ok.
+        if (_consecutiveSyncFailures > 0) {
+          _consecutiveSyncFailures = 0;
+          _recomputeSyncStatus();
+        }
         // Remote commit succeeded — NOW it's safe to advance the dirty
         // snapshot. If we do this optimistically (before remote returns),
         // a failed upload leaves _lastSyncedPages matching state.pages,
@@ -5945,8 +6061,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           debugPrint('[Canvas] Local save errored, skipping ETag '
               'persist: $e');
         }
+      } on MetadataCommitFailedException catch (e) {
+        // Pages + document landed on the server, only metadata.json
+        // failed. Persist the bytes for periodic retry — without this,
+        // OTHER devices see the unchanged meta-ETag, fast-path-skip,
+        // and never pull the new pages until something else touches
+        // metadata. Local _lastSyncedPages is intentionally NOT
+        // advanced: the next save will retry the full chain, but the
+        // metadata-only retry timer typically wins first.
+        debugPrint('[Canvas] Remote sync: pages+document committed but '
+            'metadata.json failed — staging for replay: $e');
+        _pendingMetaCommitBytes = e.metadataBytes;
+        await _persistPendingMetaCommit(updatedMeta.id, e.metadataBytes);
+        _scheduleMetaCommitRetry();
+        _consecutiveSyncFailures++;
+        _recomputeSyncStatus();
+        try {
+          await fileService.markNotebookDirty(updatedMeta.id);
+        } catch (_) {}
       } catch (e) {
         debugPrint('[Canvas] Remote sync deferred (offline?): $e');
+        _consecutiveSyncFailures++;
+        _recomputeSyncStatus();
         // Leave _lastSyncedPages and _dirtyAssetKeys untouched so the
         // failed pages are detected as dirty again on the next save.
         try {
@@ -6143,6 +6279,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void dispose() {
     _pullTimer?.cancel();
     _pullTimer = null;
+    _pendingMetaCommitTimer?.cancel();
+    _pendingMetaCommitTimer = null;
     _disposed = true;
     // Release ui.Image textures before super.dispose() tears down the
     // Riverpod state (which would otherwise drop references without
@@ -6155,6 +6293,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // attached callbacks on hot-restart / provider container teardown.
     try { isPullingFromRemote.dispose(); } catch (_) {}
     try { pullProgress.dispose(); } catch (_) {}
+    try { hasSyncFailure.dispose(); } catch (_) {}
     super.dispose();
   }
 

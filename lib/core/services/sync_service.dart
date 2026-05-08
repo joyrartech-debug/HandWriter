@@ -750,11 +750,28 @@ class SyncService {
         timeoutSeconds: dt, criticalVerify: true);
 
     // ── Phase 2: Upload metadata.json LAST (commit marker) ──
+    // CRITICAL: pages + document are ALREADY committed at this point.
+    // If metadata.json fails here, the server is half-committed: other
+    // devices fast-path-skip on the unchanged meta-ETag and never see
+    // the new pages. We surface the failure with the metadata bytes so
+    // the caller can persist them and replay metadata-only until it
+    // lands. Prior behaviour swallowed the throw at the outer catch
+    // and only retried on the next user save — leaving cross-device
+    // sync indefinitely stuck.
     final metaBytes = Uint8List.fromList(
       utf8.encode(jsonEncode(metadata.toJson())),
     );
-    final metaEtag = await _webdav.uploadFile('${dir}metadata.json', metaBytes,
-        timeoutSeconds: dt, criticalVerify: true);
+    String? metaEtag;
+    try {
+      metaEtag = await _webdav.uploadFile('${dir}metadata.json', metaBytes,
+          timeoutSeconds: dt, criticalVerify: true);
+    } catch (e) {
+      throw MetadataCommitFailedException(
+        notebookId: notebookId,
+        metadataBytes: metaBytes,
+        cause: e,
+      );
+    }
 
     // Harvest per-page ETags from successful PUT responses.
     final pageEtags = <String, String>{};
@@ -777,6 +794,25 @@ class SyncService {
       pageEtags: pageEtags,
       failedPageDeletes: failedPageDeletes,
       failedAssetDeletes: failedAssetDeletes,
+    );
+  }
+
+  /// Replay-only metadata.json upload, used to recover from a
+  /// half-committed delta where pages + document.json landed on the
+  /// server but [syncDelta]'s final metadata PUT failed
+  /// ([MetadataCommitFailedException]). Returns the new ETag on
+  /// success, throws on failure (caller keeps retrying). Idempotent:
+  /// re-uploading identical bytes is harmless.
+  Future<String?> replayMetadataCommit({
+    required String notebookId,
+    required Uint8List metadataBytes,
+  }) async {
+    final dir = _deltaDir(notebookId);
+    return await _webdav.uploadFile(
+      '${dir}metadata.json',
+      metadataBytes,
+      timeoutSeconds: AppConfig.webdavDeltaTimeoutSeconds,
+      criticalVerify: true,
     );
   }
 
@@ -1222,6 +1258,28 @@ class CorruptedArchiveException implements Exception {
 
   @override
   String toString() => 'CorruptedArchiveException: $message';
+}
+
+/// Thrown by [SyncService.syncDelta] when pages + document.json have
+/// already been committed to the server but metadata.json (the commit
+/// marker) failed to upload. The server is half-committed at this
+/// moment: cross-device readers fast-path-skip on the unchanged
+/// meta-ETag and miss the new pages. Caller MUST persist
+/// [metadataBytes] and replay the metadata.json upload until it lands.
+class MetadataCommitFailedException implements Exception {
+  final String notebookId;
+  final Uint8List metadataBytes;
+  final Object cause;
+
+  MetadataCommitFailedException({
+    required this.notebookId,
+    required this.metadataBytes,
+    required this.cause,
+  });
+
+  @override
+  String toString() =>
+      'MetadataCommitFailedException(nb=$notebookId, bytes=${metadataBytes.length}, cause=$cause)';
 }
 
 /// Top-level entry point for [SyncService.extractAllPagesIsolated].
