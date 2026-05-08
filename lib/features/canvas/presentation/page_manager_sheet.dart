@@ -1090,16 +1090,14 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
     // whose asset has been flagged as un-decodable (typically due to
     // the historic 1024-aligned server-truncation bug).
     bool hasCorruptAsset = false;
-    if (page != null) {
-      final corrupt = ref
-          .read(canvasProvider.notifier)
-          .corruptAssetIds;
-      if (corrupt.isNotEmpty) {
-        for (final el in page.layers.content) {
-          if (el is ImageElement && corrupt.contains(el.data.assetPath)) {
-            hasCorruptAsset = true;
-            break;
-          }
+    final corruptAssetIds = page != null
+        ? ref.read(canvasProvider.notifier).corruptAssetIds
+        : const <String>{};
+    if (page != null && corruptAssetIds.isNotEmpty) {
+      for (final el in page.layers.content) {
+        if (el is ImageElement && corruptAssetIds.contains(el.data.assetPath)) {
+          hasCorruptAsset = true;
+          break;
         }
       }
     }
@@ -1138,6 +1136,12 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
                         zoom: 1.0,
                         panOffset: Offset.zero,
                         imageCache: state.imageCache,
+                        // Without this, the picture cache stays
+                        // disabled forever for thumbnails of pages
+                        // that have any corrupt asset → the grid
+                        // pays the full re-record cost on every thumb
+                        // repaint while scrolling.
+                        corruptAssetIds: corruptAssetIds,
                       ),
                       size: Size.infinite,
                     ),

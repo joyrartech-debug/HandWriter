@@ -383,8 +383,19 @@ class CanvasState {
   final Map<String, Uint8List> assetBytes;
   final CanvasClipboard? clipboard;
   final List<SymbolLibrary> symbolLibraries;
-  // Legacy flat symbols list — computed for backward compatibility
-  List<ReusableSymbol> get symbols => symbolLibraries.expand((l) => l.symbols).toList();
+  // Legacy flat symbols list — computed for backward compatibility.
+  // Memoised by symbolLibraries identity via Expando (same trick as
+  // _filteredIndicesCache below). Without this, every read in build
+  // closures (popup-menu condition, context menu) re-walked all
+  // libraries × symbols and allocated a fresh list.
+  static final Expando<List<ReusableSymbol>> _symbolsCache = Expando();
+  List<ReusableSymbol> get symbols {
+    final cached = _symbolsCache[symbolLibraries];
+    if (cached != null) return cached;
+    final list = symbolLibraries.expand((l) => l.symbols).toList(growable: false);
+    _symbolsCache[symbolLibraries] = list;
+    return list;
+  }
   // Interactive shape recognition: holds recognized shape while user adjusts
   final ShapeData? recognizedShape;
   final bool isAdjustingRecognized;

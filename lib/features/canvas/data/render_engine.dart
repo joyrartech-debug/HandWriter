@@ -55,6 +55,14 @@ class CanvasRenderEngine extends CustomPainter {
   final double zoom;
   final Offset panOffset;
   final Map<String, ui.Image> imageCache;
+  /// Asset ids the provider has flagged as corrupt (decode failed or
+  /// bytes missing on server). For picture-cache purposes treat these
+  /// as "decoded": their placeholder will paint, no live update is
+  /// expected, so the cached picture is stable. Without this set the
+  /// _allImageAssetsDecoded() check would return false forever for any
+  /// page with a single corrupt asset → cache never stored → every
+  /// frame rebuilds the static layers (50-100× CPU regression).
+  final Set<String> corruptAssetIds;
 
   CanvasRenderEngine({
     required this.pageData,
@@ -74,6 +82,7 @@ class CanvasRenderEngine extends CustomPainter {
     this.zoom = 1.0,
     this.panOffset = Offset.zero,
     this.imageCache = const {},
+    this.corruptAssetIds = const <String>{},
     Listenable? repaintNotifier,
   }) : super(repaint: repaintNotifier);
 
@@ -117,9 +126,15 @@ class CanvasRenderEngine extends CustomPainter {
     // adaptive-interpolation segment count is zoom-dependent —
     // recording at 1× and replaying at 4× would look polygonal).
     final lassoSel = lassoSelection;
-    final selectedIdsSet = lassoSel != null
-        ? lassoSel.selectedIds.toSet()
-        : const <String>{};
+    // selectedIdsSet is only consumed by the cache-rebuild / live-
+    // transform paths (_paintStaticLayers needs it for selection
+    // highlighting + transform target). On cache-hit we skip the
+    // O(N) HashSet allocation entirely.
+    Set<String>? lazySelectedIds;
+    Set<String> selectedIdsSet() {
+      if (lassoSel == null) return const <String>{};
+      return lazySelectedIds ??= lassoSel.selectedIds.toSet();
+    }
     // Resolve live transform override if present — bypasses Riverpod for
     // per-frame drag/rotate/scale updates.
     final liveTr = liveLassoTransform?.call();
@@ -147,7 +162,7 @@ class CanvasRenderEngine extends CustomPainter {
     if (hasTransform || hasLiveEl) {
       _paintStaticLayers(
         canvas,
-        selectedIdsSet,
+        selectedIdsSet(),
         selDragOffset,
         selRotation,
         selScale,
@@ -181,7 +196,7 @@ class CanvasRenderEngine extends CustomPainter {
         final pictureCanvas = Canvas(recorder);
         _paintStaticLayers(
           pictureCanvas,
-          selectedIdsSet,
+          selectedIdsSet(),
           selDragOffset,
           selRotation,
           selScale,
@@ -261,15 +276,10 @@ class CanvasRenderEngine extends CustomPainter {
   /// Layers 0-3 of [paint]: shadow, background, border, content. Recorded
   /// into a `ui.Picture` once per (pageData, zoom-bucket, lassoSelection)
   /// and replayed by subsequent paint calls — see [_staticPictureCache].
-  ///
-  /// IMPORTANT: when [includeImages] is false, image elements are
-  /// SKIPPED. Images are rendered inline in [paint] (see
-  /// [_paintImagesOnly]) every frame using the live [imageCache], so
-  /// the picture cache key does not need to include [imageCache] —
-  /// asset decodes don't invalidate the strokes/text/shapes that
-  /// dominate paint cost. Drawing a `ui.Image` is a cheap GPU op
-  /// (`canvas.drawImageRect`), so doing it inline costs essentially
-  /// nothing while letting strokes stay cached across decodes.
+  /// Images are baked into the cached picture at their proper zIndex
+  /// (no live update path), so the cache lookup is gated on
+  /// [_allImageAssetsDecoded] — corrupt assets count as decoded so a
+  /// single broken PNG doesn't permanently disable the cache.
   void _paintStaticLayers(
     Canvas canvas,
     Set<String> selectedIdsSet,
@@ -278,7 +288,6 @@ class CanvasRenderEngine extends CustomPainter {
     double selScale,
     Offset selCenter,
     bool hasTransform, {
-    bool includeImages = true,
     ({
       String elementId,
       Offset dragOffset,
@@ -310,12 +319,22 @@ class CanvasRenderEngine extends CustomPainter {
     final sortedContent = _getSortedContent(pageData.layers.content);
 
     for (final element in sortedContent) {
-      final id = element.map(stroke: (e) => e.id, text: (e) => e.id, image: (e) => e.id, shape: (e) => e.id);
+      // Type-discriminate via `is` (zero-alloc) instead of `.map(...)`
+      // — the freezed-generated `map(stroke:..., text:..., image:..., shape:...)`
+      // allocates 4 closure objects per call. With 200 elements × 2
+      // closure-quartets per iteration that was 1 600 needless
+      // allocations per cache-miss frame, all immediately dead.
+      final String id;
+      if (element is StrokeElement) {
+        id = element.id;
+      } else if (element is TextElement) {
+        id = element.id;
+      } else if (element is ImageElement) {
+        id = element.id;
+      } else {
+        id = (element as ShapeElement).id;
+      }
       final isSelected = selectedIdsSet.contains(id);
-      // Skip images when this draw is going into the cached Picture —
-      // they're handled by _paintImagesOnly with the live imageCache.
-      final isImage = element.map(stroke: (_) => false, text: (_) => false, image: (_) => true, shape: (_) => false);
-      if (!includeImages && isImage) continue;
 
       final isLiveTarget = liveEl != null && liveEl.elementId == id;
 
@@ -378,46 +397,56 @@ class CanvasRenderEngine extends CustomPainter {
   }
 
   /// Geometric center of an element on the page (used as the rotation /
-  /// scale anchor for the single-element live transform).
+  /// scale anchor for the single-element live transform). Hot-path:
+  /// called every paint frame during a drag/rotate. Use is-checks
+  /// (zero-alloc) instead of `.map(...)` (4 closures per call).
   Offset _elementCenter(ContentElement element) {
-    return element.map(
-      stroke: (s) {
-        if (s.data.points.isEmpty) return Offset.zero;
-        double minX = s.data.points.first.x, maxX = minX;
-        double minY = s.data.points.first.y, maxY = minY;
-        for (final p in s.data.points) {
-          if (p.x < minX) minX = p.x;
-          if (p.x > maxX) maxX = p.x;
-          if (p.y < minY) minY = p.y;
-          if (p.y > maxY) maxY = p.y;
-        }
-        return Offset((minX + maxX) / 2, (minY + maxY) / 2);
-      },
-      text: (t) => Offset(t.data.x + t.data.width / 2, t.data.y + t.data.height / 2),
-      image: (i) => Offset(i.data.x + i.data.width / 2, i.data.y + i.data.height / 2),
-      shape: (s) => Offset((s.data.x1 + s.data.x2) / 2, (s.data.y1 + s.data.y2) / 2),
-    );
+    if (element is StrokeElement) {
+      final pts = element.data.points;
+      if (pts.isEmpty) return Offset.zero;
+      double minX = pts.first.x, maxX = minX;
+      double minY = pts.first.y, maxY = minY;
+      for (final p in pts) {
+        if (p.x < minX) minX = p.x;
+        if (p.x > maxX) maxX = p.x;
+        if (p.y < minY) minY = p.y;
+        if (p.y > maxY) maxY = p.y;
+      }
+      return Offset((minX + maxX) / 2, (minY + maxY) / 2);
+    } else if (element is TextElement) {
+      final t = element.data;
+      return Offset(t.x + t.width / 2, t.y + t.height / 2);
+    } else if (element is ImageElement) {
+      final i = element.data;
+      return Offset(i.x + i.width / 2, i.y + i.height / 2);
+    } else {
+      final s = (element as ShapeElement).data;
+      return Offset((s.x1 + s.x2) / 2, (s.y1 + s.y2) / 2);
+    }
   }
 
   /// Top-left corner of an element on the page. Used as the scale anchor
   /// for live resize so the rendered shape keeps its top-left at
   /// element.tl + dragOffset (matching the resize handle's bbox math).
   Offset _elementTopLeft(ContentElement element) {
-    return element.map(
-      stroke: (s) {
-        if (s.data.points.isEmpty) return Offset.zero;
-        double minX = s.data.points.first.x;
-        double minY = s.data.points.first.y;
-        for (final p in s.data.points) {
-          if (p.x < minX) minX = p.x;
-          if (p.y < minY) minY = p.y;
-        }
-        return Offset(minX, minY);
-      },
-      text: (t) => Offset(t.data.x, t.data.y),
-      image: (i) => Offset(i.data.x, i.data.y),
-      shape: (s) => Offset(min(s.data.x1, s.data.x2), min(s.data.y1, s.data.y2)),
-    );
+    if (element is StrokeElement) {
+      final pts = element.data.points;
+      if (pts.isEmpty) return Offset.zero;
+      double minX = pts.first.x;
+      double minY = pts.first.y;
+      for (final p in pts) {
+        if (p.x < minX) minX = p.x;
+        if (p.y < minY) minY = p.y;
+      }
+      return Offset(minX, minY);
+    } else if (element is TextElement) {
+      return Offset(element.data.x, element.data.y);
+    } else if (element is ImageElement) {
+      return Offset(element.data.x, element.data.y);
+    } else {
+      final s = (element as ShapeElement).data;
+      return Offset(min(s.x1, s.x2), min(s.y1, s.y2));
+    }
   }
 
   /// Paint the page content without zoom/pan transform.
@@ -840,8 +869,31 @@ class CanvasRenderEngine extends CustomPainter {
     }
 
     // ── Fountain pen (default "pen") ──
-    // Compute per-original-point width from pressure + velocity, smooth,
-    // then interpolate through adaptive Catmull-Rom.
+    // CACHE FAST-PATH FIRST — before any interpolation work. The
+    // cache lookup is O(1) on the StrokeData identity (Expando) and a
+    // hit means we skip all of velocity sqrt, smoothing passes, and
+    // adaptive Catmull-Rom (192k math ops for a 100-stroke page).
+    // Mirrors the ballpoint/brush branches above; the pen branch
+    // previously checked the cache AFTER all this precompute, wasting
+    // the cache's whole purpose on every cache-miss frame.
+    final zoomBucketKey = (zoom / 0.5).round();
+    final cachedRuns = _strokePathCache[stroke];
+    if (cachedRuns != null && cachedRuns.zoomBucket == zoomBucketKey) {
+      final paint = Paint()
+        ..color = color.withValues(alpha: stroke.opacity)
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..isAntiAlias = true;
+      for (final run in cachedRuns.runs) {
+        paint.strokeWidth = run.width;
+        canvas.drawPath(run.path, paint);
+      }
+      return;
+    }
+
+    // Cache miss — compute per-original-point width from pressure +
+    // velocity, smooth, then interpolate through adaptive Catmull-Rom.
     //
     // Width-modulation curves tuned (0.36.x) to feel closer to GoodNotes:
     //   - pressure: 0.45 → 1.05 (was 0.15 → 1.0). The old lower bound made
@@ -903,30 +955,15 @@ class CanvasRenderEngine extends CustomPainter {
     // and the round stroke caps blend the bucket boundaries seamlessly
     // (same trick that made the original drawLine implementation work
     // around the polygon-ribbon pinching issue).
+    // Cache-miss path: build the bucketed runs and store them. The
+    // shared Paint object is created here (not at top of function)
+    // because the early-return cache-hit branch above creates its own.
     final paint = Paint()
       ..color = color.withValues(alpha: stroke.opacity)
       ..style = PaintingStyle.stroke
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round
       ..isAntiAlias = true;
-
-    // Reuse cached bucketed paths if the stroke (and zoom-bucket)
-    // hasn't changed. This is the actual hot-path optimisation: a
-    // page-level Picture cache miss (e.g. eraser commit) used to
-    // re-run Catmull-Rom interpolation + bucketing for every stroke
-    // on the page (~100 strokes × 80 pts × 24 sub-segments = 192 k
-    // math ops). With this cache, only strokes whose StrokeData
-    // reference actually changed pay the recompute; surviving
-    // strokes just replay the cached Path objects.
-    final zoomBucketKey = (zoom / 0.5).round();
-    final cached = _strokePathCache[stroke];
-    if (cached != null && cached.zoomBucket == zoomBucketKey) {
-      for (final run in cached.runs) {
-        paint.strokeWidth = run.width;
-        canvas.drawPath(run.path, paint);
-      }
-      return;
-    }
 
     final count = interpolated.length;
     if (count < 2) return;
@@ -1615,20 +1652,32 @@ class CanvasRenderEngine extends CustomPainter {
   }
 
   /// True iff every ImageElement on this page has a decoded ui.Image in
-  /// imageCache. Used by the picture-cache build to decide whether to
-  /// store the recorded picture: storing while images are still decoding
+  /// imageCache OR is flagged as corrupt (placeholder is the final
+  /// rendered output, no live update will arrive). Used by the
+  /// picture-cache build to decide whether to store the recorded
+  /// picture: storing while images are still legitimately decoding
   /// would bake placeholders that only refresh on the next pageData
-  /// identity change. A page with zero images returns true (nothing to
-  /// wait for).
+  /// identity change. Treating corrupt as "decoded" matters because
+  /// otherwise a single broken PNG (common after the 1024-byte
+  /// truncation incidents) blocks the cache forever and every frame
+  /// re-records the full static layers — sustained-core CPU on idle.
   bool _allImageAssetsDecoded() {
-    if (_hasImageCache[pageData] == false) return true;
+    final hasImg = _hasImageCache[pageData];
+    if (hasImg == false) return true;
+    var sawAny = false;
     for (final el in pageData.layers.content) {
       if (el is ImageElement) {
+        sawAny = true;
         final p = el.data.assetPath;
         if (p.isEmpty) continue;
-        if (imageCache[p] == null) return false;
+        if (imageCache[p] == null && !corruptAssetIds.contains(p)) {
+          return false;
+        }
       }
     }
+    // Populate the "page has any image" Expando on first walk so
+    // stroke-only pages can short-circuit on subsequent frames.
+    _hasImageCache[pageData] ??= sawAny;
     return true;
   }
 
@@ -1636,17 +1685,34 @@ class CanvasRenderEngine extends CustomPainter {
   static List<ContentElement>? _cachedSortedContent;
   static List<ContentElement>? _cachedSourceContent;
 
+  /// Drop every cached picture and the static sort cache. Call this
+  /// from notebook close so the static `_staticPictureCache` doesn't
+  /// keep the closed notebook's PageData refs (and ~5-10 MB of Skia
+  /// picture buffers) alive across notebook switches.
+  static void disposeStaticCache() {
+    _staticPictureCache.clearAll();
+    _cachedSortedContent = null;
+    _cachedSourceContent = null;
+  }
+
+  static int _zIndexOf(ContentElement e) {
+    if (e is StrokeElement) return e.zIndex;
+    if (e is TextElement) return e.zIndex;
+    if (e is ImageElement) return e.zIndex;
+    return (e as ShapeElement).zIndex;
+  }
+
   static List<ContentElement> _getSortedContent(List<ContentElement> content) {
     if (identical(content, _cachedSourceContent) && _cachedSortedContent != null) {
       return _cachedSortedContent!;
     }
     _cachedSourceContent = content;
+    // Use is-checks (zero-alloc) instead of `.map(stroke:..., text:...,
+    // image:..., shape:...)` — that allocated 8 closures per A/B
+    // comparison × O(n log n) compares. For 200 elements that's
+    // ~12 000 closure allocations per sort.
     _cachedSortedContent = List<ContentElement>.from(content)
-      ..sort((a, b) {
-        final aZ = a.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex);
-        final bZ = b.map(stroke: (s) => s.zIndex, text: (t) => t.zIndex, image: (i) => i.zIndex, shape: (s) => s.zIndex);
-        return aZ.compareTo(bZ);
-      });
+      ..sort((a, b) => _zIndexOf(a).compareTo(_zIndexOf(b)));
     return _cachedSortedContent!;
   }
 
@@ -1676,6 +1742,7 @@ class CanvasRenderEngine extends CustomPainter {
         !identical(recognizedShapePreview, oldDelegate.recognizedShapePreview) ||
         zoom != oldDelegate.zoom ||
         panOffset != oldDelegate.panOffset ||
+        !identical(corruptAssetIds, oldDelegate.corruptAssetIds) ||
         !_imageCacheEqual(imageCache, oldDelegate.imageCache);
   }
 
@@ -1810,14 +1877,29 @@ class _StaticPictureCache {
     }
   }
 
+  /// Memoised cache-key per LassoSelection identity. Without this the
+  /// O(N) toList+sort+join ran on every paint, even on cache HITS where
+  /// the selection hadn't actually changed.
+  static final Expando<String> _lassoKeyExpando = Expando();
+
   static String _lassoKey(LassoSelection? sel) {
     if (sel == null) return '';
-    // Selection drag/rotate/scale happens at paint time in the live
-    // canvas, NOT in the cached picture (we record without those
-    // transforms applied — same as the previous inline code path).
-    // So only the SET of selected ids is part of the cache key.
+    final cached = _lassoKeyExpando[sel];
+    if (cached != null) return cached;
     final ids = sel.selectedIds.toList()..sort();
-    return ids.join(',');
+    final key = ids.join(',');
+    _lassoKeyExpando[sel] = key;
+    return key;
+  }
+
+  /// Drop every entry and dispose the underlying ui.Pictures. Called on
+  /// notebook close so closed notebooks' PageData refs and Skia native
+  /// buffers don't linger as zombie memory across notebook switches.
+  void clearAll() {
+    for (final e in _entries) {
+      try { e.picture.dispose(); } catch (_) {}
+    }
+    _entries.clear();
   }
 
 }

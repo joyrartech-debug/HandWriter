@@ -13,6 +13,7 @@ import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart
 import 'package:handwriter/core/providers/notebook_provider.dart';
 import 'package:handwriter/core/providers/offline_providers.dart';
 import 'package:handwriter/core/services/sync_service.dart';
+import 'package:handwriter/features/canvas/data/render_engine.dart' show CanvasRenderEngine;
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -475,7 +476,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _disposed = false;
     _consecutiveSyncFailures = 0;
     hasSyncFailure.value = false;
-    _lastSyncedPages = Map.of(repaired.pages);
+    // Hold the same ref — _lastSyncedPages is a dirty-detection sidetable
+    // (we only ever read identity via `identical(s.pages[k], _lastSyncedPages[k])`),
+    // and `pages` itself is treated as immutable: every edit replaces it
+    // with a fresh map. So Map.of(...) was a defensive copy with no benefit.
+    _lastSyncedPages = repaired.pages;
     _pageJsonCache.clear();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -1145,18 +1150,29 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (hasSyncFailure.value != next) hasSyncFailure.value = next;
   }
 
-  /// Schedule a periodic retry of the pending metadata.json commit.
-  /// Idempotent: extending an active timer is a no-op. Cancelled when
-  /// the commit succeeds or the notebook closes.
+  /// Backoff state for the metadata-commit retry. Exponential: 60s →
+  /// 120s → 240s → 480s → cap 1800s (30 min). Reset on success.
+  int _metaRetryAttempts = 0;
+  static const _metaRetryBaseMs = 60 * 1000;
+  static const _metaRetryMaxMs = 30 * 60 * 1000;
+
+  /// Schedule the next retry of the pending metadata.json commit with
+  /// exponential backoff. Idempotent: a scheduled timer is left in
+  /// place. Cancelled on success or notebook close. Skips firing the
+  /// immediate microtask retry that previously hammered the network
+  /// the moment a failure landed (it's the worst time to retry — the
+  /// link is presumably still bad).
   void _scheduleMetaCommitRetry() {
     if (_pendingMetaCommitTimer != null) return;
-    _pendingMetaCommitTimer = Timer.periodic(
-      const Duration(minutes: 1),
-      (_) => _retryPendingMetaCommit(),
+    final delayMs = (_metaRetryBaseMs * (1 << _metaRetryAttempts.clamp(0, 8)))
+        .clamp(_metaRetryBaseMs, _metaRetryMaxMs);
+    _pendingMetaCommitTimer = Timer(
+      Duration(milliseconds: delayMs),
+      () {
+        _pendingMetaCommitTimer = null;
+        _retryPendingMetaCommit();
+      },
     );
-    // Also try once immediately so a fresh failure doesn't wait a
-    // full minute before its first retry.
-    Future.microtask(_retryPendingMetaCommit);
   }
 
   Future<void> _retryPendingMetaCommit() async {
@@ -1164,21 +1180,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (bytes == null) {
       _pendingMetaCommitTimer?.cancel();
       _pendingMetaCommitTimer = null;
+      _metaRetryAttempts = 0;
       return;
     }
     if (state == null || _disposed) return;
     final notebookId = state!.metadata.id;
     final syncService = _ref.read(syncServiceProvider);
-    if (syncService == null) return;
+    if (syncService == null) {
+      _metaRetryAttempts++;
+      _scheduleMetaCommitRetry();
+      return;
+    }
     try {
       final etag = await syncService.replayMetadataCommit(
         notebookId: notebookId,
         metadataBytes: bytes,
       );
-      // Success — clear the pending state.
+      // Success — clear the pending state and the backoff.
       _pendingMetaCommitBytes = null;
       _pendingMetaCommitTimer?.cancel();
       _pendingMetaCommitTimer = null;
+      _metaRetryAttempts = 0;
       await _persistPendingMetaCommit(notebookId, null);
       if (etag != null && etag.isNotEmpty) {
         _remoteMetaEtag = etag;
@@ -1188,8 +1210,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       print('[Canvas] Pending metadata commit replayed successfully '
           '(etag=$etag) — server is consistent again');
     } catch (e) {
-      // Stay queued; next tick retries.
-      debugPrint('[Canvas] Pending metadata commit retry failed: $e');
+      // Bump attempt count, schedule next with exponential delay.
+      _metaRetryAttempts++;
+      debugPrint('[Canvas] Pending metadata commit retry #$_metaRetryAttempts '
+          'failed: $e — next try in '
+          '${(_metaRetryBaseMs * (1 << _metaRetryAttempts.clamp(0, 8))).clamp(_metaRetryBaseMs, _metaRetryMaxMs) ~/ 1000}s');
+      _scheduleMetaCommitRetry();
     }
   }
 
@@ -1301,6 +1327,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // on Linux leaks GPU handles until the renderer shuts down and
     // segfaults at exit.
     releaseImageCache();
+    // Drop the static picture cache so the closed notebook's PageData
+    // refs + ~5-10 MB of Skia picture buffers don't linger as zombie
+    // memory across notebook switches.
+    CanvasRenderEngine.disposeStaticCache();
     _disposed = true;
     _isPulling = false;
     isPullingFromRemote.value = false;
@@ -1392,6 +1422,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void setColor(int color) {
     if (state == null) return;
+    if (state!.toolSettings.color == color) return;
     state = state!.copyWith(
       toolSettings: state!.toolSettings.copyWith(color: color),
     );
@@ -1411,6 +1442,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void setStrokeWidth(double width) {
     if (state == null) return;
+    if (state!.toolSettings.strokeWidth == width) return;
     state = state!.copyWith(
       toolSettings: state!.toolSettings.copyWith(strokeWidth: width),
     );
@@ -1418,6 +1450,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void setEraserSize(EraserSize size) {
     if (state == null) return;
+    if (state!.toolSettings.eraserSize == size) return;
     state = state!.copyWith(
       toolSettings: state!.toolSettings.copyWith(eraserSize: size),
     );
@@ -2979,6 +3012,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     required double scale,
   }) {
     if (state == null || state!.lassoSelection == null) return;
+    // No-op tap on the bounds: avoid the state churn (a fresh
+    // LassoSelection + CanvasState allocation that would tickle every
+    // chrome consumer for nothing).
+    if (dragOffset == Offset.zero && rotation == 0.0 && scale == 1.0) {
+      return;
+    }
     state = state!.copyWith(
       lassoSelection: state!.lassoSelection!.copyWith(
         dragOffset: dragOffset,
@@ -6022,6 +6061,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           _consecutiveSyncFailures = 0;
           _recomputeSyncStatus();
         }
+        // The full chain (pages + document + metadata) just landed,
+        // so any pending metadata-only retry is now stale: the bytes
+        // queued by an earlier failed save committed something the
+        // server has since superseded. Drop the queue and reset the
+        // exponential-backoff state.
+        if (_pendingMetaCommitBytes != null) {
+          _pendingMetaCommitBytes = null;
+          _pendingMetaCommitTimer?.cancel();
+          _pendingMetaCommitTimer = null;
+          _metaRetryAttempts = 0;
+          await _persistPendingMetaCommit(updatedMeta.id, null);
+          _recomputeSyncStatus();
+        }
         // Remote commit succeeded — NOW it's safe to advance the dirty
         // snapshot. If we do this optimistically (before remote returns),
         // a failed upload leaves _lastSyncedPages matching state.pages,
@@ -6029,7 +6081,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         // identity check and never retries. That's how iPad drew strokes,
         // hit a commit-phase failure, and the strokes stayed invisible
         // to other devices even though iPad's local file had them.
-        _lastSyncedPages = Map.of(s.pages);
+        _lastSyncedPages = s.pages;
         for (final k in snapshotDirtyAssetKeys) {
           _dirtyAssetKeys.remove(k);
           // Mark these asset IDs as having a server-side counterpart.
@@ -6348,6 +6400,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   int _idlePullCount = 0;
   static const int _idlePullThreshold = 3;
   static const Duration _idlePullMaxInterval = Duration(seconds: 30);
+  /// After this much sustained idle (≥ this many consecutive noop
+  /// pulls), extend the backoff cap to 5 minutes. The fast cadence
+  /// still resumes immediately on real activity (a save resets
+  /// _idlePullCount to 0). This trims background HEAD chatter from
+  /// ~3000/h to ~300/h on notebooks the user leaves open but doesn't
+  /// touch — meaningful battery saving on mobile + Tailscale.
+  static const int _deepIdleThreshold = 30;
+  static const Duration _deepIdleMaxInterval = Duration(minutes: 5);
 
   /// Counter for the ordered-commit safety-net: every Nth pull does the
   /// full pages/ PROPFIND even when meta-ETag is unchanged, to catch
@@ -6361,12 +6421,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (_idlePullCount < _idlePullThreshold) {
       return AppConfig.deltaPullInterval;
     }
-    // Exponential backoff: idle=3 → 4s, 4 → 8s, 5 → 16s, 6+ → 30s (cap).
-    final shift = (_idlePullCount - _idlePullThreshold).clamp(0, 6);
+    // Deep-idle: after ~30 consecutive noop pulls (≈ 10 minutes
+    // of sustained inactivity at the 30s cap) extend the cap to 5
+    // minutes. Trades immediate cross-device sync latency (still
+    // sub-5min vs sub-30s) for ~10× less network chatter on idle
+    // open notebooks.
+    final maxIntervalMs = _idlePullCount >= _deepIdleThreshold
+        ? _deepIdleMaxInterval.inMilliseconds
+        : _idlePullMaxInterval.inMilliseconds;
+    // Exponential backoff: idle=3 → 4s, 4 → 8s, 5 → 16s, 6+ → 30s,
+    // 30+ → 5min (cap).
+    final shift = (_idlePullCount - _idlePullThreshold).clamp(0, 8);
     final ms = AppConfig.deltaPullInterval.inMilliseconds * (2 << shift);
     final capped = ms.clamp(
       AppConfig.deltaPullInterval.inMilliseconds,
-      _idlePullMaxInterval.inMilliseconds,
+      maxIntervalMs,
     );
     return Duration(milliseconds: capped);
   }
@@ -8053,7 +8122,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void dismissConflicts() {
     if (state == null) return;
     // Update baseline so the next pull doesn't re-detect the same edits.
-    _lastSyncedPages = Map.of(state!.pages);
+    _lastSyncedPages = state!.pages;
     state = state!.copyWith(clearPendingConflicts: true);
     print('[Canvas] User dismissed all conflicts (kept local)');
   }

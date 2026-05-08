@@ -2274,15 +2274,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         pendingConflicts: s.pendingConflicts,
         pendingRemoteChanges: s.pendingRemoteChanges,
         lassoSelection: s.lassoSelection,
-        activeStroke: s.activeStroke,
-        lassoPath: s.lassoPath,
-        shapeStartPos: s.shapeStartPos,
-        shapeEndPos: s.shapeEndPos,
+        // activeStroke / lassoPath / shapeStartPos / shapeEndPos OMITTED:
+        // these mutate at pointer rate but the chrome doesn't render
+        // them (the painter does, via its own Consumer). Including them
+        // here forced ~6 extra chrome rebuilds per stroke.
         recognizedShape: s.recognizedShape,
         selectedElementId: s.selectedElementId,
         currentTool: s.currentTool,
-        undoStack: s.undoStack,
-        redoStack: s.redoStack,
+        // canUndo / canRedo derived booleans (was: full undoStack/redoStack
+        // refs). Lists are replaced on every push/pop, so the chrome
+        // rebuilt for every stroke commit just to enable the same icons.
+        // Booleans only trip the select on actual empty↔non-empty transitions.
+        canUndo: s.undoStack.isNotEmpty,
+        canRedo: s.redoStack.isNotEmpty,
         symbolLibraries: s.symbolLibraries,
       );
     }));
@@ -2991,6 +2995,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                                 zoom: s.zoom,
                                 panOffset: s.panOffset,
                                 imageCache: s.imageCache,
+                                corruptAssetIds:
+                                    ref.read(canvasProvider.notifier).corruptAssetIds,
                                 repaintNotifier: _repaintNotifier,
                               ),
                               // willChange: true tells Skia "do NOT
