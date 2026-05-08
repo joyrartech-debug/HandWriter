@@ -266,37 +266,105 @@ class WebDavService {
   /// [timeoutSeconds] overrides the default; pass a larger value for known-
   /// big files (root .ncnote ZIPs in particular).  Default `null` falls
   /// back to the general WebDAV timeout — fine for most page/asset GETs.
+  ///
+  /// Post-GET integrity check: if the server sends a `Content-Length`
+  /// header we compare it against `bodyBytes.length` and reject mismatches.
+  /// Observed in the wild: Nextcloud over a Tailscale relay occasionally
+  /// returns a partial body (truncated at a 1024- or 65536-byte buffer
+  /// boundary) with status 200. `package:http` does NOT raise for that —
+  /// it just hands back the short buffer. Without verification the caller
+  /// (a delta pull, a JSON parse, a PNG decoder) blows up downstream and
+  /// on `metadata.json` the entire pull aborts mid-way, so
+  /// `_lastPageEtags` never advances and the next pull cycle restarts
+  /// the same 300-page download forever. We retry up to
+  /// [_downloadMaxAttempts] times with exponential backoff before
+  /// surfacing a [WebDavTruncatedDownloadException].
+  ///
+  /// When [criticalVerify] is true (used for `metadata.json` /
+  /// `document.json`, the two files whose corruption aborts the entire
+  /// pull) we additionally PROPFIND the file when the response had no
+  /// `Content-Length` header — Nextcloud routinely sends chunked
+  /// responses, which means the cheap header check is null even though
+  /// the body was silently cut mid-stream. The +1 RTT is well worth it:
+  /// without this, a single bad metadata download wedges the notebook
+  /// in the 0-of-N pull loop forever.
   Future<Uint8List> downloadFile(String remotePath,
-      {int? timeoutSeconds}) async {
-    try {
-      final response = await _client
-          .get(
-            Uri.parse(_fullUrl(remotePath)),
-            headers: _authHeaders,
-          )
-          .timeout(Duration(
-              seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
+      {int? timeoutSeconds, bool criticalVerify = false}) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < _downloadMaxAttempts; attempt++) {
+      try {
+        final response = await _client
+            .get(
+              Uri.parse(_fullUrl(remotePath)),
+              headers: _authHeaders,
+            )
+            .timeout(Duration(
+                seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
 
-      if (response.statusCode == 404) {
+        if (response.statusCode == 404) {
+          _recordSuccess();
+          throw WebDavException('GET 404', 404);
+        }
+        if (response.statusCode != 200) {
+          _recordFailure('downloadFile', 'status ${response.statusCode}');
+          throw WebDavException(
+            'GET failed: ${response.statusCode}',
+            response.statusCode,
+          );
+        }
+
+        final bytes = response.bodyBytes;
+        final declared = response.contentLength;
+        int? expectedSize = declared;
+
+        // Header-less response (chunked transfer): if the caller flagged
+        // this as a critical file, fall back to PROPFIND so we still have
+        // a number to compare against.
+        if (expectedSize == null && criticalVerify) {
+          try {
+            expectedSize = await getContentLength(remotePath)
+                .timeout(const Duration(seconds: 10));
+          } catch (e) {
+            // ignore: avoid_print
+            print('[WebDAV] downloadFile critical-verify: PROPFIND failed '
+                'for $remotePath: $e — trusting body');
+            expectedSize = null;
+          }
+        }
+
+        if (expectedSize != null && expectedSize != bytes.length) {
+          // ignore: avoid_print
+          print('[WebDAV] downloadFile TRUNCATED $remotePath: '
+              'expected ${expectedSize}B, received ${bytes.length}B '
+              '(diff ${expectedSize - bytes.length}B) — retry attempt '
+              '${attempt + 1}/$_downloadMaxAttempts');
+          _recordFailure('downloadFile',
+              'truncated ${bytes.length}/$expectedSize');
+          lastError = WebDavTruncatedDownloadException(
+              remotePath, expectedSize, bytes.length);
+          if (attempt < _downloadMaxAttempts - 1) {
+            await Future.delayed(
+                Duration(milliseconds: 400 * (1 << attempt)));
+            continue;
+          }
+          throw lastError as WebDavTruncatedDownloadException;
+        }
+
         _recordSuccess();
-        throw WebDavException('GET 404', 404);
+        return bytes;
+      } on WebDavTruncatedDownloadException {
+        rethrow;
+      } on WebDavException {
+        rethrow;
+      } catch (e) {
+        _recordFailure('downloadFile', e);
+        rethrow;
       }
-      if (response.statusCode != 200) {
-        _recordFailure('downloadFile', 'status ${response.statusCode}');
-        throw WebDavException(
-          'GET failed: ${response.statusCode}',
-          response.statusCode,
-        );
-      }
-      _recordSuccess();
-      return response.bodyBytes;
-    } on WebDavException {
-      rethrow;
-    } catch (e) {
-      _recordFailure('downloadFile', e);
-      rethrow;
     }
+    throw lastError ?? StateError('downloadFile: exhausted attempts');
   }
+
+  static const int _downloadMaxAttempts = 3;
 
   /// Carica un file sul server. Crea o sovrascrive.
   /// Ritorna l'ETag della nuova versione.
@@ -348,34 +416,32 @@ class WebDavService {
         final verifyThreshold = criticalVerify ? 0 : _uploadVerifyMin;
         if (data.length >= verifyThreshold) {
           int? remoteSize;
-          try {
-            // 30 s default verify timeout (was 8 s, which on a Tailscale
-            // relayed link silently bailed on every PUT — every upload
-            // came back as "trusting PUT" without ever running the
-            // size check the verification was added for). 30 s is
-            // generous enough to ride out RTT spikes while still
-            // catching a stuck server.
-            remoteSize = await getContentLength(remotePath)
-                .timeout(const Duration(seconds: 30));
-          } catch (e) {
-            // Verification itself failed (network blip on the PROPFIND).
-            // For critical files (document.json/metadata.json) we cannot
-            // afford to "trust the PUT" — a truncated commit marker
-            // poisons every other device. Retry the upload until verify
-            // succeeds or attempts run out.
-            if (criticalVerify && attempt < _uploadMaxAttempts - 1) {
-              // ignore: avoid_print
-              print('[WebDAV] uploadFile verify: PROPFIND failed for '
-                  '$remotePath: $e — retrying PUT (critical)');
-              await Future.delayed(
-                  Duration(milliseconds: 400 * (1 << attempt)));
-              continue;
+          // PROPFIND verify with one in-place retry on failure for critical
+          // files. Critical here means: keep retrying the *PROPFIND*, NOT
+          // the PUT — re-PUTting a successfully-uploaded file just bumps
+          // the ETag and triggers spurious pulls on every other device,
+          // which on a flaky link spirals into cross-device ping-pong.
+          // The PUT already happened; we only need to confirm the body.
+          var verifyAttempts = criticalVerify ? 3 : 1;
+          Object? verifyError;
+          for (var v = 0; v < verifyAttempts; v++) {
+            try {
+              remoteSize = await getContentLength(remotePath)
+                  .timeout(const Duration(seconds: 30));
+              verifyError = null;
+              break;
+            } catch (e) {
+              verifyError = e;
+              if (v < verifyAttempts - 1) {
+                await Future.delayed(
+                    Duration(milliseconds: 500 * (1 << v)));
+              }
             }
-            // Non-critical: trust the PUT, next pull will catch any real
-            // truncation via FormatException.
+          }
+          if (verifyError != null) {
             // ignore: avoid_print
             print('[WebDAV] uploadFile verify: PROPFIND failed for '
-                '$remotePath: $e — trusting PUT');
+                '$remotePath: $verifyError — trusting PUT');
             _recordSuccess();
             return response.headers['etag'];
           }
@@ -765,6 +831,26 @@ class WebDavSizeMismatchException implements Exception {
   String toString() =>
       'WebDavSizeMismatchException($remotePath): sent ${sentBytes}B but '
       'server stored ${storedBytes}B';
+}
+
+/// Thrown when a GET returns 200 with a Content-Length header that
+/// disagrees with the number of body bytes actually received. Indicates
+/// a silent mid-stream cut by some hop in the chain (proxy, Tailscale
+/// relay, NSURLSession suspension) that `package:http` does not flag.
+/// Treat the bytes as garbage — never feed them to a JSON/image/zip
+/// decoder.
+class WebDavTruncatedDownloadException implements Exception {
+  final String remotePath;
+  final int declaredBytes;
+  final int receivedBytes;
+
+  WebDavTruncatedDownloadException(
+      this.remotePath, this.declaredBytes, this.receivedBytes);
+
+  @override
+  String toString() =>
+      'WebDavTruncatedDownloadException($remotePath): server declared '
+      '${declaredBytes}B but only ${receivedBytes}B were received';
 }
 
 /// Parsa date HTTP (RFC 1123: "Sun, 06 Nov 1994 08:49:37 GMT").

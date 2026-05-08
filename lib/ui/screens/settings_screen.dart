@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/app_settings_provider.dart';
+import 'package:handwriter/core/providers/notebook_provider.dart';
+import 'package:handwriter/core/providers/offline_providers.dart';
+import 'package:handwriter/core/providers/canvas_provider.dart';
+import 'package:handwriter/core/services/sync_service.dart';
 import 'package:handwriter/ui/theme/hw_icons.dart';
 import 'package:handwriter/ui/theme/hw_theme.dart';
 import 'package:handwriter/ui/primitives/hw_button.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Redesigned settings screen — left rail of sections + content panel.
 class SettingsScreenV2 extends ConsumerStatefulWidget {
@@ -40,6 +45,7 @@ class _SettingsScreenV2State extends ConsumerState<SettingsScreenV2> {
                     'sync' => _SyncSection(),
                     'shortcuts' => _ShortcutsSection(),
                     'storage' => _StorageSection(),
+                    'advanced' => const _AdvancedSection(),
                     'about' => _AboutSection(),
                     _ => _GeneralSection(),
                   },
@@ -72,6 +78,7 @@ class _Rail extends StatelessWidget {
       ('sync', 'Sincronia', 'cloud'),
       ('storage', 'Spazio', 'pages'),
       ('shortcuts', 'Scorciatoie', 'keyboard'),
+      ('advanced', 'Avanzate', 'arrow'),
       ('about', 'Informazioni', 'help'),
     ];
     return Container(
@@ -515,6 +522,168 @@ class _StorageSection extends StatelessWidget {
                 onPressed: () {})),
       ],
     );
+  }
+}
+
+/// Manual heal/recovery actions for the rare case where a notebook gets
+/// stuck in a sync loop because of durable server-side corruption that
+/// the verified upload/download paths can no longer prevent (i.e. bytes
+/// that were already poisoned before the verifications shipped).
+class _AdvancedSection extends ConsumerWidget {
+  const _AdvancedSection();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final p = HwThemeScope.of(context);
+    final notebooksAsync = ref.watch(notebookListProvider);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _SectionHeader('Avanzate'),
+        Text(
+          'Strumenti di recupero per casi rari di taccuino bloccato in '
+          'sincronia. Usali solo se il sync continua a fallire dopo un '
+          'normale "Forza sync" dalla libreria.',
+          style: TextStyle(fontSize: 14, color: p.ink2, height: 1.5),
+        ),
+        const SizedBox(height: 24),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: Text(
+            'Forza ricarica taccuino dal server',
+            style: TextStyle(
+                fontSize: 14, fontWeight: FontWeight.w600, color: p.ink0),
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Text(
+            'Riscarica tutto il contenuto del taccuino dalla cartella '
+            'delta del server e sovrascrive la copia locale. Utile se il '
+            'count pagine sembra sbagliato o il taccuino non si apre. '
+            'Non perde dati lato server.',
+            style: TextStyle(fontSize: 12, color: p.ink2, height: 1.5),
+          ),
+        ),
+        notebooksAsync.when(
+          loading: () => const SizedBox.shrink(),
+          error: (e, _) => Text('Errore: $e',
+              style: TextStyle(fontSize: 12, color: p.ink2)),
+          data: (entries) => Column(
+            children: [
+              for (final entry in entries)
+                _Row(
+                  title: entry.metadata.title,
+                  sub: '${entry.metadata.pageCount} pagine',
+                  control: HwButton(
+                    label: 'Ricarica',
+                    style: HwButtonStyle.solid,
+                    onPressed: () =>
+                        _forceReload(context, ref, entry.metadata.id,
+                            entry.metadata.title, entry.remotePath),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _forceReload(BuildContext context, WidgetRef ref,
+      String notebookId, String title, String remotePath) async {
+    // Block reload of the currently-open notebook — replacing its on-disk
+    // bytes while the canvas holds an older state in memory leads to
+    // a save-after-reload that re-publishes the stale state.
+    final canvas = ref.read(canvasProvider);
+    if (canvas != null && canvas.metadata.id == notebookId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text(
+                'Chiudi il taccuino prima di ricaricarlo dal server.')),
+      );
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Ricaricare "$title"?'),
+        content: const Text(
+          'Riscarica metadata, document, pagine e asset dalla cartella '
+          'delta del server. La copia locale viene sostituita.\n\n'
+          'Modifiche locali non ancora sincronizzate verranno perse. '
+          'Continuare?',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Annulla')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Ricarica')),
+        ],
+      ),
+    );
+    if (confirm != true || !context.mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(
+        content: Text('Ricarica "$title" in corso…'),
+        duration: const Duration(seconds: 30)));
+
+    try {
+      final syncService = ref.read(syncServiceProvider);
+      final fileService = ref.read(fileServiceProvider);
+      if (syncService == null) {
+        messenger.hideCurrentSnackBar();
+        messenger.showSnackBar(const SnackBar(
+            content: Text('Non connesso a un server WebDAV.')));
+        return;
+      }
+
+      final result = await syncService.downloadExplodedFull(notebookId);
+      final bytes = SyncService.buildPackageBytes(
+        metadata: result.metadata,
+        document: result.document,
+        pages: result.pages,
+        assets: result.assets,
+        symbolLibraries: result.symbolLibraries,
+      );
+      await fileService.saveNotebookFile(notebookId, bytes);
+      await fileService.upsertNotebookMeta(
+        id: notebookId,
+        title: result.metadata.title,
+        remotePath: remotePath,
+        localModifiedAt: result.metadata.modifiedAt,
+        syncStatus: 'synced',
+        fileSize: bytes.length,
+        coverColor: result.metadata.coverColor,
+        paperType: result.metadata.paperType,
+        pageCount: result.metadata.pageCount,
+        createdAt: result.metadata.createdAt,
+      );
+
+      // Wipe the per-notebook sync caches so the next open re-runs the
+      // delta diff from a clean slate (no stale ETags blocking refresh).
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('delta_meta_etag_$notebookId');
+      await prefs.remove('last_page_etags_$notebookId');
+
+      // Refresh the library card to reflect the new pageCount immediately.
+      await ref.read(notebookListProvider.notifier).refresh();
+
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(
+          content: Text(
+              '"$title" ricaricato — ${result.metadata.pageCount} pagine.')));
+    } catch (e) {
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(SnackBar(
+          content: Text('Ricarica fallita: $e'),
+          duration: const Duration(seconds: 6)));
+    }
   }
 }
 

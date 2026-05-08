@@ -5550,12 +5550,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
 
-    // ── Compact orphan assets before snapshotting ──
-    // Prunes assetBytes/imageCache entries no longer referenced by any
-    // page (e.g. after PDF re-import replaced the original pages). Server-
-    // side deletes are staged into _pendingAssetDeletes and retried by
-    // _remoteSync until the server confirms; persisted across launches.
-    _pruneOrphanAssets();
+    // ── Compact orphan assets only when pages were deleted this save ──
+    // Running prune on every save is unsafe: during pull/cross-device
+    // races, transient state can mark assets as orphan that another
+    // device still uses → mass DELETE + cross-device ping-pong. Gating
+    // it to "this save deleted at least one page" matches the actual
+    // user intent (re-import / page deletion) without firing spuriously.
+    // _pruneOrphanAssets is called below, AFTER deletedPages is computed.
 
     final s = state!;
     final syncService = _ref.read(syncServiceProvider);
@@ -5604,6 +5605,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // doesn't lose the deletion request — _remoteSync merges these and
     // clears them on confirmed success.
     _pendingPageDeletes.addAll(deletedPages);
+
+    // Now it's safe to compact orphan assets: we have a stable view of
+    // which pages were just deleted, and we only run prune at all when
+    // the user actually removed something this save (avoids racing pull).
+    if (deletedPages.isNotEmpty) {
+      _pruneOrphanAssets();
+    }
 
     debugPrint('[Canvas] Dirty: ${changedPages.length} pages, '
         '${changedAssets.length} assets, ${deletedPages.length} deleted');
@@ -5796,11 +5804,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }) async {
     // Pending sets carry every delete request — both this save's and any
     // from prior saves whose DELETE drops on flaky networks (Tailscale).
-    // We replay the full set every save until the server confirms 404 or
-    // success, which is the only way a one-shot DELETE can be made
-    // reliable without bidirectional protocol support.
-    final mergedDeletedPages = _pendingPageDeletes.toList();
-    final mergedDeletedAssets = _pendingAssetDeletes.toList();
+    // Drain in CAPPED batches so a backlog of hundreds of orphans (can
+    // happen after re-importing a PDF and re-deleting it on flaky links)
+    // doesn't bloat every save into a multi-minute storm of DELETEs that
+    // ties up the connection and starves the metadata commit phase.
+    const int deleteBatchPerSave = 30;
+    final mergedDeletedPages =
+        _pendingPageDeletes.take(deleteBatchPerSave).toList();
+    final mergedDeletedAssets =
+        _pendingAssetDeletes.take(deleteBatchPerSave).toList();
 
     debugPrint('[Canvas] Starting delta sync: ${dirtyPages.length} pages '
         '(retrying ${_pendingPageDeletes.length} pending page deletes, '

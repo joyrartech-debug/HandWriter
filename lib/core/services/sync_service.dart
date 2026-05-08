@@ -714,7 +714,14 @@ class SyncService {
 
     if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
       for (final e in dirtyAssets.entries) {
-        dataUploads.add(_webdav.uploadFile('${dir}assets/${e.key}', e.value));
+        // criticalVerify: assets are typically PNG renders of PDF pages
+        // that can be SMALLER than [_uploadVerifyMin] (a thumbnail-only
+        // page can be a couple of KB). Without verification a truncated
+        // PUT silently leaves an undecodable body on the server which
+        // every device then tries to decode forever. The +1 RTT PROPFIND
+        // is cheap relative to the cost of an unrecoverable asset.
+        dataUploads.add(_webdav.uploadFile(
+            '${dir}assets/${e.key}', e.value, criticalVerify: true));
       }
     }
 
@@ -864,7 +871,8 @@ class SyncService {
   Future<NotebookMetadata?> downloadDeltaMetadataOnly(String notebookId) async {
     try {
       final bytes = await _webdav
-          .downloadFile('${_deltaDir(notebookId)}metadata.json')
+          .downloadFile('${_deltaDir(notebookId)}metadata.json',
+              criticalVerify: true)
           .timeout(const Duration(seconds: 10));
       return NotebookMetadata.fromJson(
         jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>,
@@ -876,12 +884,21 @@ class SyncService {
 
   /// Downloads metadata + document from the exploded folder.
   /// Parallel download — both requests fire simultaneously.
+  ///
+  /// [criticalVerify] is forced on: a truncated body on either of these
+  /// two files aborts the whole delta pull (the FormatException escapes
+  /// every per-page handler), which strands `_lastPageEtags` and forces
+  /// the same 300-page changeset to replay every cycle until the user
+  /// sees their notebook frozen at 0/330. We pay the +1 RTT PROPFIND
+  /// when Nextcloud serves chunked (Content-Length absent) so the body
+  /// gets validated even when the cheap header check has nothing to
+  /// compare against.
   Future<({NotebookMetadata metadata, DocumentStructure document})>
       downloadDeltaMeta(String notebookId) async {
     final dir = _deltaDir(notebookId);
     final results = await Future.wait([
-      _webdav.downloadFile('${dir}metadata.json'),
-      _webdav.downloadFile('${dir}document.json'),
+      _webdav.downloadFile('${dir}metadata.json', criticalVerify: true),
+      _webdav.downloadFile('${dir}document.json', criticalVerify: true),
     ]);
 
     return (
