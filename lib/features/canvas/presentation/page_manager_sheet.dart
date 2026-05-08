@@ -315,9 +315,20 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                               final chip = ChoiceChip(
                                 label: Text(chapter.title),
                                 selected: isActive,
-                                onSelected: (_) => ref.read(canvasProvider.notifier).setActiveChapter(
-                                  isActive ? null : chapter.id,
-                                ),
+                                // Tapping the active chapter no longer
+                                // deselects it — leaving the user in the
+                                // "no chapter" state was reachable only
+                                // by accident and produced confusing
+                                // page-strip / page-numbering behaviour
+                                // (active filter empty, but document
+                                // still scoped to the previous chapter).
+                                // To switch chapters, the user picks a
+                                // different one directly.
+                                onSelected: isActive
+                                    ? null
+                                    : (_) => ref
+                                        .read(canvasProvider.notifier)
+                                        .setActiveChapter(chapter.id),
                                 visualDensity: VisualDensity.compact,
                               );
                               return DragTarget<int>(
@@ -766,7 +777,7 @@ class SelectionActionBarButton extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────
 
 /// Reorderable grid of page thumbnails with drag-and-drop support.
-class PageGridReorderable extends StatefulWidget {
+class PageGridReorderable extends ConsumerStatefulWidget {
   final ScrollController scrollController;
   final CanvasState liveState;
   final List<int> visibleIndices;
@@ -798,10 +809,10 @@ class PageGridReorderable extends StatefulWidget {
   });
 
   @override
-  State<PageGridReorderable> createState() => _PageGridReorderableState();
+  ConsumerState<PageGridReorderable> createState() => _PageGridReorderableState();
 }
 
-class _PageGridReorderableState extends State<PageGridReorderable> {
+class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
   int? _dragFromVisIdx;
   int? _dragOverVisIdx;
   bool _didInitialScroll = false;
@@ -1044,6 +1055,54 @@ class _PageGridReorderableState extends State<PageGridReorderable> {
     int docIndex, bool isCurrentPage, PageData? page, CanvasState state, {
     bool overrideBorder = true,
   }) {
+    // Lazy-decode image assets for THIS visible thumbnail. Eagerly
+    // decoding all assets on notebook open is fine for small notebooks
+    // but a 200-page document with image-heavy chapters would burn
+    // seconds of CPU + ~hundred-MB of texture RAM. The page manager's
+    // grid only builds visible thumbnails, so doing the decode here
+    // naturally bounds the work to "what the user can actually see".
+    // Already-cached and already-queued assets short-circuit on the
+    // notifier side, so no per-frame waste.
+    if (page != null) {
+      bool hasMissing = false;
+      for (final el in page.layers.content) {
+        if (el is ImageElement) {
+          final path = el.data.assetPath;
+          if (!state.imageCache.containsKey(path)) {
+            hasMissing = true;
+            break;
+          }
+        }
+      }
+      if (hasMissing) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          final notifier = ref.read(canvasProvider.notifier);
+          for (final el in page.layers.content) {
+            if (el is ImageElement) {
+              notifier.ensureAssetDecodedForThumbnail(el.data.assetPath);
+            }
+          }
+        });
+      }
+    }
+    // Detect corrupt-asset indicator: any image element on this page
+    // whose asset has been flagged as un-decodable (typically due to
+    // the historic 1024-aligned server-truncation bug).
+    bool hasCorruptAsset = false;
+    if (page != null) {
+      final corrupt = ref
+          .read(canvasProvider.notifier)
+          .corruptAssetIds;
+      if (corrupt.isNotEmpty) {
+        for (final el in page.layers.content) {
+          if (el is ImageElement && corrupt.contains(el.data.assetPath)) {
+            hasCorruptAsset = true;
+            break;
+          }
+        }
+      }
+    }
     return Builder(builder: (ctx) {
       final outline = Theme.of(ctx).colorScheme.outlineVariant;
       final shadowColor = Theme.of(ctx).colorScheme.shadow;
@@ -1070,14 +1129,34 @@ class _PageGridReorderableState extends State<PageGridReorderable> {
         child: ClipRRect(
           borderRadius: BorderRadius.circular(5),
           child: page != null
-              ? CustomPaint(
-                  painter: CanvasRenderEngine(
-                    pageData: page,
-                    zoom: 1.0,
-                    panOffset: Offset.zero,
-                    imageCache: state.imageCache,
-                  ),
-                  size: Size.infinite,
+              ? Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    CustomPaint(
+                      painter: CanvasRenderEngine(
+                        pageData: page,
+                        zoom: 1.0,
+                        panOffset: Offset.zero,
+                        imageCache: state.imageCache,
+                      ),
+                      size: Size.infinite,
+                    ),
+                    if (hasCorruptAsset)
+                      const Positioned(
+                        top: 4,
+                        right: 4,
+                        child: Tooltip(
+                          message:
+                              "Asset corrotto sul server (troncato) — "
+                              'ri-importa il PDF originale per recuperare',
+                          child: Icon(
+                            Icons.broken_image_rounded,
+                            color: Color(0xFFE65100),
+                            size: 18,
+                          ),
+                        ),
+                      ),
+                  ],
                 )
               : Center(child: Icon(Icons.description_outlined, color: Theme.of(ctx).colorScheme.onSurfaceVariant)),
         ),

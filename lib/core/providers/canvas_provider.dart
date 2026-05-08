@@ -673,6 +673,38 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     }
   }
 
+  /// Tracks which on-demand thumbnail decodes are already queued so the
+  /// page manager doesn't fire the same decode N times when multiple
+  /// thumbnails share the same asset (or a thumbnail re-builds before
+  /// its decode lands).
+  final Set<String> _onDemandDecodeQueued = <String>{};
+
+  /// Public hook for the page manager / library: ensure the asset
+  /// behind a thumbnail is decoded, fire-and-forget. Cheap when the
+  /// asset is already cached; otherwise queues a single decode that
+  /// will land in `state.imageCache` on the next frame.
+  ///
+  /// On a 200-page notebook eagerly decoding every asset on open would
+  /// cost seconds of CPU and ~hundred-MB peak memory; this lets the
+  /// grid pull only the visible thumbnails' assets and progressively
+  /// fill in the rest as the user scrolls.
+  void ensureAssetDecodedForThumbnail(String assetId) {
+    if (state == null) return;
+    final s = state!;
+    if (s.imageCache.containsKey(assetId)) return;
+    if (_onDemandDecodeQueued.contains(assetId)) return;
+    final bytes = s.assetBytes[assetId];
+    if (bytes == null) return;
+    _onDemandDecodeQueued.add(assetId);
+    () async {
+      try {
+        await _decodeAndCacheImage(assetId, bytes);
+      } finally {
+        _onDemandDecodeQueued.remove(assetId);
+      }
+    }();
+  }
+
   /// SharedPreferences key for a notebook's last-observed delta metadata
   /// ETag.  Persisting this across app launches lets the first pull on
   /// re-open short-circuit when nothing changed server-side, eliminating
@@ -3938,6 +3970,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
+  /// Asset IDs that have been classified as corrupt (decoding failed,
+  /// usually due to the historic 1024-aligned server-side truncation
+  /// bug). Used by thumbnails / page render to mark such pages with a
+  /// warning indicator instead of a blank placeholder so the user
+  /// understands that re-decoding won't help and they need to
+  /// re-import the source PDF / image.
+  final Set<String> _corruptAssetIds = <String>{};
+
+  /// Public read-only view of [_corruptAssetIds] for UI consumers.
+  Set<String> get corruptAssetIds => _corruptAssetIds;
+
   Future<void> _decodeAndCacheImage(String assetId, Uint8List bytes) async {
     // Remember which notebook this decode belongs to. If the user switches
     // notebooks while we're awaiting the codec, the decoded ui.Image must
@@ -3967,9 +4010,32 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         previous.dispose();
       }
       newCache[assetId] = image;
+      // Recovered from a previous corruption attempt — clear the flag
+      // so the warning indicator goes away.
+      _corruptAssetIds.remove(assetId);
       state = state!.copyWith(imageCache: newCache);
-    } catch (_) {
-      // Image decoding failed — placeholder will be shown
+    } catch (e) {
+      // Image decoding failed. Most common cause in this codebase is
+      // the historic server-side truncation bug — assets uploaded
+      // before the post-PUT size verification (commit dd43281) sit on
+      // the server and in local mirrors at exactly 1024-aligned byte
+      // boundaries with corrupt PNG/JPG payloads. Detect that
+      // signature and log a one-shot diagnostic so the user knows
+      // why a thumbnail is blank.
+      final isLikelyTruncation = bytes.isNotEmpty && bytes.length % 1024 == 0;
+      if (_corruptAssetIds.add(assetId)) {
+        // ignore: avoid_print
+        print('[Canvas] Asset $assetId failed to decode: $e '
+            '(${bytes.length} B'
+            '${isLikelyTruncation ? ", 1024-aligned → likely truncated server-side" : ""}). '
+            'Re-import the source PDF/image to recover this asset.');
+        if (state != null && state!.metadata.id == ownerNotebookId) {
+          // Bump state with current cache so widgets that depend on
+          // corruptAssetIds (the warning indicator on thumbnails)
+          // pick up the new entry on the next rebuild.
+          state = state!.copyWith(imageCache: state!.imageCache);
+        }
+      }
     } finally {
       // Dispose the codec to release native decoder resources.
       // On iPad, leaking codecs quickly exhausts GPU memory and causes the
