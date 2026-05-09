@@ -931,19 +931,14 @@ class CanvasRenderEngine extends CustomPainter {
     }
     if (n > 1) velocities[0] = velocities[1];
 
-    // Smooth velocities BEFORE computing widths — millisecond
-    // timestamps from DateTime.now() have ±1 ms quantisation jitter
-    // that, divided by ~10 ms inter-sample, produced ±10% velocity
-    // noise. With per-second velocity that noise translated directly
-    // to width pulses every other sample → fast strokes looked
-    // "spezzettata" (the user's exact word). Three 1-2-1 passes on
-    // velocities blur the jitter to invisibility while preserving
-    // the genuine fast→slow envelope of the hand gesture. Cheap —
-    // operates on N points only.
-    for (int pass = 0; pass < 3; pass++) {
-      for (int i = 1; i < n - 1; i++) {
-        velocities[i] = (velocities[i - 1] + velocities[i] * 2 + velocities[i + 1]) / 4;
-      }
+    // Light velocity smoothing — one 1-2-1 pass kills the worst
+    // millisecond-quantisation jitter without flattening the genuine
+    // fast→slow envelope of the hand gesture. Three passes (the
+    // previous attempt) over-smoothed at medium writing speed and
+    // erased the visible width modulation that gives a fountain-pen
+    // line its character.
+    for (int i = 1; i < n - 1; i++) {
+      velocities[i] = (velocities[i - 1] + velocities[i] * 2 + velocities[i + 1]) / 4;
     }
 
     final rawWidths = List<double>.filled(n, stroke.baseWidth);
