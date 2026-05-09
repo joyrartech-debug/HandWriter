@@ -1537,47 +1537,81 @@ class CanvasRenderEngine extends CustomPainter {
     }
   }
 
-  /// Render the laser-pointer trail. Each point fades over a short
-  /// window — the head of the trail is painted as a glowing red dot
-  /// and the body as a polyline whose alpha drops with age.
+  /// Render the laser-pointer trail. Strategy:
+  /// - Group consecutive points into 4 alpha buckets (0-25%, 25-50%,
+  ///   50-75%, 75-100% of fade window). Each bucket renders ONE Path
+  ///   with strokeJoin.round and StrokeCap.round — Skia draws a
+  ///   continuous fading line instead of N independent drawLine calls,
+  ///   which used to expose every vertex as a circular blob ("pallini
+  ///   visibili durante il tratto") because each segment-end is an
+  ///   independent round cap.
+  /// - Reduced intensity: thinner core (2.5 vs 4), softer glow (alpha
+  ///   0.18 vs 0.30, width 7 vs 12, sigma 3 vs 6) — the prior version
+  ///   was overpowering on white pages.
+  /// - Smaller head dot (r=4 vs 7, sigma 2 vs 4).
   void _paintLaserTrail(
       Canvas canvas, List<({double x, double y, int t})> pts) {
     if (pts.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     const fadeMs = 1500;
-    // Polyline body
+    const buckets = 4;
     if (pts.length >= 2) {
+      // Build one Path per alpha bucket. Each path is a piecewise
+      // polyline; Skia's strokeJoin.round eliminates the per-vertex
+      // "pallini" the prior implementation had.
+      final paths = List<Path?>.filled(buckets, null);
+      Path? currentPath;
+      int currentBucket = -1;
       for (int i = 1; i < pts.length; i++) {
         final age = now - pts[i].t;
-        if (age > fadeMs) continue;
-        final alpha = (1.0 - (age / fadeMs)).clamp(0.0, 1.0);
-        // Soft outer glow + sharp inner stroke.
+        if (age > fadeMs) {
+          currentPath = null;
+          currentBucket = -1;
+          continue;
+        }
+        final alpha01 = 1.0 - (age / fadeMs);
+        final bucket = (alpha01 * buckets).floor().clamp(0, buckets - 1);
+        if (bucket != currentBucket) {
+          paths[bucket] ??= Path();
+          paths[bucket]!.moveTo(pts[i - 1].x, pts[i - 1].y);
+          currentPath = paths[bucket];
+          currentBucket = bucket;
+        }
+        currentPath!.lineTo(pts[i].x, pts[i].y);
+      }
+      const baseColor = Color(0xFFFF3B30);
+      for (int b = 0; b < buckets; b++) {
+        final path = paths[b];
+        if (path == null) continue;
+        final alpha = (b + 0.5) / buckets;
         final glow = Paint()
-          ..color = const Color(0xFFFF3B30).withValues(alpha: alpha * 0.30)
-          ..strokeWidth = 12
+          ..color = baseColor.withValues(alpha: alpha * 0.18)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 7
           ..strokeCap = StrokeCap.round
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 6);
+          ..strokeJoin = StrokeJoin.round
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
         final core = Paint()
-          ..color = const Color(0xFFFF3B30).withValues(alpha: alpha)
-          ..strokeWidth = 4
-          ..strokeCap = StrokeCap.round;
-        final p1 = Offset(pts[i - 1].x, pts[i - 1].y);
-        final p2 = Offset(pts[i].x, pts[i].y);
-        canvas.drawLine(p1, p2, glow);
-        canvas.drawLine(p1, p2, core);
+          ..color = baseColor.withValues(alpha: alpha)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 2.5
+          ..strokeCap = StrokeCap.round
+          ..strokeJoin = StrokeJoin.round;
+        canvas.drawPath(path, glow);
+        canvas.drawPath(path, core);
       }
     }
-    // Bright head dot at the latest point
+    // Bright head dot at the latest point — smaller and softer.
     final last = pts.last;
     final headAge = now - last.t;
     if (headAge < fadeMs) {
       final headAlpha = (1.0 - (headAge / fadeMs)).clamp(0.0, 1.0);
       canvas.drawCircle(
         Offset(last.x, last.y),
-        7,
+        4,
         Paint()
           ..color = const Color(0xFFFF3B30).withValues(alpha: headAlpha)
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
+          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
       );
     }
   }

@@ -116,12 +116,22 @@ class HwEditorTopBar extends StatelessWidget {
             ),
             const SizedBox(width: 6),
             SyncBadge(state: syncState),
-            if (dirty && !isCompact) ...[
+            // Reserve constant space for the "Non salvato" pill so the
+            // toolbar to the right (undo/redo/pages/etc.) doesn't shift
+            // every time the dirty flag flips. Visibility.maintainSize
+            // keeps the slot in the layout regardless of visibility.
+            if (!isCompact) ...[
               const SizedBox(width: 8),
-              const HwPill(
-                label: 'Non salvato',
-                background: Color(0x33B68A2D),
-                foreground: Color(0xFF7C5E1F),
+              Visibility(
+                visible: dirty,
+                maintainSize: true,
+                maintainAnimation: true,
+                maintainState: true,
+                child: const HwPill(
+                  label: 'Non salvato',
+                  background: Color(0x33B68A2D),
+                  foreground: Color(0xFF7C5E1F),
+                ),
               ),
             ],
             const Spacer(),

@@ -332,14 +332,17 @@ class LaserStrokeNotifier extends ChangeNotifier {
   List<({double x, double y, int t})> get points => _points;
 
   /// Append a point. Starts a periodic ticker that prunes faded points
-  /// and re-paints. Idempotent.
+  /// and re-paints. Idempotent. 16ms interval (60 Hz) aligns with
+  /// typical display refresh — the previous 30 ms (33 Hz) caused the
+  /// "scatti" the user reported because every other display frame
+  /// re-rendered the trail at the same alpha as the previous one.
   void addPoint(Offset pos) {
     _points.add((
       x: pos.dx,
       y: pos.dy,
       t: DateTime.now().millisecondsSinceEpoch,
     ));
-    _ticker ??= Timer.periodic(const Duration(milliseconds: 30), (_) {
+    _ticker ??= Timer.periodic(const Duration(milliseconds: 16), (_) {
       _prune();
     });
     notifyListeners();
