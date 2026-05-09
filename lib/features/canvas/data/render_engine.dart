@@ -943,8 +943,16 @@ class CanvasRenderEngine extends CustomPainter {
 
     final rawWidths = List<double>.filled(n, stroke.baseWidth);
     for (int i = 0; i < n; i++) {
-      final velocityFactor =
-          (1.0 - (velocities[i] / 2500.0).clamp(0.0, 0.40));
+      // Velocity factor gated by a "normal writing" threshold:
+      //   ≤ 800 px/s ("normal handwriting") → no thinning at all,
+      //   linearly up to 15% thinning at ≥ 4000 px/s (very fast).
+      // The previous unconditional 40% thinning crushed strokes at
+      // moderate speed (the user's "medio-veloce" complaint).
+      // Pressure already carries the bulk of the modulation on a
+      // stylus — the wrist naturally lightens at speed — so velocity
+      // here is just a subtle assist, not the primary signal.
+      final excessV = (velocities[i] - 800.0).clamp(0.0, 4000.0);
+      final velocityFactor = 1.0 - (excessV / 4000.0) * 0.15;
       final pressureFactor = 0.55 + stroke.points[i].pressure * 0.50;
       rawWidths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
     }
