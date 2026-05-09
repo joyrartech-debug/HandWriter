@@ -115,16 +115,26 @@ class ActiveStrokeNotifier extends ChangeNotifier {
         sy = (p1.y + pos.dy) / 2;
         sp = (p1.pressure + pressure) / 2;
       }
+    } else if (_isDesktop && !_synthPressure) {
+      // ── PC graphics tablet (Wacom/Huion/Gaomon) — PASSTHROUGH ─
+      // The driver already heavily filters the digitiser stream.
+      // Flutter then coalesces to ~60 Hz frame rate, so each sample
+      // we receive is sparse along a fast curve. Even the iPad-
+      // equivalent 20% history-blend below biased every sample
+      // INWARD relative to the user's real hand motion — on a fast
+      // C the result was visibly wavy/oscillating ("ondulata"). For
+      // PC stylus we trust the hardware and don't smooth at all;
+      // any de-jitter must come from the renderer's Catmull-Rom
+      // interpolation. Pressure is also passthrough — it's already
+      // filtered by the tablet's pressure ADC.
+      // sx, sy, sp keep the raw pos.dx, pos.dy, pressure assigned above.
     } else {
       // ── Touch / Apple Pencil smoothing (very light, high current-weight) ─
-      // Apple Pencil is already hardware-filtered at 120 Hz. Heavier
-      // smoothing (old: current=53 %, 4-point window) caused two user-
-      // visible defects:
-      //   1. the stroke visibly lags the pen tip, and
-      //   2. the tail end is "pulled back" toward earlier points so the
-      //      final letter looks squeezed vs. what the user drew.
-      // A 3-point window with ~80 % weight on the current point removes
-      // sub-pixel ADC jitter without any perceptible drag.
+      // Apple Pencil is already hardware-filtered at 120 Hz. A 3-point
+      // window with ~80 % weight on the current point removes sub-pixel
+      // ADC jitter without perceptible drag. Kept for iPad path; PC
+      // stylus skips it (above branch) because Flutter's 60 Hz
+      // coalescing makes every history blend visibly distort fast curves.
       if (_points.length >= 2) {
         final p1 = _points[_points.length - 1];
         final p0 = _points[_points.length - 2];

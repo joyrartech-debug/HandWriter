@@ -1105,6 +1105,17 @@ class CanvasRenderEngine extends CustomPainter {
     }
     final result = <_InterpolatedPoint>[];
 
+    // CENTRIPETAL Catmull-Rom (alpha = 0.5) instead of uniform.
+    // Knot intervals scale with sqrt(distance) — produces visibly
+    // smoother curves through non-uniformly-spaced sample points,
+    // which is exactly the case on a fast hand-drawn C where Flutter
+    // delivers ~10 sparse samples on the curve. Uniform Catmull-Rom
+    // (the previous formulation) over those sparse + non-uniformly-
+    // spaced points produced visible loops/overshoot — the "ondulata"
+    // wave the user reported. Centripetal kills both artifacts.
+    // Reference: Yuksel et al, "Parameterization and Applications of
+    // Catmull-Rom Curves" (2011), which proved alpha=0.5 always
+    // produces non-self-intersecting curves between control points.
     for (int i = 0; i < points.length - 1; i++) {
       final p0 = i > 0 ? points[i - 1] : points[i];
       final p1 = points[i];
@@ -1113,27 +1124,66 @@ class CanvasRenderEngine extends CustomPainter {
       final w1 = widths[i];
       final w2 = widths[i + 1];
 
-      final dx = p2.x - p1.x;
-      final dy = p2.y - p1.y;
-      final dist = sqrt(dx * dx + dy * dy);
-      // Proportional to screen-space distance: ~1 segment per 3 screen pixels
-      final segments = max(2, min(24, (dist * zoom / 3.0).ceil()));
+      // Knot intervals — alpha=0.5 (centripetal). Clamp tiny intervals
+      // to 1.0 to avoid div-by-zero on coincident samples.
+      double knotDelta(double dx, double dy) {
+        final d = sqrt(dx * dx + dy * dy);
+        if (d < 1e-6) return 1.0;
+        return sqrt(d);
+      }
+      final dt0 = knotDelta(p1.x - p0.x, p1.y - p0.y);
+      final dt1 = knotDelta(p2.x - p1.x, p2.y - p1.y);
+      final dt2 = knotDelta(p3.x - p2.x, p3.y - p2.y);
+
+      final dx12 = p2.x - p1.x;
+      final dy12 = p2.y - p1.y;
+      final chord = sqrt(dx12 * dx12 + dy12 * dy12);
+      final segments = max(2, min(24, (chord * zoom / 3.0).ceil()));
 
       for (int j = 0; j < segments; j++) {
-        final t = j / segments;
-        final t2 = t * t;
-        final t3 = t2 * t;
+        final u = j / segments;
+        // Local parameter t over the [t1, t2] knot range.
+        final t = u * dt1;
+        // Three lerps then two lerps then one — Barry-Goldman pyramid.
+        // (Simpler than the matrix form and numerically clean.)
+        final t10 = t + dt0;        // (t - t0)
+        final t01 = dt0 - t;         // (t1 - t)
+        final t02 = dt0 + dt1 - t;   // (t2 - t)
+        final t12 = dt1 - t;         // (t2 - t)
+        final t20 = t + dt0;         // (t - t0)
+        final t21 = t;               // (t - t1)
+        final t13 = dt1 + dt2 - t;   // (t3 - t)
+        final t23 = dt2 - t;         // (t3 - t)
 
-        final x = 0.5 * ((2 * p1.x) + (-p0.x + p2.x) * t +
-            (2 * p0.x - 5 * p1.x + 4 * p2.x - p3.x) * t2 +
-            (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3);
-        final y = 0.5 * ((2 * p1.y) + (-p0.y + p2.y) * t +
-            (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 +
-            (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3);
-        final pressure = p1.pressure + (p2.pressure - p1.pressure) * t;
-        final w = w1 + (w2 - w1) * t;
+        final invD0 = 1.0 / dt0;
+        final invD1 = 1.0 / dt1;
+        final invD2 = 1.0 / dt2;
+        final invD01 = 1.0 / (dt0 + dt1);
+        final invD12 = 1.0 / (dt1 + dt2);
 
-        result.add(_InterpolatedPoint(x, y, pressure, w));
+        // A1 = lerp(p0, p1, t10/dt0)
+        final a1x = p0.x * (t01 * invD0) + p1.x * (t10 * invD0);
+        final a1y = p0.y * (t01 * invD0) + p1.y * (t10 * invD0);
+        // A2 = lerp(p1, p2, t/dt1)
+        final a2x = p1.x * (t12 * invD1) + p2.x * (t21 * invD1);
+        final a2y = p1.y * (t12 * invD1) + p2.y * (t21 * invD1);
+        // A3 = lerp(p2, p3, (t-dt1)/dt2)
+        final a3x = p2.x * (t23 * invD2) + p3.x * ((t - dt1) * invD2);
+        final a3y = p2.y * (t23 * invD2) + p3.y * ((t - dt1) * invD2);
+        // B1 = lerp(A1, A2, t10/(dt0+dt1))
+        final b1x = a1x * (t02 * invD01) + a2x * (t20 * invD01);
+        final b1y = a1y * (t02 * invD01) + a2y * (t20 * invD01);
+        // B2 = lerp(A2, A3, t/(dt1+dt2))
+        final b2x = a2x * (t13 * invD12) + a3x * (t21 * invD12);
+        final b2y = a2y * (t13 * invD12) + a3y * (t21 * invD12);
+        // C = lerp(B1, B2, t/dt1)
+        final cx = b1x * (t12 * invD1) + b2x * (t21 * invD1);
+        final cy = b1y * (t12 * invD1) + b2y * (t21 * invD1);
+
+        final pressure = p1.pressure + (p2.pressure - p1.pressure) * u;
+        final w = w1 + (w2 - w1) * u;
+
+        result.add(_InterpolatedPoint(cx, cy, pressure, w));
       }
     }
     result.add(_InterpolatedPoint(
