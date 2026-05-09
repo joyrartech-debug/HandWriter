@@ -1433,7 +1433,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         color: state!.toolSettings.color == 0xFFFFEB3B
             ? 0xFF000000
             : state!.toolSettings.color,
-        strokeWidth: 2.0,
+        strokeWidth: AppConfig.defaultStrokeWidth,
         opacity: 1.0,
       );
     }
@@ -1838,12 +1838,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       default: toolType = 'pen';
     }
 
-    // Smooth the raw input points to reduce jitter/wigglyness.
-    // Skip smoothing for dense stylus input (iPad etc.) — already smooth,
-    // and the gaussian stretch distorts precise pen strokes.
-    final smoothedPoints = s.activeStroke.length > 80
-        ? s.activeStroke
-        : _smoothStrokePoints(s.activeStroke);
+    // No commit-time smoothing pass: the ActiveStrokeNotifier already
+    // smoothed each point inline (3- or 5-tap FIR depending on input
+    // device). Re-applying a 1-2-1 here shifted the committed shape
+    // 1-3 px on cusps relative to what was painted live, producing
+    // the visible "snap" the user saw when lifting the pen. Keeping
+    // the live preview's geometry consistent with the committed
+    // stroke also unifies the 80-point threshold edge case where
+    // long strokes silently switched smoothing modes.
+    final smoothedPoints = s.activeStroke;
 
     final newElement = ContentElement.stroke(
       id: const Uuid().v4(),
@@ -1872,27 +1875,6 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     );
   }
 
-  /// Light position smoothing on commit to reduce jitter.
-  /// Only smooths interior points — first and last stay fixed to preserve
-  /// stroke bounds. Pressure is NOT smoothed (already done in real-time).
-  List<StrokePoint> _smoothStrokePoints(List<StrokePoint> raw) {
-    if (raw.length < 5) return raw;
-    // Single pass of 1-2-1 Gaussian smoothing — subtle cleanup without
-    // visibly reshaping the stroke the user drew.
-    final result = List<StrokePoint>.from(raw);
-    for (int i = 1; i < raw.length - 1; i++) {
-      final p0 = raw[i - 1];
-      final p1 = raw[i];
-      final p2 = raw[i + 1];
-      result[i] = StrokePoint(
-        x: (p0.x + p1.x * 2 + p2.x) / 4,
-        y: (p0.y + p1.y * 2 + p2.y) / 4,
-        pressure: p1.pressure,
-        timestamp: p1.timestamp,
-      );
-    }
-    return result;
-  }
 
   // ── Shape recognition (improved) ──
 

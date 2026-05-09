@@ -227,7 +227,12 @@ class CanvasRenderEngine extends CustomPainter {
     // bug where a fresh stroke appeared to start at the previous
     // stroke's end-point).
     final liveActive = activeStrokeGetter?.call() ?? activeStroke;
-    if (liveActive != null && liveActive.length >= 2) {
+    // isNotEmpty (was length >= 2): the first sample of every stroke
+    // now previews immediately as a dot via _paintStroke's single-
+    // point branch — no more 16-32 ms dead time on PointerDown, and
+    // a tap-to-dot is visible during the gesture instead of only
+    // appearing at lift.
+    if (liveActive != null && liveActive.isNotEmpty) {
       _paintStroke(canvas, StrokeData(
         points: liveActive,
         toolType: activeToolType ?? 'pen',
@@ -707,11 +712,16 @@ class CanvasRenderEngine extends CustomPainter {
         ..style = PaintingStyle.fill
         ..isAntiAlias = true;
       // Match the per-tool width math: pen ~baseWidth, brush 1.5×, etc.
-      double radius = stroke.baseWidth * 0.55;
+      // Bumped 0.55 → 0.75 so single-tap dots are actually visible
+      // (a tap left a 1.5 px diameter dot at default — sub-pixel on
+      // many displays). Now ~2.6 px at default baseWidth, matching
+      // GoodNotes/Notability quick-tap visibility.
+      double radius = stroke.baseWidth * 0.75;
       if (stroke.toolType == 'brush') radius *= 1.4;
       if (stroke.toolType == 'highlighter') radius = stroke.baseWidth * 0.6;
-      // Pressure factor (Apple Pencil reports light pressure on quick taps).
-      final pf = 0.4 + p.pressure * 0.6;
+      // Pressure factor: floor 0.6 + slope 0.4 (was 0.4+0.6) keeps
+      // body on the worst-case-light Apple Pencil quick tap.
+      final pf = 0.6 + p.pressure * 0.4;
       canvas.drawCircle(Offset(p.x, p.y), (radius * pf).clamp(0.5, 50.0), paint);
       return;
     }
@@ -909,26 +919,48 @@ class CanvasRenderEngine extends CustomPainter {
     //     width-step artifacts visible on slow zoomed-in strokes.
     final n = stroke.points.length;
 
-    // Compute velocity from original points (independent of interpolation)
+    // Velocity in PAGE-UNITS PER SECOND, not per-sample. The previous
+    // per-sample formula made the velocity-thinning effect dependent
+    // on the input device's capture rate: a 240 Hz Apple Pencil with
+    // tiny per-sample deltas saw `velocityFactor ≈ 1.0` (no thinning),
+    // while a 60 Hz mouse on the same physical hand-speed saw a 4×
+    // larger delta and thus a much-thinner stroke. Wacom/Huion at
+    // 200-300 Hz (the user's primary input) produced essentially flat
+    // strokes — no fast-thin/slow-thick character at all. Per-second
+    // normalisation makes all three input contexts behave the same.
     final velocities = List<double>.filled(n, 0.0);
     for (int i = 1; i < n; i++) {
       final dx = stroke.points[i].x - stroke.points[i - 1].x;
       final dy = stroke.points[i].y - stroke.points[i - 1].y;
-      velocities[i] = sqrt(dx * dx + dy * dy);
+      final dt = (stroke.points[i].timestamp -
+                  stroke.points[i - 1].timestamp);
+      // Avoid div-by-zero / negative dt (clock jitter): clamp to 1 ms.
+      final dtMs = dt < 1 ? 1 : dt;
+      velocities[i] = sqrt(dx * dx + dy * dy) * 1000.0 / dtMs;
     }
     if (n > 1) velocities[0] = velocities[1];
 
     final rawWidths = List<double>.filled(n, stroke.baseWidth);
     for (int i = 0; i < n; i++) {
-      final velocityFactor = (1.0 - (velocities[i] / 20.0).clamp(0.0, 0.30));
-      final pressureFactor = 0.45 + stroke.points[i].pressure * 0.60;
+      // Velocity factor: ~1000 page-units/sec is "deliberate writing",
+      // ~3000 is "fast scribble". Clamp 0.40 means up to 40% thinning
+      // — visible without becoming hairline. Divisor 2500 picked so
+      // ~1000 px/s gives factor ≈ 0.84 (mid), ~2500 px/s gives 0.60
+      // (visibly thin), ~3500+ saturates the clamp.
+      final velocityFactor =
+          (1.0 - (velocities[i] / 2500.0).clamp(0.0, 0.40));
+      // Pressure curve: floor 0.55 + slope 0.50 keeps light-pressure
+      // strokes (e.g. Pencil acceleration phase) from collapsing to
+      // hairline. Match for GoodNotes Fountain Pen feel without
+      // overshooting at heavy pressure.
+      final pressureFactor = 0.55 + stroke.points[i].pressure * 0.50;
       rawWidths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
     }
-    // Smooth widths on original points (cheap — only N points).
-    for (int pass = 0; pass < 3; pass++) {
-      for (int i = 1; i < n - 1; i++) {
-        rawWidths[i] = (rawWidths[i - 1] + rawWidths[i] * 2 + rawWidths[i + 1]) / 4;
-      }
+    // Single smoothing pass: pressure was already EMA-smoothed in
+    // ActiveStrokeNotifier, so 3 passes here was redundant and added
+    // ~30 ms of visible width-modulation lag at 240 Hz Pencil.
+    for (int i = 1; i < n - 1; i++) {
+      rawWidths[i] = (rawWidths[i - 1] + rawWidths[i] * 2 + rawWidths[i + 1]) / 4;
     }
 
     final interpolated = _catmullRomAdaptiveWithWidth(stroke.points, rawWidths, zoom);

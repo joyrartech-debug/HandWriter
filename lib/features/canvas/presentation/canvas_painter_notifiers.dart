@@ -71,7 +71,18 @@ class ActiveStrokeNotifier extends ChangeNotifier {
 
     double sx = pos.dx, sy = pos.dy, sp = pressure;
 
-    if (_isDesktop) {
+    // Detect a high-sample-rate input (graphics tablet at ≥125 Hz):
+    // its samples are already smooth and the heavy 5-point desktop
+    // smoothing introduces visible pen-tip lag (the same defect the
+    // iPad branch was tuned to avoid). Route those through the lighter
+    // 3-point branch instead — Wacom/Huion stylus → smooth without lag.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final lastTs = _points.isEmpty ? nowMs : _points.last.timestamp;
+    final dtMs = nowMs - lastTs;
+    final isHighRate = dtMs > 0 && dtMs <= 8;  // ≥125 Hz = stylus tablet
+    final useDesktopHeavy = _isDesktop && !isHighRate;
+
+    if (useDesktopHeavy) {
       // ── Desktop / graphics-tablet smoothing (5-point window) ─────────────
       // Heavier history weighting (current = 6/16 ≈ 38 %) irons out the
       // waviness caused by the tablet digitiser's analog noise.
@@ -137,9 +148,15 @@ class ActiveStrokeNotifier extends ChangeNotifier {
       final last = _points.last;
       final dx2 = pos.dx - last.x;
       final dy2 = pos.dy - last.y;
-      final v = sqrt(dx2 * dx2 + dy2 * dy2);
-      // Page-units per sample. ~8 page-units/sample = "fast scribble" → thin.
-      final target = (0.85 - (v / 8.0).clamp(0.0, 0.55)).clamp(0.30, 0.85);
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final dt = nowMs - last.timestamp;
+      final dtMs = dt < 1 ? 1 : dt;
+      // Page-units PER SECOND (was per-sample). Independent of the
+      // input device's capture rate. ~1500 px/s = "fast scribble" —
+      // matches the renderer's velocity scale (divisor 2500, clamp
+      // 0.40) so synth pressure and real pressure thin similarly.
+      final v = sqrt(dx2 * dx2 + dy2 * dy2) * 1000.0 / dtMs;
+      final target = (0.85 - (v / 1500.0).clamp(0.0, 0.55)).clamp(0.30, 0.85);
       _synthEma = _synthEma * 0.7 + target * 0.3;
       sp = _synthEma;
     }
