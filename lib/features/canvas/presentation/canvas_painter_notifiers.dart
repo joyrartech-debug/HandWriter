@@ -163,8 +163,36 @@ class ActiveStrokeNotifier extends ChangeNotifier {
       sp = _synthEma;
     }
 
-    _points.add(StrokePoint(x: sx, y: sy, pressure: sp,
-        timestamp: DateTime.now().millisecondsSinceEpoch));
+    // Resample sparse pointer events. Flutter on PC coalesces stylus
+    // moves to frame rate (~60 Hz / 16 ms) even when the tablet driver
+    // delivers 200-300 Hz internally. On a fast hand-drawn stroke
+    // each PointerMoveEvent can be 30-60 page-units from the previous
+    // — Catmull-Rom over those sparse control points produces visibly
+    // angular curves at hard turns ("spezzettata" feel). Insert linear
+    // intermediate samples when the gap is large so the renderer's
+    // adaptive interpolation has denser control points to work with.
+    final nowTs = DateTime.now().millisecondsSinceEpoch;
+    if (_points.isNotEmpty) {
+      final last = _points.last;
+      final fdx = sx - last.x;
+      final fdy = sy - last.y;
+      final fdist = sqrt(fdx * fdx + fdy * fdy);
+      const stepMax = 8.0; // page-units between samples
+      if (fdist > stepMax * 1.5) {
+        final n = (fdist / stepMax).floor();
+        final dtTotal = nowTs - last.timestamp;
+        for (int k = 1; k < n; k++) {
+          final t = k / n;
+          _points.add(StrokePoint(
+            x: last.x + fdx * t,
+            y: last.y + fdy * t,
+            pressure: last.pressure + (sp - last.pressure) * t,
+            timestamp: last.timestamp + (dtTotal * t).round(),
+          ));
+        }
+      }
+    }
+    _points.add(StrokePoint(x: sx, y: sy, pressure: sp, timestamp: nowTs));
     notifyListeners();
   }
 

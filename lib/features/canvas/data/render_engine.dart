@@ -919,48 +919,48 @@ class CanvasRenderEngine extends CustomPainter {
     //     width-step artifacts visible on slow zoomed-in strokes.
     final n = stroke.points.length;
 
-    // Velocity in PAGE-UNITS PER SECOND, not per-sample. The previous
-    // per-sample formula made the velocity-thinning effect dependent
-    // on the input device's capture rate: a 240 Hz Apple Pencil with
-    // tiny per-sample deltas saw `velocityFactor ≈ 1.0` (no thinning),
-    // while a 60 Hz mouse on the same physical hand-speed saw a 4×
-    // larger delta and thus a much-thinner stroke. Wacom/Huion at
-    // 200-300 Hz (the user's primary input) produced essentially flat
-    // strokes — no fast-thin/slow-thick character at all. Per-second
-    // normalisation makes all three input contexts behave the same.
+    // Velocity in PAGE-UNITS PER SECOND, normalised across input rates.
     final velocities = List<double>.filled(n, 0.0);
     for (int i = 1; i < n; i++) {
       final dx = stroke.points[i].x - stroke.points[i - 1].x;
       final dy = stroke.points[i].y - stroke.points[i - 1].y;
       final dt = (stroke.points[i].timestamp -
                   stroke.points[i - 1].timestamp);
-      // Avoid div-by-zero / negative dt (clock jitter): clamp to 1 ms.
       final dtMs = dt < 1 ? 1 : dt;
       velocities[i] = sqrt(dx * dx + dy * dy) * 1000.0 / dtMs;
     }
     if (n > 1) velocities[0] = velocities[1];
 
+    // Smooth velocities BEFORE computing widths — millisecond
+    // timestamps from DateTime.now() have ±1 ms quantisation jitter
+    // that, divided by ~10 ms inter-sample, produced ±10% velocity
+    // noise. With per-second velocity that noise translated directly
+    // to width pulses every other sample → fast strokes looked
+    // "spezzettata" (the user's exact word). Three 1-2-1 passes on
+    // velocities blur the jitter to invisibility while preserving
+    // the genuine fast→slow envelope of the hand gesture. Cheap —
+    // operates on N points only.
+    for (int pass = 0; pass < 3; pass++) {
+      for (int i = 1; i < n - 1; i++) {
+        velocities[i] = (velocities[i - 1] + velocities[i] * 2 + velocities[i + 1]) / 4;
+      }
+    }
+
     final rawWidths = List<double>.filled(n, stroke.baseWidth);
     for (int i = 0; i < n; i++) {
-      // Velocity factor: ~1000 page-units/sec is "deliberate writing",
-      // ~3000 is "fast scribble". Clamp 0.40 means up to 40% thinning
-      // — visible without becoming hairline. Divisor 2500 picked so
-      // ~1000 px/s gives factor ≈ 0.84 (mid), ~2500 px/s gives 0.60
-      // (visibly thin), ~3500+ saturates the clamp.
       final velocityFactor =
           (1.0 - (velocities[i] / 2500.0).clamp(0.0, 0.40));
-      // Pressure curve: floor 0.55 + slope 0.50 keeps light-pressure
-      // strokes (e.g. Pencil acceleration phase) from collapsing to
-      // hairline. Match for GoodNotes Fountain Pen feel without
-      // overshooting at heavy pressure.
       final pressureFactor = 0.55 + stroke.points[i].pressure * 0.50;
       rawWidths[i] = stroke.baseWidth * pressureFactor * velocityFactor;
     }
-    // Single smoothing pass: pressure was already EMA-smoothed in
-    // ActiveStrokeNotifier, so 3 passes here was redundant and added
-    // ~30 ms of visible width-modulation lag at 240 Hz Pencil.
-    for (int i = 1; i < n - 1; i++) {
-      rawWidths[i] = (rawWidths[i - 1] + rawWidths[i] * 2 + rawWidths[i + 1]) / 4;
+    // Two more smoothing passes on the final widths — pressure was
+    // already EMA-smoothed in ActiveStrokeNotifier; combined with the
+    // velocity-smoothing above this gives the final width signal a
+    // continuous look without lag.
+    for (int pass = 0; pass < 2; pass++) {
+      for (int i = 1; i < n - 1; i++) {
+        rawWidths[i] = (rawWidths[i - 1] + rawWidths[i] * 2 + rawWidths[i + 1]) / 4;
+      }
     }
 
     final interpolated = _catmullRomAdaptiveWithWidth(stroke.points, rawWidths, zoom);
