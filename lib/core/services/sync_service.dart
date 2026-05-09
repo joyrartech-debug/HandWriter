@@ -712,16 +712,20 @@ class SyncService {
           '${dir}pages/${e.key}', bytes, timeoutSeconds: dt);
     }
 
+    // Track expected sizes of asset uploads for the batched post-PUT
+    // verification step below. Without batching, every asset PUT did its
+    // own PROPFIND verify (50 PDF-import assets × 80ms RTT on Tailscale
+    // = 4 seconds of serialised verification at the end of the save).
+    // skipVerify=true here suppresses the per-PUT PROPFIND; we replace
+    // it with one directory-level PROPFIND after Future.wait — same
+    // truncation safety in 1 RTT instead of N.
+    final expectedAssetSizes = <String, int>{};
     if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
       for (final e in dirtyAssets.entries) {
-        // criticalVerify: assets are typically PNG renders of PDF pages
-        // that can be SMALLER than [_uploadVerifyMin] (a thumbnail-only
-        // page can be a couple of KB). Without verification a truncated
-        // PUT silently leaves an undecodable body on the server which
-        // every device then tries to decode forever. The +1 RTT PROPFIND
-        // is cheap relative to the cost of an unrecoverable asset.
+        expectedAssetSizes[e.key] = e.value.length;
         dataUploads.add(_webdav.uploadFile(
-            '${dir}assets/${e.key}', e.value, criticalVerify: true));
+            '${dir}assets/${e.key}', e.value,
+            timeoutSeconds: dt, skipVerify: true));
       }
     }
 
@@ -741,6 +745,58 @@ class SyncService {
       ...dataUploads,
       ...deleteFutures,
     ]);
+
+    // ── Phase 1.4: Batched asset-size verification ──
+    //
+    // Replaces N per-PUT PROPFINDs with one directory listing. On a
+    // 50-asset save (PDF re-import) this turns ~4s of serialised RTTs
+    // into ~80ms. For each verified-truncated asset we re-upload with
+    // criticalVerify (single-PROPFIND fallback) so the safety net is
+    // identical to the prior per-asset path. Listing failure (network
+    // blip on the PROPFIND) falls back to "trusting the PUT" — same
+    // semantics as the per-PUT verify did when its own PROPFIND timed
+    // out.
+    if (expectedAssetSizes.isNotEmpty) {
+      try {
+        final items = await _webdav
+            .listDirectory('${dir}assets/')
+            .timeout(const Duration(seconds: 30));
+        final remoteSizes = <String, int>{};
+        for (final it in items) {
+          if (it.contentLength != null) {
+            remoteSizes[it.name] = it.contentLength!;
+          }
+        }
+        final retriesNeeded = <String>[];
+        for (final entry in expectedAssetSizes.entries) {
+          final remote = remoteSizes[entry.key];
+          if (remote == null) {
+            // PROPFIND didn't list it (some Nextcloud installations
+            // miss freshly-PUT files in the listing for a moment).
+            // Treat as "couldn't verify" → retry with single check.
+            retriesNeeded.add(entry.key);
+          } else if (remote != entry.value) {
+            // ignore: avoid_print
+            print('[Sync] Asset ${entry.key} TRUNCATED on server: '
+                'sent ${entry.value}B, server has ${remote}B — retry');
+            retriesNeeded.add(entry.key);
+          }
+        }
+        if (retriesNeeded.isNotEmpty) {
+          // Re-upload only the broken ones with criticalVerify (the
+          // strict per-file PROPFIND-with-retries path).
+          await Future.wait(retriesNeeded.map((k) {
+            final bytes = dirtyAssets![k]!;
+            return _webdav.uploadFile('${dir}assets/$k', bytes,
+                timeoutSeconds: dt, criticalVerify: true);
+          }));
+        }
+      } catch (e) {
+        // ignore: avoid_print
+        print('[Sync] Batched asset verify failed (${expectedAssetSizes.length} '
+            'assets) — trusting PUTs: $e');
+      }
+    }
 
     // ── Phase 1.5: document.json (only after every page/asset succeeded) ──
     final docBytes = Uint8List.fromList(

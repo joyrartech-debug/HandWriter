@@ -224,6 +224,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _lassoTransformNotifier,
     _elementTransformNotifier,
     _laserStrokeNotifier,
+    // imageCache changes (asset decode lands, eviction, pull merge)
+    // ride the same repaint listenable now — used to be observed via
+    // ref.watch(canvasProvider.select(s.imageCache)) which fired the
+    // full Riverpod consumer cascade on every PDF-import decode.
+    ref.read(canvasProvider.notifier).imageCacheVersion,
   ]);
 
   // ── Auto-save (debounced) ──
@@ -2913,8 +2918,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                                 s == null
                                     ? const (zoom: 1.0, panOffset: Offset.zero)
                                     : (zoom: s.zoom, panOffset: s.panOffset)));
-                            ref.watch(canvasProvider.select(
-                                (s) => s?.imageCache));
+                            // imageCache is observed via the painter's
+                            // repaintNotifier (which now includes the
+                            // notifier's `imageCacheVersion`) — pulling
+                            // it through Riverpod here used to fire a
+                            // full state-cascade and shouldRepaint walk
+                            // on every PDF-import decode.
                             ref.watch(canvasProvider.select(
                                 (s) => s?.pages));
                             // Read full state fresh — the parent's

@@ -404,7 +404,9 @@ class WebDavService {
   /// The verification is skipped only for files small enough that no
   /// real-world HTTP buffer/proxy would truncate them ([_uploadVerifyMin]).
   Future<String?> uploadFile(String remotePath, Uint8List data,
-      {int? timeoutSeconds, bool criticalVerify = false}) async {
+      {int? timeoutSeconds,
+       bool criticalVerify = false,
+       bool skipVerify = false}) async {
     Object? lastError;
     for (var attempt = 0; attempt < _uploadMaxAttempts; attempt++) {
       try {
@@ -430,8 +432,12 @@ class WebDavService {
         // criticalVerify lowers the size gate to 0 — used for commit-marker
         // files (document.json, metadata.json) which can be just a few KB
         // but whose corruption breaks the whole notebook for every device.
+        // skipVerify suppresses the per-PUT PROPFIND entirely — used by
+        // syncDelta when uploading asset batches that get verified via
+        // a single directory-level PROPFIND after the parallel uploads
+        // (1 RTT vs N).
         final verifyThreshold = criticalVerify ? 0 : _uploadVerifyMin;
-        if (data.length >= verifyThreshold) {
+        if (!skipVerify && data.length >= verifyThreshold) {
           int? remoteSize;
           // PROPFIND verify with one in-place retry on failure for critical
           // files. Critical here means: keep retrying the *PROPFIND*, NOT
