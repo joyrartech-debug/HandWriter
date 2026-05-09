@@ -71,16 +71,18 @@ class ActiveStrokeNotifier extends ChangeNotifier {
 
     double sx = pos.dx, sy = pos.dy, sp = pressure;
 
-    // Detect a high-sample-rate input (graphics tablet at ≥125 Hz):
-    // its samples are already smooth and the heavy 5-point desktop
-    // smoothing introduces visible pen-tip lag (the same defect the
-    // iPad branch was tuned to avoid). Route those through the lighter
-    // 3-point branch instead — Wacom/Huion stylus → smooth without lag.
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final lastTs = _points.isEmpty ? nowMs : _points.last.timestamp;
-    final dtMs = nowMs - lastTs;
-    final isHighRate = dtMs > 0 && dtMs <= 8;  // ≥125 Hz = stylus tablet
-    final useDesktopHeavy = _isDesktop && !isHighRate;
+    // Smoothing branch routing — by INPUT KIND, not sample rate. The
+    // previous time-based detection (≤8ms inter-sample) failed on PC
+    // graphics tablets because Flutter coalesces pointer events to
+    // frame rate (~16ms = 60Hz) regardless of the tablet's true 200-
+    // 300 Hz rate. So Wacom users still got the heavy desktop branch
+    // and the visible pen-tip lag. _synthPressure==false means the
+    // device delivered real pressure (i.e. it's a stylus — Apple
+    // Pencil OR a graphics tablet) and is already hardware-smoothed;
+    // the heavy 5-point window adds drag without removing real noise.
+    // _synthPressure==true means mouse/touchpad — chunky 60Hz deltas
+    // that genuinely need heavier smoothing.
+    final useDesktopHeavy = _isDesktop && _synthPressure;
 
     if (useDesktopHeavy) {
       // ── Desktop / graphics-tablet smoothing (5-point window) ─────────────

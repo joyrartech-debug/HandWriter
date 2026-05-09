@@ -77,7 +77,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// already cover. Walking 200 elements × 80 points per skipped
   /// sample dominated CPU on dense ink pages.
   Offset _lastEraseAtPos = const Offset(-1e9, -1e9);
-  static const double _eraseRadiusFraction = 0.3;
+  // 0.1 (was 0.3): the previous threshold was tuned for iPad 120 Hz
+  // dense sub-mm samples but blocked legitimate slow erase drags on
+  // graphics tablets (200-300 Hz) where each sample moves <1 page-unit.
+  // The eraser felt like it "stutters" at slow speeds because erase work
+  // only fired when the user accumulated ~30% of the eraser radius.
+  // 0.1 still skips obvious noise; the real per-event compute cost is
+  // bounded by the bbox-culled stroke walk and amortised by the 60 Hz
+  // _eraseFlushTimer batching state mutations.
+  static const double _eraseRadiusFraction = 0.1;
 
   /// Mutex: serializes save() and _pullRemoteChanges() so they never
   /// race each other. Only one can modify state at a time.
