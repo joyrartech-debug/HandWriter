@@ -1272,9 +1272,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Laser pointer: append to the fading-trail notifier ONLY. Never
     // touches Riverpod, never commits a stroke; the trail evaporates
-    // on its own after a couple of seconds.
+    // on its own after a couple of seconds. start:true marks this as
+    // the first point of a new gesture so the painter doesn't bridge
+    // it with a long straight line from the previous stroke's end.
     if (tool == CanvasTool.laser) {
-      _laserStrokeNotifier.addPoint(pagePos);
+      _laserStrokeNotifier.addPoint(pagePos, start: true);
       return;
     }
 

@@ -49,7 +49,7 @@ class CanvasRenderEngine extends CustomPainter {
   /// Laser-pointer trail — list of (x, y, t-millis) tuples. The painter
   /// computes per-point opacity from `now − t` so the trail visually
   /// fades. Never written to disk; presentation only.
-  final List<({double x, double y, int t})> Function()? laserTrailGetter;
+  final List<({double x, double y, int t, bool start})> Function()? laserTrailGetter;
   final (Offset, Offset, String)? shapePreview;
   final ShapeData? recognizedShapePreview;
   final double zoom;
@@ -1550,7 +1550,7 @@ class CanvasRenderEngine extends CustomPainter {
   ///   was overpowering on white pages.
   /// - Smaller head dot (r=4 vs 7, sigma 2 vs 4).
   void _paintLaserTrail(
-      Canvas canvas, List<({double x, double y, int t})> pts) {
+      Canvas canvas, List<({double x, double y, int t, bool start})> pts) {
     if (pts.isEmpty) return;
     final now = DateTime.now().millisecondsSinceEpoch;
     const fadeMs = 1500;
@@ -1565,6 +1565,14 @@ class CanvasRenderEngine extends CustomPainter {
       for (int i = 1; i < pts.length; i++) {
         final age = now - pts[i].t;
         if (age > fadeMs) {
+          currentPath = null;
+          currentBucket = -1;
+          continue;
+        }
+        // Stroke-break: the user lifted and started a new laser
+        // gesture. Don't bridge from the previous point — moveTo this
+        // point and skip the lineTo (no segment from the prior stroke).
+        if (pts[i].start) {
           currentPath = null;
           currentBucket = -1;
           continue;

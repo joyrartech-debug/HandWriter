@@ -815,15 +815,27 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// `compute()` boundary is a zero-second-copy hand-off. Without
   /// wrapping, SendPort memcpys the entire asset map into the worker
   /// isolate (~150 MB peak for a PDF-heavy notebook → 2× peak resident
-  /// memory). With transfer the receiver's [TransferableTypedData.materialize]
-  /// reclaims the buffer in place. Returns null when there's nothing
-  /// to send so the isolate-side guard can short-circuit.
-  static Map<String, TransferableTypedData>? _wrapAssetsForIsolate(
-      Map<String, Uint8List> assetBytes) {
+  /// memory).
+  ///
+  /// Async + yields between assets: `TransferableTypedData.fromList`
+  /// itself copies the bytes (the transfer happens later at SendPort
+  /// time). With 78 PDF rasters (~3-5 MB each) that's 200-400 MB of
+  /// sync memcpy on the UI isolate — long enough to freeze the pen
+  /// stroke when an auto-save fires mid-drawing. Yielding to the
+  /// event loop every 4 assets keeps frame budget intact.
+  static Future<Map<String, TransferableTypedData>?> _wrapAssetsForIsolate(
+      Map<String, Uint8List> assetBytes) async {
     if (assetBytes.isEmpty) return null;
     final wrapped = <String, TransferableTypedData>{};
+    var i = 0;
     for (final entry in assetBytes.entries) {
       wrapped[entry.key] = TransferableTypedData.fromList([entry.value]);
+      i++;
+      // Yield to the event loop every 4 assets so pointer events
+      // can dispatch during the wrap. Without this, a save() during
+      // a pen stroke froze the canvas for ~1-3 seconds on a heavy
+      // notebook.
+      if (i % 4 == 0) await Future<void>.delayed(Duration.zero);
     }
     return wrapped;
   }
@@ -6039,11 +6051,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final localSaveFuture = (() async {
       try {
         final encodedPages = await _encodePagesWithCache(s.pages);
+        final wrappedAssets = await _wrapAssetsForIsolate(s.assetBytes);
         final package = await compute(_buildPackageInIsolate, _PackageParams(
           metadata: updatedMeta,
           document: s.document,
           encodedPages: encodedPages,
-          assets: _wrapAssetsForIsolate(s.assetBytes),
+          assets: wrappedAssets,
           symbolLibraries: s.symbolLibraries.isNotEmpty
               ? s.symbolLibraries.map((l) => l.toJson()).toList()
               : null,
@@ -8282,11 +8295,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // Pulled pages are all new to us, so the cache will miss for each of
       // them and re-encode. This is fine — happens once after a remote pull.
       final encodedPages = await _encodePagesWithCache(pages);
+      final wrappedAssets = await _wrapAssetsForIsolate(assets);
       final package = await compute(_buildPackageInIsolate, _PackageParams(
         metadata: persistedMeta,
         document: persistedDoc,
         encodedPages: encodedPages,
-        assets: _wrapAssetsForIsolate(assets),
+        assets: wrappedAssets,
         symbolLibraries: symbolLibs,
       ));
       await fileService.saveNotebookFile(metadata.id, package);

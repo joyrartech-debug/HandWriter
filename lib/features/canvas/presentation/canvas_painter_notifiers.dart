@@ -326,21 +326,26 @@ class LaserStrokeNotifier extends ChangeNotifier {
   /// to clutter when they sweep around.
   static const int trailMs = 1500;
 
-  final List<({double x, double y, int t})> _points = [];
+  /// Each point carries a `start` flag set true on the FIRST point of a
+  /// gesture (pointer-down). The painter uses it to split sub-paths so
+  /// the trail doesn't bridge two distinct laser strokes with a long
+  /// straight line — that was the "collega il punto vecchio con quello
+  /// nuovo" bug.
+  final List<({double x, double y, int t, bool start})> _points = [];
   Timer? _ticker;
 
-  List<({double x, double y, int t})> get points => _points;
+  List<({double x, double y, int t, bool start})> get points => _points;
 
-  /// Append a point. Starts a periodic ticker that prunes faded points
-  /// and re-paints. Idempotent. 16ms interval (60 Hz) aligns with
-  /// typical display refresh — the previous 30 ms (33 Hz) caused the
-  /// "scatti" the user reported because every other display frame
-  /// re-rendered the trail at the same alpha as the previous one.
-  void addPoint(Offset pos) {
+  /// Append a point. [start] marks pointer-down — see field doc above.
+  /// 16ms interval (60 Hz) aligns with typical display refresh; the
+  /// previous 30 ms (33 Hz) beat against 60 Hz displays and produced
+  /// the "scatti" the user reported.
+  void addPoint(Offset pos, {bool start = false}) {
     _points.add((
       x: pos.dx,
       y: pos.dy,
       t: DateTime.now().millisecondsSinceEpoch,
+      start: start,
     ));
     _ticker ??= Timer.periodic(const Duration(milliseconds: 16), (_) {
       _prune();
