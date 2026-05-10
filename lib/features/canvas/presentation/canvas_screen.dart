@@ -2994,9 +2994,20 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                                 lassoPath: _lassoPathNotifier.isActive && _lassoPathNotifier.points.isNotEmpty
                                     ? _lassoPathNotifier.points
                                     : (s.lassoPath.isNotEmpty ? s.lassoPath : null),
-                                lassoPathGetter: _lassoPathNotifier.isActive
-                                    ? () => _lassoPathNotifier.points
-                                    : null,
+                                // ALWAYS pass the getter (returns the
+                                // notifier's points, which is empty when no
+                                // lasso is in flight) — same reasoning as
+                                // liveLassoTransform above. If we gated it
+                                // on isActive, the painter captured before
+                                // the user starts a fresh lasso (e.g. just
+                                // after switching from pen→lasso) held a
+                                // null getter and fell back to the stale
+                                // `lassoPath` field — also null at that
+                                // moment because s.lassoPath is empty —
+                                // so the marquee stayed invisible until
+                                // some later state change rebuilt the
+                                // CustomPaint with the getter wired up.
+                                lassoPathGetter: () => _lassoPathNotifier.points,
                                 laserTrailGetter: () =>
                                     _laserStrokeNotifier.points,
                                 shapePreview: (s.shapeStartPos != null && s.shapeEndPos != null)
@@ -3097,9 +3108,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               Positioned.fill(
                 child: Consumer(
                   builder: (_, ref2, __) {
-                    ref2.watch(canvasProvider.select((s) => s == null
-                        ? const (zoom: 1.0, panOffset: Offset.zero)
-                        : (zoom: s.zoom, panOffset: s.panOffset)));
+                    // `pages` is in the selector so the overlay rebuilds
+                    // when an element's geometry changes. Without it, the
+                    // captured `live` stayed stale after a resize commit:
+                    // _commitElementTransform called notifier.end() (which
+                    // fires the inner ListenableBuilder) BEFORE
+                    // resizeElement/moveElement updated Riverpod, and the
+                    // outer Consumer didn't rebuild because (zoom,
+                    // panOffset) hadn't changed — bbox + handles stayed
+                    // at the pre-resize size for several seconds until
+                    // some unrelated event triggered a rebuild.
+                    ref2.watch(canvasProvider.select((s) => (
+                          zoom: s?.zoom ?? 1.0,
+                          panOffset: s?.panOffset ?? Offset.zero,
+                          pages: s?.pages,
+                        )));
                     final live = ref2.read(canvasProvider) ?? canvasState;
                     return ListenableBuilder(
                       listenable: _elementTransformNotifier,
@@ -3113,9 +3136,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               Positioned.fill(
                 child: Consumer(
                   builder: (_, ref2, __) {
-                    ref2.watch(canvasProvider.select((s) => s == null
-                        ? const (zoom: 1.0, panOffset: Offset.zero)
-                        : (zoom: s.zoom, panOffset: s.panOffset)));
+                    // Same stale-`live` fix as the element-transform
+                    // Consumer above: include `pages` so a lasso commit
+                    // (selection move/scale/rotate) refreshes the captured
+                    // state and the lasso handles re-anchor correctly.
+                    ref2.watch(canvasProvider.select((s) => (
+                          zoom: s?.zoom ?? 1.0,
+                          panOffset: s?.panOffset ?? Offset.zero,
+                          pages: s?.pages,
+                        )));
                     final live = ref2.read(canvasProvider) ?? canvasState;
                     return ListenableBuilder(
                       listenable: _lassoTransformNotifier,
