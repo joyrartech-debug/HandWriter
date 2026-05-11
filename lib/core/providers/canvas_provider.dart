@@ -1411,6 +1411,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _dirtyAssetKeys.clear();
     _lastSyncedPages = {};
     _pageJsonCache.clear();
+    // Reset the corrupt-asset blocklist: once the user closes the notebook,
+    // any "this asset failed to decode" state from this session is stale.
+    // After a settings "Ricarica" replaces the local .ncnote with fresh
+    // bytes from the server, re-entering the notebook must re-try decode
+    // — otherwise the orange broken-image badge stays on forever even
+    // though the underlying bytes are now valid.
+    _corruptAssetIds.clear();
+    _onDemandDecodeQueued.clear();
     // Keep _remoteMetaEtag, _lastPageEtags across
     // close/open to avoid re-pulling all pages on re-enter.
     state = null;
