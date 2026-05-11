@@ -213,11 +213,22 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
 
   const UINT32 pointer_id = GET_POINTERID_WPARAM(wparam);
   POINTER_INPUT_TYPE pointer_type = PT_POINTER;
-  if (!GetPointerType(pointer_id, &pointer_type)) return;
+  const BOOL got_type = GetPointerType(pointer_id, &pointer_type);
+  NativeLog(
+      "[Pen] msg=0x%04x pid=%u gotType=%d type=%d\n",
+      message, pointer_id, got_type, (int)pointer_type);
+  if (!got_type) return;
   if (pointer_type != PT_PEN) return;
 
   POINTER_PEN_INFO pen_info{};
-  if (!GetPointerPenInfo(pointer_id, &pen_info)) return;
+  if (!GetPointerPenInfo(pointer_id, &pen_info)) {
+    NativeLog("[Pen] GetPointerPenInfo failed pid=%u\n", pointer_id);
+    return;
+  }
+  NativeLog(
+      "[Pen] penFlags=0x%08x pressure=%u rotation=%u tiltX=%d tiltY=%d\n",
+      pen_info.penFlags, pen_info.pressure, pen_info.rotation,
+      pen_info.tiltX, pen_info.tiltY);
 
   // PEN_FLAG_BARREL is the lower side button. Gaomon (and most
   // Huion-class tablets) report the upper button by flipping
