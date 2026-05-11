@@ -451,6 +451,16 @@ class HwToolPopup extends StatelessWidget {
   final bool? eraserPerStroke;
   final ValueChanged<bool>? onEraserPerStrokeChanged;
   final VoidCallback onClose;
+  /// 3-slot pen-preset rail. `null` slot = empty (tap to save current,
+  /// shows "+" placeholder). `onApplyPreset` activates the preset's
+  /// tool+settings via CanvasNotifier.applyPenPreset; `onSavePreset`
+  /// writes the active tool's current (color, width, opacity) into
+  /// the slot. Only shown for pen-class tools — eraser/lasso/etc.
+  /// don't have presets.
+  final List<PenPreset?>? penPresets;
+  final void Function(int slot)? onApplyPreset;
+  final void Function(int slot)? onSavePreset;
+  final void Function(int slot)? onClearPreset;
 
   const HwToolPopup({
     super.key,
@@ -465,7 +475,18 @@ class HwToolPopup extends StatelessWidget {
     this.onEraserSizeChanged,
     this.eraserPerStroke,
     this.onEraserPerStrokeChanged,
+    this.penPresets,
+    this.onApplyPreset,
+    this.onSavePreset,
+    this.onClearPreset,
   });
+
+  bool get _showPresets =>
+      penPresets != null &&
+      (tool == CanvasTool.pen ||
+          tool == CanvasTool.ballpoint ||
+          tool == CanvasTool.brush ||
+          tool == CanvasTool.highlighter);
 
   bool get _showColor => !{
         CanvasTool.eraserStandard,
@@ -544,6 +565,24 @@ class HwToolPopup extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
+          if (_showPresets) ...[
+            _section('Pre-impostazioni', p),
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                for (int i = 0; i < 3; i++) ...[
+                  Expanded(child: _presetSlot(i, p, context)),
+                  if (i < 2) const SizedBox(width: 6),
+                ],
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Tieni premuto per salvare/cancellare',
+              style: TextStyle(fontSize: 10, color: p.ink3),
+            ),
+            const SizedBox(height: 14),
+          ],
           if (_showColor) ...[
             _section('Colore', p),
             const SizedBox(height: 6),
@@ -731,6 +770,93 @@ class HwToolPopup extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  /// One of the 3 OneNote-style preset slots in the popup rail. Empty
+  /// → "+" placeholder, tap = save current; long-press = no-op.
+  /// Filled → shows a coloured pen-tip with thickness ring, tap =
+  /// activate, long-press = menu to overwrite/clear.
+  Widget _presetSlot(int slot, HwPalette p, BuildContext context) {
+    final preset = (penPresets != null && slot < penPresets!.length)
+        ? penPresets![slot]
+        : null;
+    final isActive = preset != null &&
+        preset.tool == tool &&
+        preset.color == color.toARGB32() &&
+        (preset.strokeWidth - thickness).abs() < 0.01;
+    final body = Container(
+      height: 42,
+      decoration: BoxDecoration(
+        color: isActive ? p.accentSoft : p.paper2,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+            color: isActive ? p.accent : p.paper3,
+            width: isActive ? 1.5 : 1),
+      ),
+      child: Center(
+        child: preset == null
+            ? Icon(Icons.add_rounded, size: 18, color: p.ink3)
+            : _presetGlyph(preset, p),
+      ),
+    );
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () {
+          if (preset == null) {
+            onSavePreset?.call(slot); // save current tool as preset
+          } else {
+            onApplyPreset?.call(slot);
+          }
+        },
+        onLongPress: preset == null
+            ? null
+            : () => _showPresetMenu(context, slot, p),
+        child: body,
+      ),
+    );
+  }
+
+  Widget _presetGlyph(PenPreset preset, HwPalette p) {
+    final tip = Color(preset.color).withValues(alpha: preset.opacity);
+    // Visual: a horizontal stroke that scales with the preset's width.
+    final w = preset.strokeWidth.clamp(0.5, 14.0);
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 22,
+          height: w,
+          decoration: BoxDecoration(
+            color: tip,
+            borderRadius: BorderRadius.circular(w / 2),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showPresetMenu(BuildContext context, int slot, HwPalette p) async {
+    final box = context.findRenderObject() as RenderBox?;
+    final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
+    if (box == null || overlay == null) return;
+    final pos = RelativeRect.fromRect(
+      Rect.fromPoints(
+        box.localToGlobal(Offset.zero, ancestor: overlay),
+        box.localToGlobal(box.size.bottomRight(Offset.zero), ancestor: overlay),
+      ),
+      Offset.zero & overlay.size,
+    );
+    final action = await showMenu<String>(
+      context: context,
+      position: pos,
+      items: [
+        const PopupMenuItem(value: 'save', child: Text('Sovrascrivi con corrente')),
+        const PopupMenuItem(value: 'clear', child: Text('Svuota slot')),
+      ],
+    );
+    if (action == 'save') onSavePreset?.call(slot);
+    if (action == 'clear') onClearPreset?.call(slot);
   }
 }
 

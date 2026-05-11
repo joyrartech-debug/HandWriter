@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:handwriter/core/providers/canvas_state.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Library sort strategies.
@@ -52,6 +53,9 @@ class AppSettings {
   final LibrarySortMode sortMode;
   final bool favoritesFirst;
   final ThemeMode themeMode;
+  /// OneNote-style preset rail. Fixed-length 3; a `null` entry means
+  /// the slot is empty and the popup shows a "+" placeholder.
+  final List<PenPreset?> penPresets;
 
   const AppSettings({
     this.favoriteNotebookIds = const {},
@@ -59,6 +63,7 @@ class AppSettings {
     this.sortMode = LibrarySortMode.modifiedDesc,
     this.favoritesFirst = true,
     this.themeMode = ThemeMode.system,
+    this.penPresets = const [null, null, null],
   });
 
   AppSettings copyWith({
@@ -67,6 +72,7 @@ class AppSettings {
     LibrarySortMode? sortMode,
     bool? favoritesFirst,
     ThemeMode? themeMode,
+    List<PenPreset?>? penPresets,
   }) =>
       AppSettings(
         favoriteNotebookIds: favoriteNotebookIds ?? this.favoriteNotebookIds,
@@ -74,6 +80,7 @@ class AppSettings {
         sortMode: sortMode ?? this.sortMode,
         favoritesFirst: favoritesFirst ?? this.favoritesFirst,
         themeMode: themeMode ?? this.themeMode,
+        penPresets: penPresets ?? this.penPresets,
       );
 }
 
@@ -108,12 +115,22 @@ class AppSettingsNotifier extends StateNotifier<AppSettings> {
         orElse: () => ThemeMode.system,
       );
 
+      final presetsRaw = (map['pen_presets'] as List?) ?? const [];
+      final presets = List<PenPreset?>.generate(3, (i) {
+        if (i >= presetsRaw.length) return null;
+        final entry = presetsRaw[i];
+        if (entry == null) return null;
+        return PenPreset.fromJson(
+            (entry as Map).cast<String, dynamic>());
+      }, growable: false);
+
       state = AppSettings(
         favoriteNotebookIds: favIds,
         lastOpenedAt: opened,
         sortMode: sort,
         favoritesFirst: favFirst,
         themeMode: theme,
+        penPresets: presets,
       );
     } catch (_) {}
   }
@@ -128,8 +145,35 @@ class AppSettingsNotifier extends StateNotifier<AppSettings> {
         'sort': state.sortMode.name,
         'fav_first': state.favoritesFirst,
         'theme': state.themeMode.name,
+        'pen_presets':
+            state.penPresets.map((p) => p?.toJson()).toList(growable: false),
       }));
     } catch (_) {}
+  }
+
+  /// Save the current pen-class tool settings into [slot] (0..2). Used
+  /// by the popup's preset rail when the user long-presses an empty
+  /// slot or chooses "salva qui" from a filled slot.
+  void savePenPreset(int slot, PenPreset preset) {
+    if (slot < 0 || slot > 2) return;
+    final next = List<PenPreset?>.from(state.penPresets);
+    while (next.length < 3) {
+      next.add(null);
+    }
+    next[slot] = preset;
+    state = state.copyWith(penPresets: next);
+    _persist();
+  }
+
+  void clearPenPreset(int slot) {
+    if (slot < 0 || slot > 2) return;
+    final next = List<PenPreset?>.from(state.penPresets);
+    while (next.length < 3) {
+      next.add(null);
+    }
+    next[slot] = null;
+    state = state.copyWith(penPresets: next);
+    _persist();
   }
 
   void toggleFavorite(String notebookId) {

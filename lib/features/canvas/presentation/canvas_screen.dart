@@ -14,6 +14,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/core/providers/app_settings_provider.dart';
 import 'package:handwriter/core/providers/auth_provider.dart' show webdavServiceProvider;
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/cross_notebook_clipboard_provider.dart';
@@ -2687,6 +2688,31 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                         notifier.setTool(perStroke
                             ? CanvasTool.eraserStroke
                             : CanvasTool.eraserStandard);
+                      },
+                      penPresets: ref.watch(appSettingsProvider).penPresets,
+                      onApplyPreset: (slot) {
+                        final preset = ref
+                            .read(appSettingsProvider)
+                            .penPresets[slot];
+                        if (preset == null) return;
+                        notifier.applyPenPreset(preset);
+                      },
+                      onSavePreset: (slot) {
+                        final s = canvasState;
+                        ref.read(appSettingsProvider.notifier).savePenPreset(
+                              slot,
+                              PenPreset(
+                                tool: s.currentTool,
+                                color: s.toolSettings.color,
+                                strokeWidth: s.toolSettings.strokeWidth,
+                                opacity: s.toolSettings.opacity,
+                              ),
+                            );
+                      },
+                      onClearPreset: (slot) {
+                        ref
+                            .read(appSettingsProvider.notifier)
+                            .clearPenPreset(slot);
                       },
                       onClose: () => setState(() => _popupOpen = false),
                     ),

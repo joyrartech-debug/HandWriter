@@ -107,6 +107,46 @@ double paperTypeLineSpacing(PaperType type) {
 //  TOOL SETTINGS
 // ═══════════════════════════════════════════════════════════════
 
+/// One slot of the OneNote-style preset rail. Each preset captures the
+/// pen-class tool + colour + thickness so the user can flip between
+/// 3 of their most-used "pens" with a single tap. Persisted in
+/// `AppSettings.penPresets` so the slots survive app restarts.
+class PenPreset {
+  final CanvasTool tool;
+  final int color;
+  final double strokeWidth;
+  final double opacity;
+
+  const PenPreset({
+    required this.tool,
+    required this.color,
+    required this.strokeWidth,
+    this.opacity = 1.0,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'tool': tool.name,
+        'color': color,
+        'strokeWidth': strokeWidth,
+        'opacity': opacity,
+      };
+
+  static PenPreset? fromJson(Map<String, dynamic> json) {
+    final toolName = json['tool'] as String?;
+    if (toolName == null) return null;
+    final tool = CanvasTool.values.firstWhere(
+      (t) => t.name == toolName,
+      orElse: () => CanvasTool.pen,
+    );
+    return PenPreset(
+      tool: tool,
+      color: json['color'] as int? ?? 0xFF000000,
+      strokeWidth: (json['strokeWidth'] as num?)?.toDouble() ?? 1.5,
+      opacity: (json['opacity'] as num?)?.toDouble() ?? 1.0,
+    );
+  }
+}
+
 class ToolSettings {
   final int color;
   final double strokeWidth;

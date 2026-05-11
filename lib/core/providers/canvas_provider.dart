@@ -1628,6 +1628,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _rememberToolPref();
   }
 
+  /// Apply a saved pen preset: switches tool AND injects the preset's
+  /// (color, strokeWidth, opacity) in a single update. Used by the
+  /// 3-slot preset rail in the tool popup so the user can flip between
+  /// favorite pen configurations with one tap.
+  void applyPenPreset(PenPreset preset) {
+    if (state == null) return;
+    // Set the target tool first so per-tool memory snapshots the
+    // PRIOR tool's settings correctly. setTool will load the
+    // remembered settings for the preset's tool; we then overwrite
+    // with the preset's specific values via setToolSettings so the
+    // preset persists across tool switches independent of the prior
+    // memory.
+    setTool(preset.tool);
+    final s = state;
+    if (s == null) return;
+    setToolSettings(s.toolSettings.copyWith(
+      color: preset.color,
+      strokeWidth: preset.strokeWidth,
+      opacity: preset.opacity,
+    ));
+  }
+
   void setColor(int color) {
     if (state == null) return;
     if (state!.toolSettings.color == color) return;
