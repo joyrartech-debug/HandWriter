@@ -1105,6 +1105,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
     _activePointers++;
 
+    // Diagnostic — log every PointerDown while a native barrel
+    // override is active. Captures the exact `kind`/`buttons` that
+    // Windows delivers when the user holds a Gaomon barrel and
+    // taps the tip, so we can tell if the event reaches the lasso
+    // branch or gets eaten by an earlier early-return.
+    if (_activeNativeBarrel != null) {
+      unawaited(CrashLogger.append(
+        '[BarrelTip] kind=${event.kind.name} '
+        'buttons=0x${event.buttons.toRadixString(16)} '
+        'pressure=${event.pressure.toStringAsFixed(2)} '
+        'activePointers=$_activePointers '
+        'tool=${state.currentTool.name}',
+      ));
+    }
+
 
     // Track stylus presence so we can suppress palm-triggered long-press
     if (event.kind == PointerDeviceKind.stylus || event.kind == PointerDeviceKind.invertedStylus) {
@@ -1489,6 +1504,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // path already contains its first point — the user perceives this as the
     // new lasso "starting offset" from the true touch location.
     if (tool == CanvasTool.lasso) {
+      if (_activeNativeBarrel != null) {
+        unawaited(CrashLogger.append(
+          '[BarrelTip] LASSO branch reached, starting path at $pagePos',
+        ));
+      }
       ref.read(canvasProvider.notifier).clearLassoPath(); // bake previous + reset provider path
       _lassoPathNotifier.start(pagePos);
       return;
