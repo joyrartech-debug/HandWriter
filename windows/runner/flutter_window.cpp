@@ -1,11 +1,15 @@
 #include "flutter_window.h"
 
+#include <commctrl.h>
+
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <string>
 
 #include "flutter/generated_plugin_registrant.h"
+
+#pragma comment(lib, "comctl32.lib")
 
 namespace {
 // Quick native-side log so we can diagnose whether the Win32 runner
@@ -65,7 +69,8 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
-  SetChildContent(flutter_controller_->view()->GetNativeWindow());
+  child_hwnd_ = flutter_controller_->view()->GetNativeWindow();
+  SetChildContent(child_hwnd_);
 
   // Pen-button bridge — see header. Mounted once the engine is alive so
   // the MethodChannel has a valid messenger; nothing is sent until the
@@ -75,6 +80,20 @@ bool FlutterWindow::OnCreate() {
           flutter_controller_->engine()->messenger(),
           "handwriter/pen_input",
           &flutter::StandardMethodCodec::GetInstance());
+
+  // Pointer messages are routed to the window UNDER the cursor — on
+  // Flutter Windows that's the renderer CHILD HWND, not the
+  // top-level FlutterWindow we subclass below. Hook a WindowProc
+  // subclass on the child so HandlePenPointerMessage actually sees
+  // WM_POINTER* from the digitizer.
+  if (child_hwnd_) {
+    SetWindowSubclass(child_hwnd_, &FlutterWindow::ChildSubclassProc,
+                      /*subclass_id=*/1,
+                      reinterpret_cast<DWORD_PTR>(this));
+    NativeLog("[Init] Subclassed child hwnd=%p\n", (void*)child_hwnd_);
+  } else {
+    NativeLog("[Init] WARN: no child hwnd to subclass\n");
+  }
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
@@ -89,11 +108,51 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  if (child_hwnd_) {
+    RemoveWindowSubclass(child_hwnd_, &FlutterWindow::ChildSubclassProc, 1);
+    child_hwnd_ = nullptr;
+  }
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
 
   Win32Window::OnDestroy();
+}
+
+// static
+LRESULT CALLBACK FlutterWindow::ChildSubclassProc(HWND hwnd, UINT msg,
+                                                  WPARAM wparam,
+                                                  LPARAM lparam,
+                                                  UINT_PTR /*subclass_id*/,
+                                                  DWORD_PTR ref_data) {
+  auto* self = reinterpret_cast<FlutterWindow*>(ref_data);
+  if (self) {
+    switch (msg) {
+      case WM_POINTERENTER:
+      case WM_POINTERLEAVE:
+      case WM_POINTERDOWN:
+      case WM_POINTERUPDATE:
+      case WM_POINTERUP:
+      case WM_NCPOINTERDOWN:
+      case WM_NCPOINTERUPDATE:
+      case WM_NCPOINTERUP:
+        NativeLog("[Child] pointer=0x%04x wparam=0x%llx\n",
+                  msg, (unsigned long long)wparam);
+        self->HandlePenPointerMessage(msg, wparam);
+        break;
+      case WM_MBUTTONDOWN:
+      case WM_MBUTTONUP:
+      case WM_RBUTTONDOWN:
+      case WM_RBUTTONUP:
+      case WM_TOUCH:
+        NativeLog("[Child] legacy=0x%04x wparam=0x%llx\n",
+                  msg, (unsigned long long)wparam);
+        break;
+      default:
+        break;
+    }
+  }
+  return DefSubclassProc(hwnd, msg, wparam, lparam);
 }
 
 LRESULT

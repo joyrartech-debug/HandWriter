@@ -50,9 +50,19 @@ class FlutterWindow : public Win32Window {
   bool last_barrel_pressed_ = false;
   bool last_inverted_ = false;
   uint32_t last_pen_pointer_id_ = 0;
+  // HWND of the Flutter view child window we subclass to intercept
+  // WM_POINTER*. Pointer events on Windows are delivered to the
+  // window UNDER the cursor — that's the Flutter renderer child,
+  // NOT the top-level FlutterWindow this class wraps.
+  HWND child_hwnd_ = nullptr;
 
   void HandlePenPointerMessage(UINT message, WPARAM wparam);
   void NotifyBarrelChange(const std::string& button, bool down);
+
+  static LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg,
+                                            WPARAM wparam, LPARAM lparam,
+                                            UINT_PTR subclass_id,
+                                            DWORD_PTR ref_data);
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_
