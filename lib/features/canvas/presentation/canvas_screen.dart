@@ -1152,51 +1152,59 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Stylus barrel buttons — OneNote-style temporary tool override.
     //
-    // Upper button (kTertiaryButton) → temporary eraser. Lower button
-    // (kSecondaryButton) → temporary lasso. Release the button and the
-    // previous tool is restored. The Wacom/Surface/Galaxy drivers all
-    // report these via Flutter's standard buttons mask.
+    // Wacom EMR / Surface / Galaxy / Apple Pencil drivers all expose
+    // the two side buttons through Flutter's standard PointerEvent.
+    // buttons mask. CRITICAL: use bitmask, NOT `== kSecondaryButton`
+    // exact-match. When the tip is touching while a barrel is held,
+    // `event.buttons` is the OR of contact + barrel — `0x03` for
+    // tip + lower, `0x05` for tip + upper. Exact-equality misses
+    // both (the previous behaviour the user reported as broken).
     //
-    // Any pending modal state (symbol placement / paste / single-element
-    // selection / lasso selection) is treated as "cancel that first" —
-    // a barrel press while the user is in such state is far more often
-    // a deliberate escape than a request to erase / lasso.
-    if (event.kind == PointerDeviceKind.stylus &&
-        (event.buttons == kSecondaryButton ||
-            event.buttons == kTertiaryButton)) {
-      // Escape pending modal states first (any button).
-      if (state.pendingSymbol != null) {
-        ref.read(canvasProvider.notifier).clearPendingSymbol();
-        return;
-      }
-      if (state.selectedElementId != null) {
-        ref.read(canvasProvider.notifier).deselectElement();
-        return;
-      }
-      if (state.lassoSelection != null) {
-        ref.read(canvasProvider.notifier).clearSelection();
-        return;
-      }
+    //   - kSecondaryStylusButton (0x04, upper barrel) → eraser
+    //   - kPrimaryStylusButton   (0x02, lower barrel) → lasso
+    //
+    // Pending modal states (symbol placement / single-element
+    // selection / lasso selection) get an "escape first" treatment —
+    // either button cancels the modal state instead of switching
+    // tool.
+    if (event.kind == PointerDeviceKind.stylus) {
+      final hasUpper = (event.buttons & kSecondaryStylusButton) != 0;
+      final hasLower = (event.buttons & kPrimaryStylusButton) != 0;
+      if (hasUpper || hasLower) {
+        // Escape pending modal states first (any button).
+        if (state.pendingSymbol != null) {
+          ref.read(canvasProvider.notifier).clearPendingSymbol();
+          return;
+        }
+        if (state.selectedElementId != null) {
+          ref.read(canvasProvider.notifier).deselectElement();
+          return;
+        }
+        if (state.lassoSelection != null) {
+          ref.read(canvasProvider.notifier).clearSelection();
+          return;
+        }
 
-      final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
-      _barrelButtonOverride = true;
-      _barrelButtonPreviousTool = state.currentTool;
+        final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
+        _barrelButtonOverride = true;
+        _barrelButtonPreviousTool = state.currentTool;
 
-      if (event.buttons == kTertiaryButton) {
-        // Upper barrel → eraser. Honour the user's last picked
-        // sub-mode (per-stroke vs per-area) so the barrel feels like
-        // the eraser dock button.
-        final n = ref.read(canvasProvider.notifier);
-        n.setTool(n.lastEraserMode);
-        n.startStroke(pagePos, 0.5);
-      } else {
-        // Lower barrel → lasso. Don't start a path here — let the
-        // normal lasso pointer-down branch take over on the next
-        // routed event (the tool change is what matters).
-        ref.read(canvasProvider.notifier).setTool(CanvasTool.lasso);
-        _lassoPathNotifier.start(pagePos);
+        if (hasUpper) {
+          // Upper barrel → eraser. Honour the user's last picked
+          // sub-mode (per-stroke vs per-area) so the barrel feels
+          // like the eraser dock button.
+          final n = ref.read(canvasProvider.notifier);
+          n.setTool(n.lastEraserMode);
+          n.startStroke(pagePos, 0.5);
+        } else {
+          // Lower barrel → lasso. Switch tool and open the polygon
+          // at the contact point; the normal pointer-move branch
+          // will feed it.
+          ref.read(canvasProvider.notifier).setTool(CanvasTool.lasso);
+          _lassoPathNotifier.start(pagePos);
+        }
+        return;
       }
-      return;
     }
 
     final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
