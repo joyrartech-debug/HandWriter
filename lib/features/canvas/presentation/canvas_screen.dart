@@ -90,6 +90,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   bool _showPrevPageHint = false;
   bool _showNextPageHint = false;
 
+  // Diagnostic throttles — keep the log readable when the user
+  // hovers / draws for a while. Reset across app restarts (fine,
+  // we only want the cadence quiet, not deduplicated forever).
+  int _lastStylusDiagAt = 0;
+  int _lastKeyDiagAt = 0;
+  int _lastHoverDiagAt = 0;
+
   // Stylus barrel button — OneNote-style temporary tool override.
   // Two buttons supported (Wacom EMR / Surface / Galaxy stylus all
   // report the same Flutter button bits):
@@ -529,6 +536,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    // Diagnostic — log every keydown so we can spot Gaomon-style
+    // drivers that emit pen-button presses as keyboard shortcuts
+    // (F-keys, custom binds) instead of PointerEvent.buttons.
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    if (nowMs - _lastKeyDiagAt > 300) {
+      _lastKeyDiagAt = nowMs;
+      unawaited(CrashLogger.append(
+        '[Key] DOWN key=${event.logicalKey.keyLabel} '
+        'id=0x${event.logicalKey.keyId.toRadixString(16)}',
+      ));
+    }
     final ctrl = HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
     final shift = HardwareKeyboard.instance.isShiftPressed;
 
@@ -1144,19 +1162,26 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     final tool = state.currentTool;
 
     // ── Stylus diagnostic — captures driver-reported pointer kind +
-    // buttons on every stylus / inverted-stylus tap so we can see
-    // what the user's tablet driver (Gaomon / Wacom / Surface / etc.)
-    // actually sends when a barrel button is pressed. Cheap, fires
-    // once per pen down, and only writes when buttons differ from
-    // the plain-contact bit so a quiet session leaves the log empty.
-    if ((event.kind == PointerDeviceKind.stylus ||
-            event.kind == PointerDeviceKind.invertedStylus) &&
-        event.buttons != kPrimaryButton) {
-      unawaited(CrashLogger.append(
-        '[Stylus] DOWN kind=${event.kind.name} '
-        'buttons=0x${event.buttons.toRadixString(16)} '
-        'pressure=${event.pressure.toStringAsFixed(2)}',
-      ));
+    // buttons on EVERY stylus / inverted-stylus PointerDown so we
+    // can see what the user's tablet driver actually sends. The
+    // previous gate `buttons != kPrimaryButton` excluded plain tip
+    // contact — useful in steady-state, but if barrel presses never
+    // log it's impossible to tell whether the events reach Flutter
+    // at all or are masked to plain contact. Throttled to once per
+    // 300 ms so a long stroke doesn't spam.
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus) {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - _lastStylusDiagAt > 300) {
+        _lastStylusDiagAt = nowMs;
+        unawaited(CrashLogger.append(
+          '[Stylus] DOWN kind=${event.kind.name} '
+          'buttons=0x${event.buttons.toRadixString(16)} '
+          'pressure=${event.pressure.toStringAsFixed(2)} '
+          'orientation=${event.orientation.toStringAsFixed(2)} '
+          'tilt=${event.tilt.toStringAsFixed(2)}',
+        ));
+      }
     }
 
     // Middle mouse button → always pan
@@ -3022,6 +3047,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   },
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
+                  onPointerHover: (e) {
+                    // Diagnostic only — captures barrel-button hover
+                    // events (driver reports the button bit even when
+                    // the tip isn't touching). If pressing the barrel
+                    // never fires PointerDown but DOES fire Hover with
+                    // a non-zero buttons mask, the log will reveal it.
+                    if (e.kind == PointerDeviceKind.stylus ||
+                        e.kind == PointerDeviceKind.invertedStylus) {
+                      final nowMs = DateTime.now().millisecondsSinceEpoch;
+                      if (nowMs - _lastHoverDiagAt > 400) {
+                        _lastHoverDiagAt = nowMs;
+                        unawaited(CrashLogger.append(
+                          '[Stylus] HOVER kind=${e.kind.name} '
+                          'buttons=0x${e.buttons.toRadixString(16)} '
+                          'down=${e.down}',
+                        ));
+                      }
+                    }
+                  },
                   onPointerSignal: (event) {
                     // Read live state — `canvasState` from the build
                     // closure is intentionally STALE on pan/zoom/cursor
