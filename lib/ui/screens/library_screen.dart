@@ -96,6 +96,7 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
                   onOpen: _openNotebook,
                   onCreate: _createNotebook,
                   onLongPress: _showNotebookMenu,
+                  onToggleFavorite: _toggleFavorite,
                 ),
                 loading: () => _LoadingState(notifier: notebookNotifier),
                 error: (e, _) => Center(
@@ -317,6 +318,14 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
         SnackBar(content: Text('Errore creazione: $e')),
       );
     }
+  }
+
+  /// One-click favorite toggle from the cover star overlay. Avoids the
+  /// long-press → bottom-sheet → tap → close round-trip for what is
+  /// almost always the single most frequent library action.
+  void _toggleFavorite(NotebookEntry entry) {
+    HapticFeedback.selectionClick();
+    ref.read(appSettingsProvider.notifier).toggleFavorite(entry.metadata.id);
   }
 
   void _showNotebookMenu(NotebookEntry entry) async {
@@ -765,6 +774,7 @@ class _Body extends StatelessWidget {
   final ValueChanged<NotebookEntry> onOpen;
   final VoidCallback onCreate;
   final ValueChanged<NotebookEntry> onLongPress;
+  final ValueChanged<NotebookEntry> onToggleFavorite;
 
   const _Body({
     required this.entries,
@@ -773,6 +783,7 @@ class _Body extends StatelessWidget {
     required this.onOpen,
     required this.onCreate,
     required this.onLongPress,
+    required this.onToggleFavorite,
   });
 
   @override
@@ -826,6 +837,7 @@ class _Body extends StatelessWidget {
                     favorite: favoriteIds.contains(e.metadata.id),
                     onTap: () => onOpen(e),
                     onLongPress: () => onLongPress(e),
+                    onToggleFavorite: () => onToggleFavorite(e),
                   );
                 },
                 childCount: entries.length + 1,
@@ -945,11 +957,13 @@ class _CoverTile extends StatelessWidget {
   final bool favorite;
   final VoidCallback onTap;
   final VoidCallback onLongPress;
+  final VoidCallback onToggleFavorite;
   const _CoverTile({
     required this.entry,
     required this.favorite,
     required this.onTap,
     required this.onLongPress,
+    required this.onToggleFavorite,
   });
 
   @override
@@ -959,16 +973,57 @@ class _CoverTile extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        GestureDetector(
-          onLongPress: onLongPress,
-          child: NotebookCover(
-            color: Color(entry.metadata.coverColor),
-            title: entry.metadata.title,
-            favorite: favorite,
-            texture: _textureFor(entry.metadata.paperType),
-            width: 200,
-            height: 260,
-            onTap: onTap,
+        // Star overlay sits ABOVE the cover via Stack so its tap can be
+        // intercepted before NotebookCover's onTap fires (the cover-wide
+        // InkWell would otherwise swallow it). One-tap favorite was a
+        // three-tap action via the long-press sheet pre-fix.
+        SizedBox(
+          width: 200,
+          height: 260,
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: GestureDetector(
+                  onLongPress: onLongPress,
+                  behavior: HitTestBehavior.translucent,
+                  child: NotebookCover(
+                    color: Color(entry.metadata.coverColor),
+                    title: entry.metadata.title,
+                    // Hide the cover's built-in star — we render our own
+                    // tappable one above.
+                    favorite: false,
+                    texture: _textureFor(entry.metadata.paperType),
+                    width: 200,
+                    height: 260,
+                    onTap: onTap,
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 6,
+                right: 6,
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: onToggleFavorite,
+                    customBorder: const CircleBorder(),
+                    child: Tooltip(
+                      message: favorite ? 'Rimuovi dai preferiti' : 'Aggiungi ai preferiti',
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: HwIcon(
+                          favorite ? 'star-filled' : 'star',
+                          size: 18,
+                          color: favorite
+                              ? const Color(0xFFFFC857)
+                              : const Color(0xCCFFFFFF),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
         const SizedBox(height: 12),
