@@ -432,8 +432,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final savedChapter = prefs.getString('last_chapter_$nbId');
       final savedPage = prefs.getInt('last_page_$nbId') ?? 0;
 
-      // Validate saved chapter still exists
-      if (savedChapter != null && metadata.chapters.any((c) => c.id == savedChapter)) {
+      // Validate saved chapter still exists AND has at least one page that
+      // matches its id in document.pages. If metadata.chapters[].pageIds is
+      // stale (references a pageId no longer present in any page_*.json),
+      // restoring activeChapterId to that chapter would leave the user
+      // stuck on "— / 0" with all other pages hidden by the chapter filter.
+      final hasPagesIn =
+          (String cid) => document.pages.any((p) => p.chapterId == cid);
+      if (savedChapter != null &&
+          metadata.chapters.any((c) => c.id == savedChapter) &&
+          hasPagesIn(savedChapter)) {
         restoredChapterId = savedChapter;
         // Validate saved page index is within range AND belongs to this chapter.
         // After a pull/merge the document may be reordered, so savedPage might
@@ -447,17 +455,29 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           final idx = document.pages.indexWhere((p) => p.chapterId == savedChapter);
           if (idx >= 0) startPageIndex = idx;
         }
-      } else if (metadata.chapters.isNotEmpty) {
-        // No saved position or chapter was deleted — default to first chapter
-        restoredChapterId = metadata.chapters.first.id;
-        final idx = document.pages.indexWhere((p) => p.chapterId == restoredChapterId);
-        if (idx >= 0) startPageIndex = idx;
+      } else {
+        // No valid saved chapter — default to the first chapter that
+        // actually has pages, or to null (all-pages view) if none qualifies.
+        final firstWithPages = metadata.chapters
+            .map((c) => c.id)
+            .firstWhere(hasPagesIn, orElse: () => '');
+        if (firstWithPages.isNotEmpty) {
+          restoredChapterId = firstWithPages;
+          final idx = document.pages
+              .indexWhere((p) => p.chapterId == restoredChapterId);
+          if (idx >= 0) startPageIndex = idx;
+        }
       }
     } catch (_) {
-      // SharedPreferences failed — fall back to first chapter
-      if (metadata.chapters.isNotEmpty) {
-        restoredChapterId = metadata.chapters.first.id;
-        final idx = document.pages.indexWhere((p) => p.chapterId == restoredChapterId);
+      // SharedPreferences failed — fall back to first chapter with pages
+      final firstWithPages = metadata.chapters
+          .map((c) => c.id)
+          .firstWhere((cid) => document.pages.any((p) => p.chapterId == cid),
+              orElse: () => '');
+      if (firstWithPages.isNotEmpty) {
+        restoredChapterId = firstWithPages;
+        final idx = document.pages
+            .indexWhere((p) => p.chapterId == restoredChapterId);
         if (idx >= 0) startPageIndex = idx;
       }
     }
@@ -3471,11 +3491,19 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       state = s.copyWith(clearActiveChapter: true);
       return;
     }
-    // Jump to first page of the chapter
+    // Jump to first page of the chapter. If the chapter has no real pages
+    // (orphaned reference in metadata.chapters[].pageIds whose pageId no
+    // longer exists in any page_*.json), don't apply the filter — it would
+    // leave the user on "— / 0" with all other pages hidden. Fall back to
+    // the all-pages view so the chapter rail click still feels responsive.
     final firstIdx = s.document.pages.indexWhere((p) => p.chapterId == chapterId);
+    if (firstIdx < 0) {
+      state = s.copyWith(clearActiveChapter: true, clearLasso: true, lassoPath: []);
+      return;
+    }
     state = s.copyWith(
       activeChapterId: chapterId,
-      currentPageIndex: firstIdx >= 0 ? firstIdx : s.currentPageIndex,
+      currentPageIndex: firstIdx,
       clearLasso: true,
       lassoPath: [],
     );
