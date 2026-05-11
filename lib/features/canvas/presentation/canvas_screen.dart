@@ -1143,6 +1143,22 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     final tool = state.currentTool;
 
+    // ── Stylus diagnostic — captures driver-reported pointer kind +
+    // buttons on every stylus / inverted-stylus tap so we can see
+    // what the user's tablet driver (Gaomon / Wacom / Surface / etc.)
+    // actually sends when a barrel button is pressed. Cheap, fires
+    // once per pen down, and only writes when buttons differ from
+    // the plain-contact bit so a quiet session leaves the log empty.
+    if ((event.kind == PointerDeviceKind.stylus ||
+            event.kind == PointerDeviceKind.invertedStylus) &&
+        event.buttons != kPrimaryButton) {
+      unawaited(CrashLogger.append(
+        '[Stylus] DOWN kind=${event.kind.name} '
+        'buttons=0x${event.buttons.toRadixString(16)} '
+        'pressure=${event.pressure.toStringAsFixed(2)}',
+      ));
+    }
+
     // Middle mouse button → always pan
     if (event.kind == PointerDeviceKind.mouse && event.buttons == kMiddleMouseButton) {
       _isTouchPanning = true;
@@ -1152,24 +1168,38 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Stylus barrel buttons — OneNote-style temporary tool override.
     //
-    // Wacom EMR / Surface / Galaxy / Apple Pencil drivers all expose
-    // the two side buttons through Flutter's standard PointerEvent.
-    // buttons mask. CRITICAL: use bitmask, NOT `== kSecondaryButton`
-    // exact-match. When the tip is touching while a barrel is held,
-    // `event.buttons` is the OR of contact + barrel — `0x03` for
-    // tip + lower, `0x05` for tip + upper. Exact-equality misses
-    // both (the previous behaviour the user reported as broken).
+    // Driver landscape:
+    //   - Wacom EMR / Surface / Galaxy: bits 0x02 / 0x04 on the
+    //     standard buttons mask (`kPrimaryStylusButton`,
+    //     `kSecondaryStylusButton`).
+    //   - Gaomon (and most off-brand Huion-derived drivers) on
+    //     Windows: the UPPER side button switches the pointer kind
+    //     to `PointerDeviceKind.invertedStylus` (the same signal a
+    //     pen's flip-eraser end emits). The LOWER button is exposed
+    //     by their driver as a configurable shortcut — by default
+    //     "Right click" — which Flutter still routes to a stylus
+    //     PointerDown with bit 0x02 set.
+    //   - Apple Pencil 2: no buttons, only double-tap (ignored
+    //     here; covered separately).
     //
-    //   - kSecondaryStylusButton (0x04, upper barrel) → eraser
-    //   - kPrimaryStylusButton   (0x02, lower barrel) → lasso
+    // We accept BOTH paths: invertedStylus kind for the upper
+    // override, and the bit-mask test for the lower. Bitmask (not
+    // strict equality) is required because contact + barrel report
+    // the OR — `0x03` or `0x05` — never the raw barrel bit alone.
     //
-    // Pending modal states (symbol placement / single-element
-    // selection / lasso selection) get an "escape first" treatment —
-    // either button cancels the modal state instead of switching
-    // tool.
-    if (event.kind == PointerDeviceKind.stylus) {
-      final hasUpper = (event.buttons & kSecondaryStylusButton) != 0;
-      final hasLower = (event.buttons & kPrimaryStylusButton) != 0;
+    //   - upper barrel (or invertedStylus kind) → eraser
+    //   - lower barrel (`kPrimaryStylusButton` bit) → lasso
+    //
+    // Pending modal states (pendingSymbol / selectedElement /
+    // lassoSelection) get "escape first" — either path cancels the
+    // modal instead of switching tool.
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus) {
+      final invertedKind = event.kind == PointerDeviceKind.invertedStylus;
+      final hasUpper =
+          invertedKind || (event.buttons & kSecondaryStylusButton) != 0;
+      final hasLower = !invertedKind &&
+          (event.buttons & kPrimaryStylusButton) != 0;
       if (hasUpper || hasLower) {
         // Escape pending modal states first (any button).
         if (state.pendingSymbol != null) {
