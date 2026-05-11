@@ -90,8 +90,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   bool _showPrevPageHint = false;
   bool _showNextPageHint = false;
 
-  // Stylus barrel button temporary eraser
-  bool _barrelButtonErasing = false;
+  // Stylus barrel button — OneNote-style temporary tool override.
+  // Two buttons supported (Wacom EMR / Surface / Galaxy stylus all
+  // report the same Flutter button bits):
+  //   - kTertiaryButton (0x04, upper barrel) → temporary eraser
+  //   - kSecondaryButton (0x02, lower barrel) → temporary lasso
+  // Whatever the user was using before the hold is restored on
+  // pointer-up / pointer-cancel.
+  bool _barrelButtonOverride = false;
   CanvasTool? _barrelButtonPreviousTool;
 
   // ── New chrome state (warm-paper redesign) ─────────────────────
@@ -1144,14 +1150,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       return;
     }
 
-    // Stylus barrel button (secondary button on stylus) → cancel or erase
-    if (event.kind == PointerDeviceKind.stylus && event.buttons == kSecondaryButton) {
-      // If pending symbol, cancel placement
+    // Stylus barrel buttons — OneNote-style temporary tool override.
+    //
+    // Upper button (kTertiaryButton) → temporary eraser. Lower button
+    // (kSecondaryButton) → temporary lasso. Release the button and the
+    // previous tool is restored. The Wacom/Surface/Galaxy drivers all
+    // report these via Flutter's standard buttons mask.
+    //
+    // Any pending modal state (symbol placement / paste / single-element
+    // selection / lasso selection) is treated as "cancel that first" —
+    // a barrel press while the user is in such state is far more often
+    // a deliberate escape than a request to erase / lasso.
+    if (event.kind == PointerDeviceKind.stylus &&
+        (event.buttons == kSecondaryButton ||
+            event.buttons == kTertiaryButton)) {
+      // Escape pending modal states first (any button).
       if (state.pendingSymbol != null) {
         ref.read(canvasProvider.notifier).clearPendingSymbol();
         return;
       }
-      // If there's a selection, deselect
       if (state.selectedElementId != null) {
         ref.read(canvasProvider.notifier).deselectElement();
         return;
@@ -1160,12 +1177,25 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         ref.read(canvasProvider.notifier).clearSelection();
         return;
       }
-      // Otherwise use barrel button as temporary stroke eraser
+
       final pagePos = _toPageCoords(event.localPosition, state, canvasSize);
-      _barrelButtonErasing = true;
+      _barrelButtonOverride = true;
       _barrelButtonPreviousTool = state.currentTool;
-      ref.read(canvasProvider.notifier).setTool(CanvasTool.eraserStroke);
-      ref.read(canvasProvider.notifier).startStroke(pagePos, 0.5);
+
+      if (event.buttons == kTertiaryButton) {
+        // Upper barrel → eraser. Honour the user's last picked
+        // sub-mode (per-stroke vs per-area) so the barrel feels like
+        // the eraser dock button.
+        final n = ref.read(canvasProvider.notifier);
+        n.setTool(n.lastEraserMode);
+        n.startStroke(pagePos, 0.5);
+      } else {
+        // Lower barrel → lasso. Don't start a path here — let the
+        // normal lasso pointer-down branch take over on the next
+        // routed event (the tool change is what matters).
+        ref.read(canvasProvider.notifier).setTool(CanvasTool.lasso);
+        _lassoPathNotifier.start(pagePos);
+      }
       return;
     }
 
@@ -1582,15 +1612,31 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // Don't commit anything if this was a multi-touch gesture (pinch-to-zoom)
     if (wasMultiTouch || _activePointers >= 1) return;
 
-    // Barrel button erase: restore previous tool on lift
-    if (_barrelButtonErasing) {
-      _barrelButtonErasing = false;
-      ref.read(canvasProvider.notifier).endStroke();
-      _markStrokeEnded('pointerUp.barrelEnd');
-      if (_barrelButtonPreviousTool != null) {
-        ref.read(canvasProvider.notifier).setTool(_barrelButtonPreviousTool!);
-        _barrelButtonPreviousTool = null;
+    // Barrel button override: commit + restore previous tool on lift.
+    // Eraser → endStroke flushes any erasures. Lasso → commit the
+    // collected path through the same provider call the normal lasso
+    // pointer-up uses, so a selection lands if the user closed a
+    // polygon around something. Either way, the user's original tool
+    // (the one they were using before holding the barrel) is restored
+    // so they fall right back into writing.
+    if (_barrelButtonOverride) {
+      _barrelButtonOverride = false;
+      final notif = ref.read(canvasProvider.notifier);
+      final prevTool = _barrelButtonPreviousTool;
+      _barrelButtonPreviousTool = null;
+      // Tool-specific cleanup before restoring.
+      if (notif.lastEraserMode == ref.read(canvasProvider)?.currentTool ||
+          ref.read(canvasProvider)?.currentTool == CanvasTool.eraserStandard ||
+          ref.read(canvasProvider)?.currentTool == CanvasTool.eraserStroke) {
+        notif.endStroke();
+      } else if (ref.read(canvasProvider)?.currentTool == CanvasTool.lasso &&
+          _lassoPathNotifier.isActive) {
+        final pts = List<Offset>.from(_lassoPathNotifier.points);
+        _lassoPathNotifier.clear();
+        notif.commitLassoPath(pts);
       }
+      _markStrokeEnded('pointerUp.barrelEnd');
+      if (prevTool != null) notif.setTool(prevTool);
       return;
     }
 
@@ -1752,8 +1798,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       _markStrokeEnded('pointerCancel.committedStylus');
       _strokeDbg('CANCEL_RESCUED kind=${event.kind.name} pts=${points.length}');
       // Restore barrel button state if needed before returning
-      if (_barrelButtonErasing) {
-        _barrelButtonErasing = false;
+      if (_barrelButtonOverride) {
+        _barrelButtonOverride = false;
         if (_barrelButtonPreviousTool != null) {
           ref.read(canvasProvider.notifier).setTool(_barrelButtonPreviousTool!);
           _barrelButtonPreviousTool = null;
@@ -1771,8 +1817,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       _lassoPathNotifier.clear();
     }
     // Restore barrel button state
-    if (_barrelButtonErasing) {
-      _barrelButtonErasing = false;
+    if (_barrelButtonOverride) {
+      _barrelButtonOverride = false;
       if (_barrelButtonPreviousTool != null) {
         ref.read(canvasProvider.notifier).setTool(_barrelButtonPreviousTool!);
         _barrelButtonPreviousTool = null;
