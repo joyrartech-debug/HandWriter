@@ -289,18 +289,33 @@ class WebDavService {
   /// without this, a single bad metadata download wedges the notebook
   /// in the 0-of-N pull loop forever.
   Future<Uint8List> downloadFile(String remotePath,
-      {int? timeoutSeconds, bool criticalVerify = false}) async {
+      {int? timeoutSeconds,
+      bool criticalVerify = false,
+      String? ifNoneMatchEtag}) async {
     Object? lastError;
     for (var attempt = 0; attempt < _downloadMaxAttempts; attempt++) {
       try {
+        final headers = ifNoneMatchEtag == null
+            ? _authHeaders
+            : <String, String>{
+                ..._authHeaders,
+                'If-None-Match': '"${ifNoneMatchEtag.replaceAll('"', '')}"',
+              };
         final response = await _client
             .get(
               Uri.parse(_fullUrl(remotePath)),
-              headers: _authHeaders,
+              headers: headers,
             )
             .timeout(Duration(
                 seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
 
+        if (response.statusCode == 304) {
+          // Not Modified — caller already has fresh bytes. Signal this
+          // distinctly so the caller can keep its cached payload instead
+          // of treating the empty body as an error.
+          _recordSuccess();
+          throw WebDavNotModifiedException(remotePath, ifNoneMatchEtag!);
+        }
         if (response.statusCode == 404) {
           _recordSuccess();
           throw WebDavException('GET 404', 404);
@@ -383,7 +398,26 @@ class WebDavService {
                 Duration(milliseconds: 400 * (1 << attempt)));
             continue;
           }
-          throw lastError as WebDavTruncatedDownloadException;
+          // Last-resort: full-GET keeps truncating on this path (observed
+          // on Tailscale where every full GET cuts at exactly 32768 B,
+          // affecting files whose total size exceeds that boundary). Fall
+          // back to Range-based chunked GETs — the server can deliver
+          // small chunks even when it can't stream the whole body.
+          try {
+            final assembled = await _downloadByRange(
+                remotePath, expectedSize,
+                timeoutSeconds: timeoutSeconds);
+            // ignore: avoid_print
+            print('[WebDAV] downloadFile RANGE-RECOVERED $remotePath: '
+                '${assembled.length}B via chunked Range');
+            _recordSuccess();
+            return assembled;
+          } catch (rangeErr) {
+            // ignore: avoid_print
+            print('[WebDAV] downloadFile range fallback also failed for '
+                '$remotePath: $rangeErr');
+            throw lastError as WebDavTruncatedDownloadException;
+          }
         }
 
         _recordSuccess();
@@ -401,6 +435,84 @@ class WebDavService {
   }
 
   static const int _downloadMaxAttempts = 3;
+
+  /// Chunk size for Range-based downloads. Chosen below 32 KB because
+  /// that's the observed truncation boundary on Tailscale (a single
+  /// GET that asks for more than ~32 KB tends to get cut mid-stream).
+  /// 30000 B leaves headroom for any server-side overhead while still
+  /// keeping the number of round-trips low (~4 chunks per 120 KB file).
+  static const int _rangeChunkSize = 30000;
+
+  /// Fallback download path used when full-GET keeps truncating. Asks
+  /// the server for the body in small Range slices (each below the
+  /// observed 32 KB cut-point), reassembles them, and returns the
+  /// full payload. Throws [WebDavTruncatedDownloadException] if even
+  /// the chunked path can't assemble [expectedSize] bytes.
+  Future<Uint8List> _downloadByRange(String remotePath, int expectedSize,
+      {int? timeoutSeconds}) async {
+    final pieces = <int>[];
+    var offset = 0;
+    while (offset < expectedSize) {
+      final end = (offset + _rangeChunkSize > expectedSize)
+          ? expectedSize - 1
+          : offset + _rangeChunkSize - 1;
+      final headers = <String, String>{
+        ..._authHeaders,
+        'Range': 'bytes=$offset-$end',
+      };
+      // Per-chunk retry: a single flaky chunk shouldn't abort the whole
+      // recovery. Three attempts with short backoff is enough — if the
+      // link is truly down, throwing surfaces it to the caller.
+      Uint8List? chunk;
+      for (var attempt = 0; attempt < 3; attempt++) {
+        try {
+          final response = await _client
+              .get(Uri.parse(_fullUrl(remotePath)), headers: headers)
+              .timeout(Duration(
+                  seconds: timeoutSeconds ?? AppConfig.webdavTimeoutSeconds));
+          // 206 Partial Content is the well-formed response; some servers
+          // answer 200 with the full body when they don't honour Range —
+          // treat that as success too as long as bytes match the request.
+          if (response.statusCode != 206 && response.statusCode != 200) {
+            throw WebDavException(
+                'Range GET status ${response.statusCode}',
+                response.statusCode);
+          }
+          final body = response.bodyBytes;
+          final wantedLen = end - offset + 1;
+          if (response.statusCode == 200) {
+            // Server ignored Range and sent everything. Slice client-side.
+            if (body.length < expectedSize) {
+              throw WebDavException(
+                  '200 fallback body truncated: ${body.length}/$expectedSize',
+                  200);
+            }
+            chunk = body.sublist(offset, end + 1);
+          } else {
+            if (body.length != wantedLen) {
+              throw WebDavException(
+                  'Range body length mismatch: got ${body.length} '
+                  'wanted $wantedLen',
+                  206);
+            }
+            chunk = body;
+          }
+          break;
+        } catch (e) {
+          if (attempt == 2) rethrow;
+          await Future.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+        }
+      }
+      pieces.addAll(chunk!);
+      offset = end + 1;
+    }
+    final assembled = Uint8List.fromList(pieces);
+    if (assembled.length != expectedSize) {
+      throw WebDavTruncatedDownloadException(
+          remotePath, expectedSize, assembled.length);
+    }
+    return assembled;
+  }
 
   /// Carica un file sul server. Crea o sovrascrive.
   /// Ritorna l'ETag della nuova versione.
@@ -899,6 +1011,22 @@ class WebDavTruncatedDownloadException implements Exception {
   String toString() =>
       'WebDavTruncatedDownloadException($remotePath): server declared '
       '${declaredBytes}B but only ${receivedBytes}B were received';
+}
+
+/// Raised by [WebDavService.downloadFile] when an `If-None-Match`
+/// conditional GET returned 304 Not Modified. The caller's cached
+/// bytes are still authoritative; reusing them is the whole point of
+/// the conditional GET.
+class WebDavNotModifiedException implements Exception {
+  final String remotePath;
+  final String etag;
+
+  WebDavNotModifiedException(this.remotePath, this.etag);
+
+  @override
+  String toString() =>
+      'WebDavNotModifiedException($remotePath): server returned 304 '
+      'for If-None-Match=$etag';
 }
 
 /// Parsa date HTTP (RFC 1123: "Sun, 06 Nov 1994 08:49:37 GMT").
