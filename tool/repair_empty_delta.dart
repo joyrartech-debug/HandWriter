@@ -269,14 +269,18 @@ Future<bool> _rebuildDocumentFromPages(Directory notebookDeltaDir) async {
       // Field name MUST be `pageId` (matches PageEntry.pageId in
       // ncnote_format.dart). Writing `id` instead made the app's
       // DocumentStructure.fromJson cast null→String and abort the
-      // entire pull.
+      // entire pull. The nullable fields (thumbnailFile, chapterId,
+      // lastModified) are emitted explicitly as null so the rebuilt
+      // file matches the schema produced by the running app exactly.
       entries.add(<String, dynamic>{
         'pageId': pageId,
         'pageNumber': pageNumber,
         'fileName': fileName,
         'width': width,
         'height': height,
-        if (chapterId != null) 'chapterId': chapterId,
+        'thumbnailFile': null,
+        'chapterId': chapterId,
+        'lastModified': null,
       });
     } catch (e) {
       print('  ⚠ Page ${entity.path.split(Platform.pathSeparator).last} '
