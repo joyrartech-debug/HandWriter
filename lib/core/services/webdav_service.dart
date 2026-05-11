@@ -665,12 +665,30 @@ class WebDavService {
         _recordSuccess();
         return response.headers['etag']?.replaceAll('"', '');
       } on WebDavSizeMismatchException {
+        // Size-mismatch already drove its own attempt loop above; if we
+        // reach here it's the final throw from line 661 (exhausted).
         rethrow;
-      } on WebDavException {
-        rethrow;
+      } on WebDavException catch (e) {
+        // 4xx is permanent (auth, bad request, lock-conflict): don't waste
+        // attempts. 5xx and unexpected codes are transient (server hiccup,
+        // gateway timeout, Tailscale relay flap): retry with backoff,
+        // matching the comment-promised "exponential backoff up to
+        // _uploadMaxAttempts". Pre-fix, every uploadFile failure short-
+        // circuited the loop and made one save() = one PUT attempt.
+        final permanent = e.statusCode >= 400 && e.statusCode < 500;
+        if (permanent || attempt >= _uploadMaxAttempts - 1) rethrow;
+        lastError = e;
+        await Future.delayed(Duration(milliseconds: 400 * (1 << attempt)));
+        continue;
       } catch (e) {
+        // Transport-level failure (timeout, socket closed, ClientException,
+        // FormatException from a half-baked response). All transient by
+        // nature — retry until we run out of attempts.
         _recordFailure('uploadFile', e);
-        rethrow;
+        if (attempt >= _uploadMaxAttempts - 1) rethrow;
+        lastError = e;
+        await Future.delayed(Duration(milliseconds: 400 * (1 << attempt)));
+        continue;
       }
     }
     // Unreachable: loop either returns or throws.

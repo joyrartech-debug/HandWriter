@@ -205,16 +205,29 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
       top: position.dy - (isHorizontal ? 4 : 10),
       child: GestureDetector(
         onPanStart: (d) {
-          _dragStart = d.globalPosition;
+          // Same orig-snapshot pattern as corner resize: edge drags must
+          // compute newBounds from cumulative pointer travel against an
+          // IMMUTABLE origBounds, not against live widget.bounds.
+          // widget.bounds is recomputed each frame from notifier values,
+          // and at fast pan rates the parent rebuild lags pointer events
+          // — per-tick math against the live rect freezes the dimension
+          // at whatever the first tick produced.
+          _resizeOrigBounds = widget.bounds;
+          _resizeGestureOrigin = d.globalPosition;
           widget.onDragStart?.call();
         },
         onPanUpdate: (d) {
-          final delta = d.globalPosition - _dragStart;
-          _dragStart = d.globalPosition;
-          _handleEdgeResize(handleId, delta);
+          final cumulative = d.globalPosition - _resizeGestureOrigin;
+          _handleEdgeResize(handleId, cumulative);
         },
-        onPanEnd: (_) => widget.onDragEnd?.call(),
-        onPanCancel: () => widget.onDragEnd?.call(),
+        onPanEnd: (_) {
+          _resizeOrigBounds = null;
+          widget.onDragEnd?.call();
+        },
+        onPanCancel: () {
+          _resizeOrigBounds = null;
+          widget.onDragEnd?.call();
+        },
         child: Container(
           width: isHorizontal ? 20 : 8,
           height: isHorizontal ? 8 : 20,
@@ -492,21 +505,24 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
     }
   }
 
-  void _handleEdgeResize(String handle, Offset delta) {
-    final b = widget.bounds;
+  void _handleEdgeResize(String handle, Offset cumulativeDelta) {
+    // Cumulative against orig snapshot — see comment on _handleCornerResize
+    // for why widget.bounds (live) would freeze the drag at fast pan
+    // rates.
+    final b = _resizeOrigBounds ?? widget.bounds;
     Rect newBounds;
     switch (handle) {
       case 'tm':
-        newBounds = Rect.fromLTRB(b.left, b.top + delta.dy, b.right, b.bottom);
+        newBounds = Rect.fromLTRB(b.left, b.top + cumulativeDelta.dy, b.right, b.bottom);
         break;
       case 'bm':
-        newBounds = Rect.fromLTRB(b.left, b.top, b.right, b.bottom + delta.dy);
+        newBounds = Rect.fromLTRB(b.left, b.top, b.right, b.bottom + cumulativeDelta.dy);
         break;
       case 'ml':
-        newBounds = Rect.fromLTRB(b.left + delta.dx, b.top, b.right, b.bottom);
+        newBounds = Rect.fromLTRB(b.left + cumulativeDelta.dx, b.top, b.right, b.bottom);
         break;
       case 'mr':
-        newBounds = Rect.fromLTRB(b.left, b.top, b.right + delta.dx, b.bottom);
+        newBounds = Rect.fromLTRB(b.left, b.top, b.right + cumulativeDelta.dx, b.bottom);
         break;
       default:
         return;

@@ -1275,6 +1275,12 @@ class _NewNotebookDialogState extends State<_NewNotebookDialog> {
   String _paper = 'lined';
 
   @override
+  void dispose() {
+    _titleCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final p = HwThemeScope.of(context);
     return AlertDialog(

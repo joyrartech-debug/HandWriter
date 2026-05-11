@@ -398,11 +398,19 @@ class LaserStrokeNotifier extends ChangeNotifier {
   void _prune() {
     final now = DateTime.now().millisecondsSinceEpoch;
     final cutoff = now - trailMs;
-    var pruned = false;
-    while (_points.isNotEmpty && _points.first.t < cutoff) {
-      _points.removeAt(0);
-      pruned = true;
+    // Find the FIRST point that's still within the fade window — points
+    // earlier than that are stale and must go. Single removeRange beats
+    // the previous `while (_points.first.t < cutoff) _points.removeAt(0)`
+    // loop, which was O(N²): every removeAt(0) shifts the whole tail.
+    // With the 16 ms tick a busy trail of ~90 points was burning ~8 K
+    // shifts per second. Now: one O(N) scan + one O(N) shift, total
+    // O(N) per tick.
+    var firstAlive = 0;
+    while (firstAlive < _points.length && _points[firstAlive].t < cutoff) {
+      firstAlive++;
     }
+    final pruned = firstAlive > 0;
+    if (pruned) _points.removeRange(0, firstAlive);
     if (_points.isEmpty) {
       _ticker?.cancel();
       _ticker = null;

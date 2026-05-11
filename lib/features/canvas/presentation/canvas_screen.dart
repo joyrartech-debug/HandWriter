@@ -4329,6 +4329,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         ),
       ),
     );
+    controller.dispose();
     if (result != null && result.$1.isNotEmpty) {
       ref.read(canvasProvider.notifier).createSymbolFromSelection(result.$1, targetLibId: result.$2);
       if (mounted) {
@@ -4383,6 +4384,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         ),
       ),
     );
+    controller.dispose();
     if (result != null && result.$1.isNotEmpty) {
       ref.read(canvasProvider.notifier).createSymbolFromElement(elementId, result.$1);
       if (mounted) {

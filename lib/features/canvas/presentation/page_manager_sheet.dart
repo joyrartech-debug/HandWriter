@@ -619,6 +619,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
         ],
       ),
     );
+    controller.dispose();
     if (result == null) return;
     final clamped = (result - 1).clamp(0, maxN - 1);
     final target = filtered.isEmpty ? clamped : filtered[clamped];

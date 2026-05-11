@@ -4552,6 +4552,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Public read-only view of [_corruptAssetIds] for UI consumers.
   Set<String> get corruptAssetIds => _corruptAssetIds;
 
+  /// AssetIds whose decode is currently in flight. Used to prevent two
+  /// parallel decodes from racing — priority loop and background loop can
+  /// both fire `_decodeAndCacheImage(assetId, bytes)` for the same id, and
+  /// the second decode's writeback would otherwise overwrite the first
+  /// without disposing the orphaned ui.Image (silent GPU-memory leak).
+  final Set<String> _decodingInFlight = <String>{};
+
   Future<void> _decodeAndCacheImage(String assetId, Uint8List bytes) async {
     // Remember which notebook this decode belongs to. If the user switches
     // notebooks while we're awaiting the codec, the decoded ui.Image must
@@ -4559,6 +4566,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // image on a different page, or worse, under a conflicting assetId).
     final ownerNotebookId = state?.metadata.id;
     if (ownerNotebookId == null) return;
+    // Coalesce parallel decodes for the same asset. Once the in-flight
+    // decode lands the cache will already hold the image, so a subsequent
+    // request can re-check via the existing imageCache lookup and skip.
+    if (!_decodingInFlight.add(assetId)) return;
     ui.Codec? codec;
     try {
       codec = await ui.instantiateImageCodec(bytes);
@@ -4612,6 +4623,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // On iPad, leaking codecs quickly exhausts GPU memory and causes the
       // renderer to be jettisoned by the OS.
       codec?.dispose();
+      _decodingInFlight.remove(assetId);
     }
   }
 
@@ -6385,8 +6397,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void _startPullTimer() {
     _pullTimer?.cancel();
+    if (_disposed) return;
     // Immediate pull on notebook open — don't wait first interval.
     // Track the future so closeNotebook can await it.
+    // _disposed guard avoids scheduling a pull whose continuation could
+    // race a `closeNotebook` issued seconds later on a slow link
+    // (downloads keep arriving and try to mutate a torn-down state).
     _pendingPullFuture = _pullRemoteChanges();
     _schedulePullTick();
   }
@@ -7537,8 +7553,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           }
           print('[Canvas] Background asset pull done: '
               '$bgOk/${backgroundList.length} ok, $bgFailed failed');
-          // Single commit at the end. Skip if the notebook closed mid-pass.
-          if (bgDownloaded.isNotEmpty &&
+          // Single commit at the end. Skip if the notifier was disposed
+          // or the notebook closed mid-pass — without the _disposed check
+          // a post-dispose `state = ...` would set a value on a notifier
+          // Riverpod considers torn-down, surfacing as "tried to use
+          // ProviderContainer after it was disposed" if any listener
+          // outlives the dispose.
+          if (!_disposed &&
+              bgDownloaded.isNotEmpty &&
               state != null &&
               state!.metadata.id == notebookId) {
             final merged = Map<String, Uint8List>.from(state!.assetBytes)
@@ -8063,9 +8085,21 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     // Defense-in-depth: any local-only page (e.g. just-added by the user
-    // and not yet in the remote merge) must survive too.
+    // and not yet in the remote merge) must survive. BUT: don't resurrect
+    // a page that was REMOTE-DELETED (gone from repaired.pages AND
+    // previously present in _lastSyncedPages). Without this distinction,
+    // accepting a remote-side deletion would re-add the page from the
+    // stale local state — ghost-page bug after a multi-device delete.
     for (final entry in s.pages.entries) {
-      mergedPages.putIfAbsent(entry.key, () => entry.value);
+      if (mergedPages.containsKey(entry.key)) continue;
+      final wasPreviouslySynced = _lastSyncedPages.containsKey(entry.key);
+      if (wasPreviouslySynced) {
+        // Previously synced AND absent from remote merge → remote-deleted.
+        // Drop it.
+        continue;
+      }
+      // Truly local-only page (never been on the server). Keep it.
+      mergedPages[entry.key] = entry.value;
     }
 
     state = s.copyWith(
