@@ -1135,22 +1135,52 @@ class SyncService {
       }
     }
 
-    // Download assets
+    // Download assets. eagerError:false so a single transient WebDAV
+    // failure on a flaky network (e.g. Tailscale) doesn't abort the
+    // whole batch and leave the rebuilt .ncnote missing assets the
+    // server actually has — those would later render with the orange
+    // broken-image badge on the iPad even though "Ricarica" appeared
+    // to succeed. Per-asset retry mirrors the per-page retry above.
     final assets = <String, Uint8List>{};
+    final failedAssets = <String>[];
     try {
       final assetItems = await _webdav.listDirectory('${dir}assets/');
+
+      Future<void> downloadAsset(String name) async {
+        const maxAssetRetries = 3;
+        for (var attempt = 0; attempt < maxAssetRetries; attempt++) {
+          try {
+            final data = await _webdav.downloadFile('${dir}assets/$name');
+            assets[name] = data;
+            return;
+          } catch (e) {
+            if (attempt == maxAssetRetries - 1) {
+              debugPrint('[Sync] FAILED to download asset $name '
+                  'for $notebookId after $maxAssetRetries attempts: $e');
+              failedAssets.add(name);
+              return;
+            }
+            await Future.delayed(Duration(milliseconds: 200 * (attempt + 1)));
+          }
+        }
+      }
+
       final assetFutures = <Future<void>>[];
       for (final item in assetItems) {
         if (!item.isDirectory) {
-          assetFutures.add(
-            _webdav.downloadFile('${dir}assets/${item.name}').then((data) {
-              assets[item.name] = data;
-            }),
-          );
+          assetFutures.add(downloadAsset(item.name));
         }
       }
-      await Future.wait(assetFutures);
-    } catch (_) {}
+      await Future.wait(assetFutures, eagerError: false);
+      if (failedAssets.isNotEmpty) {
+        debugPrint('[Sync] downloadExplodedFull($notebookId): '
+            '${failedAssets.length} asset(s) failed after retries: '
+            '$failedAssets');
+      }
+    } catch (e) {
+      debugPrint('[Sync] downloadExplodedFull($notebookId) asset phase '
+          'aborted: $e');
+    }
 
     // Download symbols
     var symbols = <Map<String, dynamic>>[];
