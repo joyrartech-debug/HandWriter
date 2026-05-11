@@ -96,6 +96,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   int _lastStylusDiagAt = 0;
   int _lastKeyDiagAt = 0;
   int _lastHoverDiagAt = 0;
+  /// Device IDs whose first hover/down has already been logged via
+  /// the DEVICE-SEEN line. Lets us capture the identity of each
+  /// physical input once without spamming for every event.
+  final Set<int> _seenDevices = <int>{};
 
   // Stylus barrel button — OneNote-style temporary tool override.
   // Two buttons supported (Wacom EMR / Surface / Galaxy stylus all
@@ -1073,13 +1077,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // ── Universal pointer diagnostic ──
     // Logs every PointerDown with full disambiguation fields so we
     // can tell a Gaomon-barrel-pretending-to-be-middle-click from a
-    // physical mouse middle click. `device` is the Flutter pointer
-    // device ID (stable across events from the same physical
-    // device); `embedderId` is set by the platform embedder
-    // (Windows runner) and on WM_POINTER paths reflects the OS
-    // pointer ID — pen and mouse get different ones even when both
-    // arrive as `kind=mouse` to Flutter.
+    // physical mouse middle click.
     {
+      if (_seenDevices.add(event.device)) {
+        unawaited(CrashLogger.append(
+          '[Ptr] DEVICE-SEEN kind=${event.kind.name} '
+          'device=${event.device} '
+          'embedderId=${event.embedderId} '
+          'pointer=${event.pointer}',
+        ));
+      }
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       if (nowMs - _lastStylusDiagAt > 250) {
         _lastStylusDiagAt = nowMs;
@@ -3051,12 +3058,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
                   onPointerHover: (e) {
-                    // Logs hover for ANY pointer kind — only logs the
-                    // first event in each 400 ms window AND only
-                    // when buttons != 0 so plain mouse-moves don't
-                    // drown the file. A Gaomon barrel pressed while
-                    // the pen hovers will show up here if Windows
-                    // exposes it at all.
+                    // Logs hover for ANY pointer kind. Two channels:
+                    //   1) Always log the FIRST hover event seen
+                    //      from each unique device ID so we get the
+                    //      pen's identity even when buttons=0.
+                    //   2) Log every hover with non-zero buttons
+                    //      (throttled), so a barrel press during
+                    //      hover is visible.
+                    if (_seenDevices.add(e.device)) {
+                      unawaited(CrashLogger.append(
+                        '[Ptr] DEVICE-SEEN kind=${e.kind.name} '
+                        'device=${e.device} '
+                        'embedderId=${e.embedderId} '
+                        'pointer=${e.pointer}',
+                      ));
+                    }
                     if (e.buttons == 0) return;
                     final nowMs = DateTime.now().millisecondsSinceEpoch;
                     if (nowMs - _lastHoverDiagAt > 400) {
