@@ -98,6 +98,58 @@ them up on their next pull.
 
 ---
 
+## `audit_notebooks.dart`
+
+Periodic structural audit + optional cleanup of the local Nextcloud
+HandWriter mirror. Catches the residual drift that accumulates over
+months of multi-device sync: orphan pages, orphan assets, duplicate
+pageId entries, stale chapter references, page-count mismatches, old
+conflict `.ncnote` backups.
+
+```bash
+# Read-only audit (safe default)
+dart run tool/audit_notebooks.dart
+
+# Apply repairs after a y/N prompt
+dart run tool/audit_notebooks.dart --clean
+
+# Apply without prompting (CI / automation)
+dart run tool/audit_notebooks.dart --clean --yes
+
+# Override mirror root
+dart run tool/audit_notebooks.dart /custom/HandWriter
+```
+
+The `--clean` pass does, in order:
+
+1. Removes `_conflict_*.ncnote` files from the root older than 14 days
+   (Nextcloud-style conflict copies the app accumulated but never
+   cleaned).
+2. Removes `page_*.json` files on disk that aren't in `document.json`
+   AND are smaller than 1 KB (PDF-rendering placeholders with no user
+   strokes). **Larger orphan files are reported but never deleted** —
+   they might contain user work and need manual inspection.
+3. Removes asset files not referenced by any active page.
+4. Drops duplicate-pageId entries from `document.json` (e.g.
+   `page_068.json` and `page_072.json` sharing pageId X), keeping the
+   first occurrence and deleting the other files.
+5. Drops entries from `document.json` whose `page_*.json` file is
+   missing (server-side residue from a sync race).
+6. Clears orphan `chapterId` in `document.pages[]` (sets to null when
+   the chapter no longer exists).
+7. Drops orphan `pageIds` from `metadata.chapters[].pageIds`.
+8. Updates `metadata.pageCount` to match the actual file count.
+
+Like the other scripts in this folder, atomic temp+rename writes
+prevent the Nextcloud client from snapshotting a half-written file,
+and a clean run is a no-op (idempotent).
+
+The 0-byte `metadata.json` / `document.json` case is deliberately **not**
+handled here — that's the `repair_empty_delta.dart` job. The audit
+script reports them but won't touch them.
+
+---
+
 ## Safety notes
 
 - Both scripts use atomic `temp + rename` writes — a Nextcloud client
