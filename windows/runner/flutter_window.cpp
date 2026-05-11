@@ -1,8 +1,7 @@
 #include "flutter_window.h"
 
-#include <shlobj.h>
-
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <string>
 
@@ -10,19 +9,22 @@
 
 namespace {
 // Quick native-side log so we can diagnose whether the Win32 runner
-// actually receives WM_POINTER* messages for a Gaomon driverless pen.
-// Writes to <My Documents>\handwriter_native.log. Tiny overhead per
-// call; no rotation — wipe by hand if it grows.
+// receives WM_POINTER* messages for a Gaomon driverless pen. Resolves
+// %USERPROFILE%\Documents via the environment instead of pulling in
+// shlobj — avoids a startup-time COM dependency that may not be
+// initialised yet in some Flutter runner builds.
 void NativeLog(const char* fmt, ...) {
   static FILE* f = nullptr;
   static bool tried = false;
   if (!tried) {
     tried = true;
-    wchar_t docs[MAX_PATH] = {};
-    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs))) {
+    wchar_t profile[MAX_PATH] = {};
+    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
+    if (n > 0 && n < MAX_PATH) {
       wchar_t path[MAX_PATH] = {};
-      swprintf_s(path, MAX_PATH, L"%s\\handwriter_native.log", docs);
-      _wfopen_s(&f, path, L"a, ccs=UTF-8");
+      swprintf_s(path, MAX_PATH, L"%s\\Documents\\handwriter_native.log",
+                 profile);
+      _wfopen_s(&f, path, L"a");
     }
   }
   if (!f) return;
@@ -43,13 +45,14 @@ bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
     return false;
   }
-  // Force every input source (mouse, touch, pen) to deliver via the
-  // WM_POINTER* family so HandlePenPointerMessage actually receives
-  // pen events from drivers that would otherwise route through the
-  // legacy WM_MOUSE / WM_TOUCH path. Has no effect on Flutter's own
-  // pointer pipeline, which keeps reading from the same source.
-  EnableMouseInPointer(TRUE);
-  NativeLog("[Init] OnCreate, EnableMouseInPointer(TRUE) called\n");
+  // NOTE: we deliberately do NOT call EnableMouseInPointer(TRUE)
+  // here. Flutter's Windows runner reads MOUSE input from the
+  // legacy WM_LBUTTONDOWN / WM_MOUSEMOVE messages, and forcing
+  // mouse-in-pointer routes them through WM_POINTER instead —
+  // Flutter then loses every click and the window appears frozen.
+  // Pen events still arrive via WM_POINTER on Win10+ without the
+  // opt-in (pens are pointer-aware by default on the OS side).
+  NativeLog("[Init] OnCreate\n");
 
   RECT frame = GetClientArea();
 
