@@ -1197,8 +1197,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     final tool = state.currentTool;
 
-    // Middle mouse button → always pan
-    if (event.kind == PointerDeviceKind.mouse && event.buttons == kMiddleMouseButton) {
+    // Middle mouse button → always pan, EXCEPT when a native barrel
+    // override is active. Reason: a Gaomon driverless pen reports
+    // "barrel held + tip in contact" as a synthesised middle-mouse
+    // click. Without the guard, the existing middle-mouse-pan branch
+    // swallows the pen tip touch before the lasso/eraser branch
+    // could pick it up — the toolbar already shows lasso (the C++
+    // bridge switched it on the barrel press) but the tap goes
+    // into pan mode and the lasso never starts.
+    if (event.kind == PointerDeviceKind.mouse &&
+        event.buttons == kMiddleMouseButton &&
+        _activeNativeBarrel == null) {
       _isTouchPanning = true;
       _lastFocalPoint = event.position;
       return;
