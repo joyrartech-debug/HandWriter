@@ -13,6 +13,134 @@ import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/page_clipboard_provider.dart';
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
+import 'package:handwriter/ui/primitives/hw_button.dart';
+import 'package:handwriter/ui/theme/hw_icons.dart';
+import 'package:handwriter/ui/theme/hw_theme.dart';
+
+/// Single-line popup-menu entry — keeps menus compact and visually
+/// aligned with HwTheme (HwIcon + ink color instead of Material's
+/// 56-px-tall ListTile). Shared between the page 3-dot menu and the
+/// chapter long-press menu.
+Widget _hwMenuRow(HwPalette p, String icon, String label, {Color? color}) {
+  final c = color ?? p.ink0;
+  return Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      HwIcon(icon, size: 16, color: c),
+      const SizedBox(width: 10),
+      Text(label, style: TextStyle(fontSize: 13, color: c)),
+    ],
+  );
+}
+
+/// Sentinel returned by [_pickChapter] when the user picks "Nessuno"
+/// (i.e. remove chapter assignment).
+const String _kRemoveChapter = '__remove__';
+
+/// Themed chapter picker bottom sheet — replaces the previous
+/// ListTile + Material-icon variants with HwIcon rows so the sheet
+/// matches the rest of the page manager.
+Future<String?> _pickChapter(
+  BuildContext ctx,
+  CanvasState s, {
+  required String title,
+  String? selectedChapterId,
+}) {
+  return showModalBottomSheet<String>(
+    context: ctx,
+    backgroundColor: Colors.transparent,
+    builder: (shCtx) {
+      final p = HwThemeScope.of(shCtx);
+      Widget row({
+        required String icon,
+        required String label,
+        required VoidCallback onTap,
+        bool selected = false,
+        Color? color,
+      }) {
+        final c = color ?? p.ink0;
+        return InkWell(
+          onTap: onTap,
+          child: Container(
+            color: selected ? p.accentSoft : null,
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            child: Row(
+              children: [
+                HwIcon(icon, size: 18, color: c),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: c,
+                      fontWeight:
+                          selected ? FontWeight.w600 : FontWeight.w500,
+                    ),
+                  ),
+                ),
+                if (selected) HwIcon('check', size: 16, color: p.accent),
+              ],
+            ),
+          ),
+        );
+      }
+
+      return SafeArea(
+        top: false,
+        child: Container(
+          decoration: BoxDecoration(
+            color: p.paper0,
+            borderRadius:
+                const BorderRadius.vertical(top: Radius.circular(HwTheme.rLg)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.symmetric(vertical: 8),
+                  decoration: BoxDecoration(
+                    color: p.paper3,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: p.ink1,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+              ),
+              row(
+                icon: 'x',
+                label: 'Nessuno',
+                color: p.ink2,
+                onTap: () => Navigator.of(shCtx).pop(_kRemoveChapter),
+              ),
+              ...s.metadata.chapters.map((chapter) => row(
+                    icon: 'chapter',
+                    label: chapter.title,
+                    selected: selectedChapterId == chapter.id,
+                    onTap: () => Navigator.of(shCtx).pop(chapter.id),
+                  )),
+              const SizedBox(height: 8),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+}
 
 // ─────────────────────────────────────────────────────────────
 //  PageManagerSheet
@@ -81,32 +209,12 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
       );
       return;
     }
-    const removeChapter = '__remove__';
-    final selectedId = await showModalBottomSheet<String>(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            title: Text('Assegna capitolo (${_selected.length} pagine)'),
-          ),
-          ListTile(
-            leading: const Icon(Icons.clear),
-            title: const Text('Nessuno'),
-            onTap: () => Navigator.of(ctx).pop(removeChapter),
-          ),
-          ...s.metadata.chapters.map((chapter) => ListTile(
-                leading: const Icon(Icons.folder_open),
-                title: Text(chapter.title),
-                onTap: () => Navigator.of(ctx).pop(chapter.id),
-              )),
-        ],
-      ),
+    final selectedId = await _pickChapter(
+      context,
+      s,
+      title: 'Assegna capitolo (${_selected.length} pag.)',
     );
-    if (selectedId == removeChapter) {
+    if (selectedId == _kRemoveChapter) {
       ref.read(canvasProvider.notifier).assignPagesToChapter(_selected.toList(), null);
     } else if (selectedId != null) {
       ref.read(canvasProvider.notifier).assignPagesToChapter(_selected.toList(), selectedId);
@@ -141,7 +249,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
             child: const Text('Annulla'),
           ),
           TextButton(
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
+            style: TextButton.styleFrom(foregroundColor: HwTheme.syncConflict),
             onPressed: () => Navigator.pop(dCtx, true),
             child: const Text('Elimina'),
           ),
@@ -196,7 +304,10 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
       expand: false,
       builder: (ctx, scrollController) {
         final visibleIndices = liveState.filteredPageIndices;
-        return Column(
+        final p = HwThemeScope.of(ctx);
+        return Container(
+          color: p.paper0,
+          child: Column(
           children: [
             // Drag handle
             Center(
@@ -204,7 +315,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                 width: 40, height: 4,
                 margin: const EdgeInsets.only(top: 8, bottom: 4),
                 decoration: BoxDecoration(
-                  color: Theme.of(context).colorScheme.outlineVariant,
+                  color: p.paper3,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
@@ -219,15 +330,19 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                       if (_isSelecting) ...[
                         Text(
                           '${_selected.length} selezionate',
-                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                          style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: p.ink0),
                         ),
                         const Spacer(),
-                        TextButton(
+                        HwButton(
+                          label: 'Tutte',
                           onPressed: () => _selectAll(visibleIndices),
-                          child: const Text('Tutte'),
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.close_rounded),
+                        const SizedBox(width: 4),
+                        HwButton.icon(
+                          icon: const HwIcon('x', size: 18),
                           tooltip: 'Annulla selezione',
                           onPressed: _clearSelection,
                         ),
@@ -236,24 +351,24 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                           visibleIndices.length == liveState.pageCount
                               ? 'Pagine (${liveState.pageCount})'
                               : 'Pagine (${visibleIndices.length}/${liveState.pageCount})',
-                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+                          style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w600,
+                              color: p.ink0),
                         ),
                         const Spacer(),
                         // Jump to page by number
                         if (liveState.pageCount > 1)
-                          IconButton(
-                            icon: const Icon(Icons.pin_rounded),
+                          HwButton.icon(
+                            icon: const HwIcon('search', size: 18),
                             tooltip: 'Vai alla pagina…',
                             onPressed: () => _promptJumpToPage(ctx, liveState),
                           ),
-                        IconButton(
-                          icon: Icon(
-                            _selectionModeActive
-                                ? Icons.checklist_rtl_rounded
-                                : Icons.checklist_rounded,
-                            color: _selectionModeActive
-                                ? Theme.of(context).colorScheme.primary
-                                : null,
+                        HwButton.icon(
+                          icon: HwIcon(
+                            'check',
+                            size: 18,
+                            color: _selectionModeActive ? p.accent : null,
                           ),
                           tooltip: _selectionModeActive
                               ? 'Esci dalla selezione'
@@ -262,8 +377,8 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                         ),
                         // Paste pages from clipboard if available
                         if (ref.watch(pageClipboardProvider) != null)
-                          IconButton(
-                            icon: const Icon(Icons.content_paste_rounded, color: Colors.orange),
+                          HwButton.icon(
+                            icon: HwIcon('copy', size: 18, color: p.accent),
                             tooltip: 'Incolla pagine',
                             onPressed: () {
                               final clip = ref.read(pageClipboardProvider);
@@ -281,13 +396,14 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                               );
                             },
                           ),
-                        IconButton(
-                          icon: const Icon(Icons.add_rounded, color: Colors.blue),
+                        HwButton.icon(
+                          icon: HwIcon('plus', size: 18, color: p.accent),
                           onPressed: () => ref.read(canvasProvider.notifier).addPage(),
                           tooltip: 'Aggiungi pagina',
                         ),
-                        IconButton(
-                          icon: const Icon(Icons.close_rounded),
+                        HwButton.icon(
+                          icon: const HwIcon('x', size: 18),
+                          tooltip: 'Chiudi',
                           onPressed: () => Navigator.pop(ctx),
                         ),
                       ],
@@ -349,11 +465,11 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                                         child: Text(
                                           chapter.title,
-                                          style: const TextStyle(
+                                          style: TextStyle(
                                             fontSize: 13,
                                             fontWeight: FontWeight.w500,
                                             decoration: TextDecoration.none,
-                                            color: Colors.blue,
+                                            color: p.accent,
                                           ),
                                         ),
                                       ),
@@ -378,7 +494,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                                         child: accepted.isNotEmpty
                                             ? Container(
                                                 decoration: BoxDecoration(
-                                                  border: Border.all(color: Colors.blue, width: 2),
+                                                  border: Border.all(color: p.accent, width: 2),
                                                   borderRadius: BorderRadius.circular(20),
                                                 ),
                                                 child: chip,
@@ -458,14 +574,24 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                       _showChapterPickerForPage(ctx, liveState, docIndex);
                       break;
                     case 'delete':
-                      _confirmDelete(
-                        ctx,
-                        'Eliminare la pagina ${docIndex + 1}?',
-                        'Questa azione non può essere annullata.',
-                      ).then((ok) {
-                        if (!ok) return;
-                        ref.read(canvasProvider.notifier).deletePage(docIndex);
-                      });
+                      // One-click delete with SnackBar undo — was a
+                      // two-tap confirm dialog. deletePage already
+                      // pushes an undo entry, so the Annulla button
+                      // can roll it back without per-call bookkeeping.
+                      ref.read(canvasProvider.notifier).deletePage(docIndex);
+                      HapticFeedback.mediumImpact();
+                      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Pagina ${docIndex + 1} eliminata'),
+                          duration: const Duration(seconds: 5),
+                          action: SnackBarAction(
+                            label: 'Annulla',
+                            onPressed: () =>
+                                ref.read(canvasProvider.notifier).undo(),
+                          ),
+                        ),
+                      );
                       break;
                   }
                 },
@@ -480,6 +606,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                 onCut: () => _cutSelected(liveState),
               ),
           ],
+        ),
         );
       },
     );
@@ -495,31 +622,14 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
       );
       return;
     }
-    const removeChapter = '__remove__';
-    final selectedId = await showModalBottomSheet<String>(
-      context: ctx,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (shCtx) => Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const ListTile(title: Text('Assegna capitolo')),
-          ListTile(
-            leading: const Icon(Icons.clear),
-            title: const Text('Nessuno'),
-            onTap: () => Navigator.of(shCtx).pop(removeChapter),
-          ),
-          ...s.metadata.chapters.map((chapter) => ListTile(
-                leading: const Icon(Icons.folder_open),
-                title: Text(chapter.title),
-                selected: s.document.pages[pageIndex].chapterId == chapter.id,
-                onTap: () => Navigator.of(shCtx).pop(chapter.id),
-              )),
-        ],
-      ),
+    final currentId = s.document.pages[pageIndex].chapterId;
+    final selectedId = await _pickChapter(
+      ctx,
+      s,
+      title: 'Assegna capitolo',
+      selectedChapterId: currentId,
     );
-    if (selectedId == removeChapter) {
+    if (selectedId == _kRemoveChapter) {
       ref.read(canvasProvider.notifier).assignPageToChapter(pageIndex, null);
     } else if (selectedId != null) {
       ref.read(canvasProvider.notifier).assignPageToChapter(pageIndex, selectedId);
@@ -527,27 +637,30 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
   }
 
   Future<void> _showChapterEditMenuLocal(BuildContext ctx, Chapter chapter) async {
-    final action = await showModalBottomSheet<String>(
+    // Replaced a full-screen modal bottom sheet with a contextual popup
+    // anchored to the chip — saves a fullscreen render, opens beside the
+    // finger instead of from the bottom, and the user only needs ONE tap
+    // to pick instead of (open sheet → tap option).
+    final box = ctx.findRenderObject() as RenderBox?;
+    final overlay = Overlay.of(ctx).context.findRenderObject() as RenderBox?;
+    if (box == null || overlay == null) return;
+    final topLeft = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final bottomRight = box.localToGlobal(box.size.bottomRight(Offset.zero), ancestor: overlay);
+    final p = HwThemeScope.of(ctx);
+    final action = await showMenu<String>(
       context: ctx,
-      shape: const RoundedRectangleBorder(
-          borderRadius: BorderRadius.vertical(top: Radius.circular(12))),
-      builder: (shCtx) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.edit_rounded),
-              title: const Text('Rinomina'),
-              onTap: () => Navigator.pop(shCtx, 'rename'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.delete_rounded, color: Colors.red),
-              title: const Text('Elimina', style: TextStyle(color: Colors.red)),
-              onTap: () => Navigator.pop(shCtx, 'delete'),
-            ),
-          ],
-        ),
+      position: RelativeRect.fromRect(
+        Rect.fromPoints(topLeft, bottomRight),
+        Offset.zero & overlay.size,
       ),
+      items: [
+        PopupMenuItem(value: 'rename', child: _hwMenuRow(p, 'pen', 'Rinomina')),
+        PopupMenuItem(
+          value: 'delete',
+          child: _hwMenuRow(p, 'trash', 'Elimina',
+              color: HwTheme.syncConflict),
+        ),
+      ],
     );
     if (!context.mounted) return;
     if (action == 'rename') {
@@ -682,17 +795,12 @@ class SelectionActionBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
     return Container(
       decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surface,
-        border: Border(top: BorderSide(color: Theme.of(context).dividerColor)),
-        boxShadow: [
-          BoxShadow(
-            color: Theme.of(context).colorScheme.shadow.withValues(alpha: 0.06),
-            blurRadius: 8,
-            offset: const Offset(0, -2),
-          ),
-        ],
+        color: p.paper0,
+        border: Border(top: BorderSide(color: p.paper3)),
+        boxShadow: hwShadow1(p.brightness),
       ),
       child: SafeArea(
         top: false,
@@ -706,30 +814,30 @@ class SelectionActionBar extends StatelessWidget {
                   '$count pag.',
                   style: TextStyle(
                     fontSize: 13,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    color: p.ink2,
                     fontWeight: FontWeight.w500,
                   ),
                 ),
               ),
               const Spacer(),
               SelectionActionBarButton(
-                icon: Icons.folder_outlined,
+                icon: 'chapter',
                 label: 'Capitolo',
-                color: Colors.blue,
+                color: p.accent,
                 onTap: onMoveToChapter,
               ),
               const SizedBox(width: 4),
               SelectionActionBarButton(
-                icon: Icons.content_cut_rounded,
+                icon: 'cut',
                 label: 'Taglia',
-                color: Colors.orange,
+                color: p.ink1,
                 onTap: onCut,
               ),
               const SizedBox(width: 4),
               SelectionActionBarButton(
-                icon: Icons.delete_outline_rounded,
+                icon: 'trash',
                 label: 'Elimina',
-                color: Colors.red,
+                color: HwTheme.syncConflict,
                 onTap: onDelete,
               ),
             ],
@@ -745,7 +853,7 @@ class SelectionActionBar extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────
 
 class SelectionActionBarButton extends StatelessWidget {
-  final IconData icon;
+  final String icon;
   final String label;
   final Color color;
   final VoidCallback onTap;
@@ -762,14 +870,14 @@ class SelectionActionBarButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(HwTheme.rSm),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(height: 2),
+            HwIcon(icon, color: color, size: 20),
+            const SizedBox(height: 4),
             Text(label, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w500)),
           ],
         ),
@@ -961,20 +1069,21 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
     PageEntry entry, PageData? page, String? chapterName, bool isDragOver,
     bool isSelecting, bool isSelected,
   ) {
+    final p = HwThemeScope.of(ctx);
     final borderColor = isSelected
-        ? Colors.blue
+        ? p.accent
         : isDragOver
-            ? Colors.blue.shade300
+            ? p.accentSoft
             : isCurrentPage
-                ? Colors.blue
-                : Theme.of(ctx).colorScheme.outlineVariant;
+                ? p.accent
+                : p.paperEdge;
     final borderWidth = isSelected ? 2.5 : isCurrentPage ? 2.5 : isDragOver ? 2.0 : 1.0;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 120),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(10),
-        color: isSelected ? Colors.blue.withValues(alpha: 0.07) : null,
+        borderRadius: BorderRadius.circular(HwTheme.rMd),
+        color: isSelected ? p.accentSoft.withValues(alpha: 0.55) : null,
         border: Border.all(color: borderColor, width: borderWidth),
       ),
       child: Column(
@@ -996,39 +1105,45 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
                         width: 22, height: 22,
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          color: isSelected ? Colors.blue : Theme.of(ctx).colorScheme.surface,
+                          color: isSelected ? p.accent : p.paper0,
                           border: Border.all(
-                            color: isSelected ? Colors.blue : Theme.of(ctx).colorScheme.outlineVariant,
+                            color: isSelected ? p.accent : p.paperEdge,
                             width: 1.5,
                           ),
                           boxShadow: [
                             BoxShadow(
-                              color: Theme.of(ctx).colorScheme.shadow.withValues(alpha: 0.15),
+                              color: Colors.black.withValues(alpha: 0.15),
                               blurRadius: 3,
                             ),
                           ],
                         ),
                         child: isSelected
-                            ? const Icon(Icons.check_rounded, size: 14, color: Colors.white)
+                            ? HwIcon('check', size: 14, color: p.paper0)
                             : null,
                       ),
                     )
                   else
-                    // Normal mode: 3-dot menu button
+                    // Normal mode: 3-dot menu button. "Vai a pagina" omitted
+                    // — a plain tap on the thumbnail already navigates there,
+                    // so listing it in the menu was an extra click for the
+                    // same destination.
                     Positioned(
                       top: 2, right: 2,
                       child: PopupMenuButton<String>(
-                        icon: Icon(Icons.more_vert, size: 18, color: Theme.of(context).colorScheme.onSurfaceVariant),
+                        icon: HwIcon('more', size: 18, color: p.ink2),
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
                         itemBuilder: (_) => [
-                          const PopupMenuItem(value: 'goto', child: ListTile(dense: true, leading: Icon(Icons.open_in_new_rounded, size: 18), title: Text('Vai a pagina', style: TextStyle(fontSize: 13)))),
-                          const PopupMenuItem(value: 'insert_before', child: ListTile(dense: true, leading: Icon(Icons.add_rounded, size: 18), title: Text('Inserisci prima', style: TextStyle(fontSize: 13)))),
-                          const PopupMenuItem(value: 'insert_after', child: ListTile(dense: true, leading: Icon(Icons.add_rounded, size: 18), title: Text('Inserisci dopo', style: TextStyle(fontSize: 13)))),
-                          const PopupMenuItem(value: 'duplicate', child: ListTile(dense: true, leading: Icon(Icons.copy_all_rounded, size: 18), title: Text('Duplica', style: TextStyle(fontSize: 13)))),
-                          const PopupMenuItem(value: 'chapter', child: ListTile(dense: true, leading: Icon(Icons.folder_rounded, size: 18), title: Text('Capitolo...', style: TextStyle(fontSize: 13)))),
+                          PopupMenuItem(value: 'insert_before', child: _pageMenuRow(p, 'plus', 'Inserisci prima')),
+                          PopupMenuItem(value: 'insert_after', child: _pageMenuRow(p, 'plus', 'Inserisci dopo')),
+                          PopupMenuItem(value: 'duplicate', child: _pageMenuRow(p, 'duplicate', 'Duplica')),
+                          PopupMenuItem(value: 'chapter', child: _pageMenuRow(p, 'chapter', 'Capitolo…')),
                           if (widget.liveState.pageCount > 1)
-                            const PopupMenuItem(value: 'delete', child: ListTile(dense: true, leading: Icon(Icons.delete_rounded, size: 18, color: Colors.red), title: Text('Elimina', style: TextStyle(fontSize: 13, color: Colors.red)))),
+                            PopupMenuItem(
+                              value: 'delete',
+                              child: _pageMenuRow(p, 'trash', 'Elimina',
+                                  color: HwTheme.syncConflict),
+                            ),
                         ],
                         onSelected: (action) => widget.onPageAction(index, visIdx, action),
                       ),
@@ -1042,12 +1157,8 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
             chapterName != null ? '${visIdx + 1} • $chapterName' : '${visIdx + 1}',
             style: TextStyle(
               fontSize: 11,
-              fontWeight: isCurrentPage ? FontWeight.bold : FontWeight.normal,
-              color: isSelected
-                  ? Colors.blue
-                  : isCurrentPage
-                      ? Colors.blue
-                      : Theme.of(context).colorScheme.onSurfaceVariant,
+              fontWeight: isCurrentPage ? FontWeight.w700 : FontWeight.w500,
+              color: isSelected || isCurrentPage ? p.accentDeep : p.ink2,
             ),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -1056,6 +1167,9 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
       ),
     );
   }
+
+  Widget _pageMenuRow(HwPalette p, String icon, String label, {Color? color}) =>
+      _hwMenuRow(p, icon, label, color: color);
 
   Widget _buildThumbnail(
     int docIndex, bool isCurrentPage, PageData? page, CanvasState state, {
