@@ -1070,13 +1070,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
     _activePointers++;
 
-    // ── Universal pointer diagnostic — captures EVERY PointerDown of
-    // any kind. Placed at the very top so the multitude of
-    // early-return paths below (stylus defer/continuation, multi-
-    // touch palm rejection, etc.) cannot prevent the log line from
-    // ever being written. Throttled to one entry per 250 ms; the
-    // user sees at least the first event of a barrel-press burst
-    // and we don't drown the file during a long stroke.
+    // ── Universal pointer diagnostic ──
+    // Logs every PointerDown with full disambiguation fields so we
+    // can tell a Gaomon-barrel-pretending-to-be-middle-click from a
+    // physical mouse middle click. `device` is the Flutter pointer
+    // device ID (stable across events from the same physical
+    // device); `embedderId` is set by the platform embedder
+    // (Windows runner) and on WM_POINTER paths reflects the OS
+    // pointer ID — pen and mouse get different ones even when both
+    // arrive as `kind=mouse` to Flutter.
     {
       final nowMs = DateTime.now().millisecondsSinceEpoch;
       if (nowMs - _lastStylusDiagAt > 250) {
@@ -1085,7 +1087,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
           '[Ptr] DOWN kind=${event.kind.name} '
           'buttons=0x${event.buttons.toRadixString(16)} '
           'pressure=${event.pressure.toStringAsFixed(2)} '
-          'tilt=${event.tilt.toStringAsFixed(2)}',
+          'tilt=${event.tilt.toStringAsFixed(2)} '
+          'orient=${event.orientation.toStringAsFixed(2)} '
+          'device=${event.device} '
+          'embedderId=${event.embedderId} '
+          'pointer=${event.pointer}',
         ));
       }
     }
@@ -3045,22 +3051,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
                   onPointerHover: (e) {
-                    // Diagnostic only — captures barrel-button hover
-                    // events (driver reports the button bit even when
-                    // the tip isn't touching). If pressing the barrel
-                    // never fires PointerDown but DOES fire Hover with
-                    // a non-zero buttons mask, the log will reveal it.
-                    if (e.kind == PointerDeviceKind.stylus ||
-                        e.kind == PointerDeviceKind.invertedStylus) {
-                      final nowMs = DateTime.now().millisecondsSinceEpoch;
-                      if (nowMs - _lastHoverDiagAt > 400) {
-                        _lastHoverDiagAt = nowMs;
-                        unawaited(CrashLogger.append(
-                          '[Stylus] HOVER kind=${e.kind.name} '
-                          'buttons=0x${e.buttons.toRadixString(16)} '
-                          'down=${e.down}',
-                        ));
-                      }
+                    // Logs hover for ANY pointer kind — only logs the
+                    // first event in each 400 ms window AND only
+                    // when buttons != 0 so plain mouse-moves don't
+                    // drown the file. A Gaomon barrel pressed while
+                    // the pen hovers will show up here if Windows
+                    // exposes it at all.
+                    if (e.buttons == 0) return;
+                    final nowMs = DateTime.now().millisecondsSinceEpoch;
+                    if (nowMs - _lastHoverDiagAt > 400) {
+                      _lastHoverDiagAt = nowMs;
+                      unawaited(CrashLogger.append(
+                        '[Ptr] HOVER kind=${e.kind.name} '
+                        'buttons=0x${e.buttons.toRadixString(16)} '
+                        'pressure=${e.pressure.toStringAsFixed(2)} '
+                        'device=${e.device} '
+                        'embedderId=${e.embedderId} '
+                        'pointer=${e.pointer}',
+                      ));
                     }
                   },
                   onPointerSignal: (event) {
