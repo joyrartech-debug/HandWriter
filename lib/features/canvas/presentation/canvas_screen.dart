@@ -579,6 +579,45 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       }
     }
 
+    // Arrow / PgUp / PgDn / Home / End — page navigation. Gated by a
+    // few conditions so we don't hijack typing in inline text editors
+    // or scroll-arrow gestures inside sheets.
+    if (!ctrl) {
+      final notifier = ref.read(canvasProvider.notifier);
+      final s = ref.read(canvasProvider);
+      // Don't steal arrows during text edit, lasso transform, pending
+      // paste/symbol placement, or while a stroke is being drawn — those
+      // workflows have their own arrow semantics.
+      final guardActive = s == null ||
+          s.pendingSymbol != null ||
+          s.pendingPaste ||
+          s.activeStroke.isNotEmpty;
+      if (!guardActive) {
+        final isLeft = event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.pageUp;
+        final isRight = event.logicalKey == LogicalKeyboardKey.arrowRight ||
+            event.logicalKey == LogicalKeyboardKey.pageDown;
+        if (isLeft) {
+          notifier.prevPage();
+          return KeyEventResult.handled;
+        }
+        if (isRight) {
+          notifier.nextPage();
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.home) {
+          final filtered = s.filteredPageIndices;
+          if (filtered.isNotEmpty) notifier.goToPage(filtered.first);
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.end) {
+          final filtered = s.filteredPageIndices;
+          if (filtered.isNotEmpty) notifier.goToPage(filtered.last);
+          return KeyEventResult.handled;
+        }
+      }
+    }
+
     // Delete / Backspace
     if (event.logicalKey == LogicalKeyboardKey.delete || event.logicalKey == LogicalKeyboardKey.backspace) {
       final state = ref.read(canvasProvider);

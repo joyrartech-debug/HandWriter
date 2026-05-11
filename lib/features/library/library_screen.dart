@@ -1862,6 +1862,57 @@ class _LibraryScreenState extends ConsumerState<LibraryScreen> {
       ),
       body: Column(
         children: [
+          // Sync-in-progress banner. Shown when the library is being
+          // refreshed from the server AND the local list isn't empty
+          // (the empty-list path already shows its own dedicated
+          // progress UI down inside the body). On a cold start with a
+          // pre-populated DB the existing notebooks render instantly
+          // and this banner makes the background fetch visible so the
+          // user knows new entries may appear.
+          ValueListenableBuilder<bool>(
+            valueListenable: ref.read(notebookListProvider.notifier).isSyncing,
+            builder: (_, syncing, __) {
+              final list = ref.read(notebookListProvider).valueOrNull ?? const [];
+              if (!syncing || list.isEmpty) return const SizedBox.shrink();
+              return Material(
+                color: Theme.of(context).colorScheme.primaryContainer,
+                child: SafeArea(
+                  bottom: false,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                    child: ValueListenableBuilder<({int done, int total})>(
+                      valueListenable: ref.read(notebookListProvider.notifier).syncProgress,
+                      builder: (_, progress, __) {
+                        final label = progress.total == 0
+                            ? 'Sincronizzazione con il server in corso…'
+                            : 'Scaricamento ${progress.done}/${progress.total} notebook…';
+                        final color = Theme.of(context).colorScheme.onPrimaryContainer;
+                        return Row(
+                          children: [
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                value: progress.total == 0
+                                    ? null
+                                    : progress.done / progress.total,
+                                color: color,
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(label, style: TextStyle(fontSize: 13, color: color)),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              );
+            },
+          ),
           if (crossClip != null)
             Material(
               color: Colors.blue.shade700,
