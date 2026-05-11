@@ -680,13 +680,20 @@ class _AdvancedSection extends ConsumerWidget {
       await prefs.remove('pending_asset_deletes_$notebookId');
 
       // Refresh the library card to reflect the new pageCount immediately.
-      await ref.read(notebookListProvider.notifier).refresh();
+      // Skip if the settings page was disposed while the long-running download
+      // was in flight — touching `ref` after disposal throws
+      // "Bad state: Cannot use 'ref' after the widget was disposed."
+      if (context.mounted) {
+        await ref.read(notebookListProvider.notifier).refresh();
+      }
 
+      if (!context.mounted) return;
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(
           content: Text(
               '"$title" ricaricato — ${result.metadata.pageCount} pagine.')));
     } catch (e) {
+      if (!context.mounted) return;
       messenger.hideCurrentSnackBar();
       messenger.showSnackBar(SnackBar(
           content: Text('Ricarica fallita: $e'),

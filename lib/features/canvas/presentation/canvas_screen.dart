@@ -6,7 +6,6 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:printing/printing.dart';
-import 'package:image/image.dart' as image_lib;
 import 'package:pdf/pdf.dart' as pw_pdf;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:flutter/foundation.dart';
@@ -2143,17 +2142,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         final png = await raster.toPng();
         if (!mounted) return;
 
-        // Re-encode the PDF raster as a PNG-8 (256-color palette)
-        // flattened on white. Previous JPEG re-encoding dropped the
-        // alpha channel and rendered transparent pixels as black,
-        // which made any black-pen ink the user drew on those zones
-        // invisible (line art over an inked page). PNG-8 keeps the
-        // page paper white, line-art compresses tighter than JPEG
-        // (typical: ~60-80 KB vs the prior ~80-200 KB for JPEG q=85)
-        // and the file format is universally decodable on iOS/Android/
-        // Linux/macOS. Same .png filename — Flutter still decodes by
-        // magic bytes, so older builds load these unchanged.
-        final assetBytes = await compute(_reencodePngFlattenWhite, png);
+        // Keep the PDF raster as the native PNG-with-alpha produced by
+        // Printing.raster. Earlier we tried re-encoding to JPEG q=85
+        // (made transparent zones render black, hiding any ink the
+        // user drew over them) and to PNG-8 256-color flatten-white
+        // (occasional palette banding / color glitches in PDFs with
+        // photographic content). Both saved space but corrupted user
+        // pages. Lossless PNG with alpha is the safe path — bigger on
+        // wire but no surprises.
+        final assetBytes = png;
         if (!mounted) return;
 
         if (processed > 0) notifier.addPage();
@@ -5856,39 +5853,3 @@ Future<Uint8List> _buildPdfOnIsolate(List<_PdfPagePayload> payloads) async {
   return Uint8List.fromList(await doc.save());
 }
 
-/// Top-level so it can run via [compute()] inside a worker isolate.
-/// Decodes the PDF-raster PNG, composites it onto a solid white
-/// background (so transparent zones become page paper instead of
-/// black), and re-encodes as PNG-8 with a 256-color palette. Returns
-/// the new bytes; if decoding fails for any reason, returns the input
-/// unchanged — losing the size win beats losing the page.
-Uint8List _reencodePngFlattenWhite(Uint8List pngBytes) {
-  try {
-    final decoded = image_lib.decodePng(pngBytes);
-    if (decoded == null) return pngBytes;
-    // Composite onto white. image_lib renders alpha-0 pixels as
-    // black by default when an alpha channel is dropped — overlaying
-    // onto a white canvas first makes the transparent regions render
-    // as page paper, preserving visibility of any black ink the user
-    // draws over them.
-    final canvas = image_lib.Image(
-      width: decoded.width,
-      height: decoded.height,
-      numChannels: 3,
-      backgroundColor: image_lib.ColorRgb8(255, 255, 255),
-    );
-    image_lib.compositeImage(canvas, decoded);
-    // Median-cut quantize to 256 colors. Line-art / text PDFs
-    // compress better as palette PNG than as JPEG, and zero-loss
-    // for the typical 5-10 colors actually present on a page.
-    final quantized = image_lib.quantize(
-      canvas,
-      numberOfColors: 256,
-      method: image_lib.QuantizeMethod.octree,
-    );
-    final out = image_lib.encodePng(quantized, level: 9);
-    return Uint8List.fromList(out);
-  } catch (_) {
-    return pngBytes;
-  }
-}
