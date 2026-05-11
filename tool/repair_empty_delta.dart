@@ -266,8 +266,12 @@ Future<bool> _rebuildDocumentFromPages(Directory notebookDeltaDir) async {
       final fileName = entity.path.split(Platform.pathSeparator).last;
       final chapterId = pageIdToChapter[pageId];
 
+      // Field name MUST be `pageId` (matches PageEntry.pageId in
+      // ncnote_format.dart). Writing `id` instead made the app's
+      // DocumentStructure.fromJson cast null→String and abort the
+      // entire pull.
       entries.add(<String, dynamic>{
-        'id': pageId,
+        'pageId': pageId,
         'pageNumber': pageNumber,
         'fileName': fileName,
         'width': width,
