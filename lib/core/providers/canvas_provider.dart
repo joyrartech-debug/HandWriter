@@ -7288,10 +7288,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           'after $maxAttempts attempts: $lastError');
     }
 
-    // Fire all pulls; the outer IOClient pool caps actual concurrency at
-    // `_maxConnectionsPerHost` (16), so this queues the rest rather than
-    // overwhelming the server.
-    await Future.wait(pagesToPull.map(pullOne));
+    // Pull pages with explicit concurrency cap (NOT via the IOClient pool).
+    // The pool's queueing piles every in-flight GET onto the same N
+    // sockets — when those go stale together (typical Tailscale signature:
+    // middlebox closes idle keep-alive after ~30 s), dozens of queued
+    // requests all surface "Connection closed" before the circuit
+    // breaker rebuilds the client. With an explicit worker pool we only
+    // ever have [batchSize] requests in flight: a stale-pool burst trips
+    // ONE rebuild, the next batchSize requests use the fresh pool, and
+    // the cascade stops at batchSize instead of pagesToPull.length.
+    const batchSize = 4;
+    final queue = List<String>.from(pagesToPull);
+    Future<void> worker() async {
+      while (queue.isNotEmpty) {
+        if (_disposed || state?.metadata.id != s.metadata.id) return;
+        final fn = queue.removeLast();
+        await pullOne(fn);
+      }
+    }
+    final workers = List.generate(
+        batchSize < queue.length ? batchSize : queue.length,
+        (_) => worker());
+    await Future.wait(workers);
     // ── Defensive meta-fetch: never let document.json / metadata.json
     //    failure abort the whole pull cycle.
     //
