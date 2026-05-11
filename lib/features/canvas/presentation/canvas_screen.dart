@@ -1070,6 +1070,26 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
     _activePointers++;
 
+    // ── Universal pointer diagnostic — captures EVERY PointerDown of
+    // any kind. Placed at the very top so the multitude of
+    // early-return paths below (stylus defer/continuation, multi-
+    // touch palm rejection, etc.) cannot prevent the log line from
+    // ever being written. Throttled to one entry per 250 ms; the
+    // user sees at least the first event of a barrel-press burst
+    // and we don't drown the file during a long stroke.
+    {
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      if (nowMs - _lastStylusDiagAt > 250) {
+        _lastStylusDiagAt = nowMs;
+        unawaited(CrashLogger.append(
+          '[Ptr] DOWN kind=${event.kind.name} '
+          'buttons=0x${event.buttons.toRadixString(16)} '
+          'pressure=${event.pressure.toStringAsFixed(2)} '
+          'tilt=${event.tilt.toStringAsFixed(2)}',
+        ));
+      }
+    }
+
     // Track stylus presence so we can suppress palm-triggered long-press
     if (event.kind == PointerDeviceKind.stylus || event.kind == PointerDeviceKind.invertedStylus) {
       // Debug: log every stylus-down with the gap from the previous stroke
@@ -1160,29 +1180,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     }
 
     final tool = state.currentTool;
-
-    // ── Stylus diagnostic — captures driver-reported pointer kind +
-    // buttons on EVERY stylus / inverted-stylus PointerDown so we
-    // can see what the user's tablet driver actually sends. The
-    // previous gate `buttons != kPrimaryButton` excluded plain tip
-    // contact — useful in steady-state, but if barrel presses never
-    // log it's impossible to tell whether the events reach Flutter
-    // at all or are masked to plain contact. Throttled to once per
-    // 300 ms so a long stroke doesn't spam.
-    if (event.kind == PointerDeviceKind.stylus ||
-        event.kind == PointerDeviceKind.invertedStylus) {
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      if (nowMs - _lastStylusDiagAt > 300) {
-        _lastStylusDiagAt = nowMs;
-        unawaited(CrashLogger.append(
-          '[Stylus] DOWN kind=${event.kind.name} '
-          'buttons=0x${event.buttons.toRadixString(16)} '
-          'pressure=${event.pressure.toStringAsFixed(2)} '
-          'orientation=${event.orientation.toStringAsFixed(2)} '
-          'tilt=${event.tilt.toStringAsFixed(2)}',
-        ));
-      }
-    }
 
     // Middle mouse button → always pan
     if (event.kind == PointerDeviceKind.mouse && event.buttons == kMiddleMouseButton) {
