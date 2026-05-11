@@ -6528,6 +6528,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// full PROPFIND.
   int _pagePropfindCounter = 0;
   static const int _propfindSafetyNetEvery = 8;
+  /// Timestamp anchor for the safety-net so deep-idle (5 min ticks) can't
+  /// stretch it to 8 * 5 min = 40 min. With this, after
+  /// [_propfindSafetyNetMaxAge] of wall-clock time without a full PROPFIND
+  /// we force one regardless of tick count. Set when [_pagePropfindCounter]
+  /// is reset.
+  DateTime _lastFullPropfindAt = DateTime.fromMillisecondsSinceEpoch(0);
+  static const Duration _propfindSafetyNetMaxAge = Duration(minutes: 5);
 
   Duration _pullIntervalForIdle() {
     if (_idlePullCount < _idlePullThreshold) {
@@ -6630,8 +6637,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       String? fastMetaEtag;
       var fullStateFetched = false;
       ({String? metaEtag, Map<String, String> pageEtags})? remoteState;
+      // Safety-net: by tick count OR by wall-clock age (whichever fires
+      // first). Pre-fix, deep-idle stretched the cap to 5 min per tick,
+      // and the tick-only safety-net `>= 8` could push a full PROPFIND
+      // out to ~40 min. The wall-clock anchor caps the worst case at
+      // [_propfindSafetyNetMaxAge].
+      final now = DateTime.now();
       final mustDoSafetyNet =
-          ++_pagePropfindCounter >= _propfindSafetyNetEvery;
+          ++_pagePropfindCounter >= _propfindSafetyNetEvery ||
+          now.difference(_lastFullPropfindAt) >= _propfindSafetyNetMaxAge;
       try {
         fastMetaEtag =
             await syncService.getDeltaMetaEtag(pullNotebookId);
@@ -6647,6 +6661,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         fastMetaEtag = remoteState.metaEtag;
         fullStateFetched = true;
         _pagePropfindCounter = 0;
+        _lastFullPropfindAt = now;
       }
       if (state == null || state!.metadata.id != pullNotebookId) {
         print('[Canvas] Pull aborted — notebook switched during HEAD '
