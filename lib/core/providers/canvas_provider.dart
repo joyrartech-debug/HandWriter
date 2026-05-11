@@ -3499,19 +3499,26 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       state = s.copyWith(clearActiveChapter: true);
       return;
     }
-    // Jump to first page of the chapter. If the chapter has no real pages
-    // (orphaned reference in metadata.chapters[].pageIds whose pageId no
-    // longer exists in any page_*.json), don't apply the filter — it would
-    // leave the user on "— / 0" with all other pages hidden. Fall back to
-    // the all-pages view so the chapter rail click still feels responsive.
-    final firstIdx = s.document.pages.indexWhere((p) => p.chapterId == chapterId);
-    if (firstIdx < 0) {
+    // True orphan only: chapterId not present in metadata.chapters at all
+    // (legacy pageId leak from a pre-cleanup migration). Selecting a ghost
+    // chip would leave a phantom selection. Fall back to all-pages.
+    //
+    // An EMPTY chapter (exists in metadata, 0 pages) is a legitimate user
+    // state — reachable by deleting all pages of a chapter via the page
+    // manager's multi-select. Previously this branch also caught that case
+    // and silently deselected the chip; the user couldn't enter their own
+    // empty chapter to add fresh pages to it.
+    final chapterExists = s.metadata.chapters.any((c) => c.id == chapterId);
+    if (!chapterExists) {
       state = s.copyWith(clearActiveChapter: true, clearLasso: true, lassoPath: []);
       return;
     }
+    final firstIdx = s.document.pages.indexWhere((p) => p.chapterId == chapterId);
     state = s.copyWith(
       activeChapterId: chapterId,
-      currentPageIndex: firstIdx,
+      // If the chapter has no pages, leave currentPageIndex alone — the page
+      // strip will show "0/0" and the user can add pages from the menu.
+      currentPageIndex: firstIdx >= 0 ? firstIdx : s.currentPageIndex,
       clearLasso: true,
       lassoPath: [],
     );

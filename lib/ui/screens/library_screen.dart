@@ -60,6 +60,7 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
     final entries = asyncList.valueOrNull ?? const <NotebookEntry>[];
     final filtered = _filterAndSort(entries, settings, _query);
 
+    final notebookNotifier = ref.read(notebookListProvider.notifier);
     return Scaffold(
       backgroundColor: p.paper1,
       body: SafeArea(
@@ -75,6 +76,16 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
               onImportTap: _importNcnote,
               sortLabel: settings.sortMode.label,
             ),
+            // Sync-in-progress banner — visible during any background
+            // refresh, including the cold-start fetch on a fresh device
+            // (where `entries` is empty and the body just shows the
+            // "Nuovo taccuino" tile). Without this, a new-device user
+            // saw the empty body and had no clue notebooks were
+            // streaming in. The earlier banner-fix landed on the legacy
+            // LibraryScreen (lib/features/library/library_screen.dart)
+            // which main.dart no longer renders — this is the
+            // production screen.
+            _SyncBanner(notifier: notebookNotifier),
             Expanded(
               child: asyncList.when(
                 data: (_) => _Body(
@@ -85,7 +96,7 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
                   onCreate: _createNotebook,
                   onLongPress: _showNotebookMenu,
                 ),
-                loading: () => const Center(child: CircularProgressIndicator()),
+                loading: () => _LoadingState(notifier: notebookNotifier),
                 error: (e, _) => Center(
                     child: Text('Errore: $e',
                         style: TextStyle(color: p.ink2))),
@@ -1099,6 +1110,115 @@ class _FooterBar extends StatelessWidget {
               style: TextStyle(fontSize: 13, color: p.ink2)),
         ],
       ),
+    );
+  }
+}
+
+/// Slim progress banner shown while a background sync with the server is
+/// running. Returns [SizedBox.shrink] when idle so it costs no layout space.
+class _SyncBanner extends StatelessWidget {
+  final NotebookListNotifier notifier;
+  const _SyncBanner({required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    return ValueListenableBuilder<bool>(
+      valueListenable: notifier.isSyncing,
+      builder: (_, syncing, __) {
+        if (!syncing) return const SizedBox.shrink();
+        return Material(
+          color: p.paper2,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 10),
+            child: ValueListenableBuilder<({int done, int total})>(
+              valueListenable: notifier.syncProgress,
+              builder: (_, progress, __) {
+                final label = progress.total == 0
+                    ? 'Sincronizzazione con il server…'
+                    : 'Scaricamento ${progress.done}/${progress.total} taccuini…';
+                return Row(
+                  children: [
+                    SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        value: progress.total == 0
+                            ? null
+                            : progress.done / progress.total,
+                        color: p.ink0,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: TextStyle(fontSize: 13, color: p.ink1),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// Loading view shown while [notebookListProvider] is still in
+/// `AsyncValue.loading` (i.e. before the very first `_loadFromLocalDb`
+/// returns). On a fresh install this is the brief window between app boot
+/// and the DB-read completing; afterwards the body itself takes over with
+/// the [_SyncBanner] above. If sync is already in flight (rare but possible
+/// on fast SSDs where DB read races sync kickoff), show progress text so
+/// the user sees the work happening immediately.
+class _LoadingState extends StatelessWidget {
+  final NotebookListNotifier notifier;
+  const _LoadingState({required this.notifier});
+
+  @override
+  Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    return ValueListenableBuilder<bool>(
+      valueListenable: notifier.isSyncing,
+      builder: (_, syncing, __) {
+        return Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ValueListenableBuilder<({int done, int total})>(
+                valueListenable: notifier.syncProgress,
+                builder: (_, progress, __) {
+                  return SizedBox(
+                    width: 40,
+                    height: 40,
+                    child: CircularProgressIndicator(
+                      value: progress.total == 0
+                          ? null
+                          : progress.done / progress.total,
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 16),
+              ValueListenableBuilder<({int done, int total})>(
+                valueListenable: notifier.syncProgress,
+                builder: (_, progress, __) {
+                  final label = !syncing
+                      ? 'Caricamento taccuini…'
+                      : progress.total == 0
+                          ? 'Caricamento taccuini dal server…'
+                          : 'Scaricamento ${progress.done}/${progress.total} taccuini…';
+                  return Text(label, style: TextStyle(color: p.ink2));
+                },
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }
