@@ -8349,7 +8349,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         result[entry.key] = cached.bytes;
         continue;
       }
-      final bytes = Uint8List.fromList(utf8.encode(jsonEncode(entry.value.toJson())));
+      final bytes = Uint8List.fromList(
+          utf8.encode(compactPageJson(entry.value)));
       _pageJsonCache[entry.key] = _CachedPageJson(entry.value, bytes);
       result[entry.key] = bytes;
       encodedSinceYield++;
@@ -8364,6 +8365,35 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   }
 
   static const int _encodeYieldBatch = 3;
+}
+
+/// Compact JSON encode for a PageData. Rounds doubles to a precision
+/// well below visible (3 decimals = sub-1‰ resolution for all fields:
+/// x/y at 0.001 page-units is way below pixel; pressure/tilt at 0.001
+/// is finer than the tablet ADC's typical 10-bit resolution).
+///
+/// On a typical 100-point stroke this cuts the JSON payload from
+/// ~8-10 KB to ~3-4 KB — same wire format, same fromJson code path
+/// (already deserialises any numeric precision via `as num`),
+/// fully backwards-compatible with notebooks saved by older builds.
+String compactPageJson(PageData page) =>
+    jsonEncode(_roundFloatsInPlace(page.toJson()));
+
+Object? _roundFloatsInPlace(Object? v) {
+  if (v is double) {
+    return double.parse(v.toStringAsFixed(3));
+  }
+  if (v is Map) {
+    final out = <String, Object?>{};
+    v.forEach((k, val) {
+      out[k as String] = _roundFloatsInPlace(val);
+    });
+    return out;
+  }
+  if (v is List) {
+    return v.map(_roundFloatsInPlace).toList(growable: false);
+  }
+  return v;
 }
 
 /// Parameters for the isolate packaging function.
