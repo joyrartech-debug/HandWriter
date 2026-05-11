@@ -44,13 +44,24 @@ class WebDavService {
   /// latency-bound) without overwhelming a typical Nextcloud server.
   /// Raising further hits diminishing returns (server-side worker pool
   /// + TCP slow-start dominate).
-  static const int _maxConnectionsPerHost = 16;
+  /// Cap on simultaneously-open TCP connections per host. Was 16 — fine
+  /// on a clean LAN, but on Tailscale a 16-wide fan-out tends to make
+  /// the relay drop connections silently, and then ALL 16 slots are
+  /// stale at once when the app does a parallel pull. 6 keeps enough
+  /// parallelism for the per-page batch without overwhelming the relay.
+  static const int _maxConnectionsPerHost = 6;
 
   /// How long an idle connection is held open before the client drops it.
   /// Longer keep-alive means fewer TCP+TLS handshakes during the 4-second
   /// polling loop; too long and mobile OSes start complaining about
   /// battery.
-  static const Duration _idleTimeout = Duration(seconds: 45);
+  /// How long to keep an idle TCP connection in the pool. Was 45 s —
+  /// longer than the ~30 s NAT/keep-alive that Tailscale middleboxes
+  /// often enforce, so the next request on a 30-45 s idle connection
+  /// failed with "Connection closed before full header was received".
+  /// 20 s is shorter than any common middlebox timeout while still
+  /// amortising the TLS handshake across back-to-back requests.
+  static const Duration _idleTimeout = Duration(seconds: 20);
 
   final String serverUrl;
   final String username;
@@ -70,11 +81,21 @@ class WebDavService {
   /// network itself is healthy (verified by Safari), and only a fresh
   /// session fixes it. Resets on every successful request.
   int _consecutiveFailures = 0;
+  /// Stale-pool failures (Connection closed / reset) trip the rebuild
+  /// after a single occurrence — these are a near-perfect signal that
+  /// the kept-alive connection was dropped server-side and reusing it
+  /// will fail again. Other errors (timeout, 5xx) still need the usual
+  /// 3-strike confirmation.
   static const int _zombieClientThreshold = 3;
+  static const int _staleConnectionThreshold = 1;
   DateTime _lastClientBuildAt = DateTime.now();
-  /// Minimum time between rebuilds so a legitimate server outage doesn't
-  /// spin us into a tight reconnect loop.
-  static const Duration _clientRebuildCooldown = Duration(seconds: 20);
+  /// Minimum time between rebuilds. Old value was 20 s, which let the
+  /// in-flight batch (8+ parallel page GETs) burn 30-60 failures on
+  /// stale pool connections before the next rebuild was allowed. 3 s
+  /// is enough to avoid a tight reconnect loop on a real server outage,
+  /// but short enough that a fresh stale-pool detection rebuilds
+  /// immediately instead of accumulating cascading failures.
+  static const Duration _clientRebuildCooldown = Duration(seconds: 3);
 
   WebDavService({
     required this.serverUrl,
@@ -141,12 +162,28 @@ class WebDavService {
 
   void _recordFailure(String op, Object error) {
     _consecutiveFailures++;
+    // "Connection closed" / "Connection reset" / "broken pipe" are
+    // almost always pool-stale: the kept-alive socket was dropped
+    // server-side (middlebox NAT timeout, Tailscale relay churn) and
+    // every subsequent attempt on the same pool will fail the same
+    // way until we tear it down. Trip rebuild after a single one of
+    // these instead of waiting for the 3-strike confirmation; that
+    // was what let 30-60 cascading failures accumulate during a
+    // parallel page batch.
+    final errStr = error.toString().toLowerCase();
+    final isStaleConnection = errStr.contains('connection closed') ||
+        errStr.contains('connection reset') ||
+        errStr.contains('broken pipe') ||
+        errStr.contains('connection terminated');
+    final threshold =
+        isStaleConnection ? _staleConnectionThreshold : _zombieClientThreshold;
     final sinceBuild = DateTime.now().difference(_lastClientBuildAt);
-    if (_consecutiveFailures >= _zombieClientThreshold &&
+    if (_consecutiveFailures >= threshold &&
         sinceBuild > _clientRebuildCooldown) {
       // ignore: avoid_print
       print('[WebDAV] Rebuilding HttpClient after $_consecutiveFailures '
-          'consecutive failures on $op: $error');
+          'consecutive failures on $op '
+          '(${isStaleConnection ? "stale-pool" : "generic"}): $error');
       _buildClient();
       // fire-and-forget pre-warm on the fresh client
       // ignore: discarded_futures
