@@ -125,10 +125,12 @@ The `--clean` pass does, in order:
 1. Removes `_conflict_*.ncnote` files from the root older than 14 days
    (Nextcloud-style conflict copies the app accumulated but never
    cleaned).
-2. Removes `page_*.json` files on disk that aren't in `document.json`
-   AND are smaller than 1 KB (PDF-rendering placeholders with no user
-   strokes). **Larger orphan files are reported but never deleted** —
-   they might contain user work and need manual inspection.
+2. **Reports** `page_*.json` files on disk that aren't in `document.json`
+   but **never auto-deletes them**. A page < 1 KB in HandWriter is NOT
+   "empty" — it's the JSON skeleton of a PDF-imported page that points
+   at one asset PNG. Deleting it discards the user's PDF content. Manual
+   reattachment to `document.json` (with the right `chapterId` derived
+   from the referenced asset's PDF filename) is the safe repair.
 3. Removes asset files not referenced by any active page.
 4. Drops duplicate-pageId entries from `document.json` (e.g.
    `page_068.json` and `page_072.json` sharing pageId X), keeping the

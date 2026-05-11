@@ -21,9 +21,12 @@
 //
 // What --clean actually does (in order):
 //   1. Removes _conflict_*.ncnote files older than 14 days from the root
-//   2. Removes page_*.json files on disk that aren't in document.json AND
-//      are < 1 KB (i.e. PDF-rendering placeholders with no user strokes).
-//      Larger orphan files are reported but never removed.
+//   2. REPORTS (does NOT delete) page_*.json files on disk that aren't
+//      in document.json. Small (< 1 KB) files used to be deleted here
+//      but they're often PDF-imported placeholders whose content lives
+//      in the referenced asset, not in the page JSON. Manual repair
+//      (re-attach to document.json with the right chapterId) is the
+//      safe path — see the 2026-05-11 incident in memory.
 //   3. Removes asset files not referenced by any active page.
 //   4. Removes duplicate-pageId entries from document.json: when two
 //      page files share the same pageId AND have identical content
@@ -361,19 +364,25 @@ Future<void> _applyCleanup(_NotebookReport r) async {
     print('  [$shortId…] ✗ 0-byte: $name');
   }
 
-  // 2. Remove orphan SMALL pages (< 1 KB, no user strokes)
+  // 2. Orphan pages: NEVER auto-delete. A page_*.json file < 1 KB is
+  //    NOT empty — it's the JSON skeleton of a PDF-imported page that
+  //    carries one ImageElement pointing at an asset. The content lives
+  //    in the referenced PNG, not in the page JSON. The 2026-05-11
+  //    incident deleted 186 such "orphan small" pages and made four
+  //    Automotive chapters (Intro / Safety / CAN bus / Radar) appear
+  //    completely empty in the app. Always report, never delete. The
+  //    correct repair is to re-attach the entries to document.json with
+  //    the right chapterId derived from the referenced asset's PDF name.
   final pagesDir = Directory('${r.dir.path}/pages');
-  for (final fn in r.orphanPagesSmall) {
-    await File('${pagesDir.path}/$fn').delete();
-  }
-  if (r.orphanPagesSmall.isNotEmpty) {
-    print('  [$shortId…] ✗ ${r.orphanPagesSmall.length} orphan small pages');
-  }
-  if (r.orphanPagesLarge.isNotEmpty) {
-    print('  [$shortId…] ⚠ ${r.orphanPagesLarge.length} orphan LARGE pages kept '
-        '(would lose data — inspect manually):');
-    for (final p in r.orphanPagesLarge.take(5)) {
+  final allOrphan = [...r.orphanPagesSmall, ...r.orphanPagesLarge];
+  if (allOrphan.isNotEmpty) {
+    print('  [$shortId…] ⚠ ${allOrphan.length} orphan page files NOT deleted '
+        '(may be valid PDF imports — inspect manually):');
+    for (final p in allOrphan.take(5)) {
       print('      $p');
+    }
+    if (allOrphan.length > 5) {
+      print('      … +${allOrphan.length - 5}');
     }
   }
 
