@@ -2,43 +2,12 @@
 
 #include <commctrl.h>
 
-#include <cstdio>
-#include <cstdlib>
 #include <optional>
 #include <string>
 
 #include "flutter/generated_plugin_registrant.h"
 
 #pragma comment(lib, "comctl32.lib")
-
-namespace {
-// Quick native-side log so we can diagnose whether the Win32 runner
-// receives WM_POINTER* messages for a Gaomon driverless pen. Resolves
-// %USERPROFILE%\Documents via the environment instead of pulling in
-// shlobj — avoids a startup-time COM dependency that may not be
-// initialised yet in some Flutter runner builds.
-void NativeLog(const char* fmt, ...) {
-  static FILE* f = nullptr;
-  static bool tried = false;
-  if (!tried) {
-    tried = true;
-    wchar_t profile[MAX_PATH] = {};
-    DWORD n = GetEnvironmentVariableW(L"USERPROFILE", profile, MAX_PATH);
-    if (n > 0 && n < MAX_PATH) {
-      wchar_t path[MAX_PATH] = {};
-      swprintf_s(path, MAX_PATH, L"%s\\Documents\\handwriter_native.log",
-                 profile);
-      _wfopen_s(&f, path, L"a");
-    }
-  }
-  if (!f) return;
-  va_list args;
-  va_start(args, fmt);
-  vfprintf(f, fmt, args);
-  va_end(args);
-  fflush(f);
-}
-}  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -56,7 +25,6 @@ bool FlutterWindow::OnCreate() {
   // Flutter then loses every click and the window appears frozen.
   // Pen events still arrive via WM_POINTER on Win10+ without the
   // opt-in (pens are pointer-aware by default on the OS side).
-  NativeLog("[Init] OnCreate\n");
 
   RECT frame = GetClientArea();
 
@@ -90,9 +58,6 @@ bool FlutterWindow::OnCreate() {
     SetWindowSubclass(child_hwnd_, &FlutterWindow::ChildSubclassProc,
                       /*subclass_id=*/1,
                       reinterpret_cast<DWORD_PTR>(this));
-    NativeLog("[Init] Subclassed child hwnd=%p\n", (void*)child_hwnd_);
-  } else {
-    NativeLog("[Init] WARN: no child hwnd to subclass\n");
   }
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -128,25 +93,10 @@ LRESULT CALLBACK FlutterWindow::ChildSubclassProc(HWND hwnd, UINT msg,
   auto* self = reinterpret_cast<FlutterWindow*>(ref_data);
   if (self) {
     switch (msg) {
-      case WM_POINTERENTER:
-      case WM_POINTERLEAVE:
       case WM_POINTERDOWN:
       case WM_POINTERUPDATE:
       case WM_POINTERUP:
-      case WM_NCPOINTERDOWN:
-      case WM_NCPOINTERUPDATE:
-      case WM_NCPOINTERUP:
-        NativeLog("[Child] pointer=0x%04x wparam=0x%llx\n",
-                  msg, (unsigned long long)wparam);
         self->HandlePenPointerMessage(msg, wparam);
-        break;
-      case WM_MBUTTONDOWN:
-      case WM_MBUTTONUP:
-      case WM_RBUTTONDOWN:
-      case WM_RBUTTONUP:
-      case WM_TOUCH:
-        NativeLog("[Child] legacy=0x%04x wparam=0x%llx\n",
-                  msg, (unsigned long long)wparam);
         break;
       default:
         break;
@@ -159,35 +109,6 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
-  // Pen barrel side-channel. Process BEFORE handing to Flutter so we
-  // can still inspect the OS pointer info even if Flutter consumes
-  // the message — `GetPointerPenInfo` reads from the OS pointer
-  // table, not from the WPARAM payload, so it's safe to call here
-  // regardless of who handles the message afterwards.
-  switch (message) {
-    case WM_POINTERENTER:
-    case WM_POINTERLEAVE:
-    case WM_POINTERDOWN:
-    case WM_POINTERUPDATE:
-    case WM_POINTERUP:
-    case WM_NCPOINTERDOWN:
-    case WM_NCPOINTERUPDATE:
-    case WM_NCPOINTERUP:
-      NativeLog("[Msg] pointer=0x%04x wparam=0x%llx\n",
-                message, (unsigned long long)wparam);
-      HandlePenPointerMessage(message, wparam);
-      break;
-    case WM_MBUTTONDOWN:
-    case WM_MBUTTONUP:
-    case WM_RBUTTONDOWN:
-    case WM_RBUTTONUP:
-    case WM_TOUCH:
-      NativeLog("[Msg] legacy=0x%04x wparam=0x%llx\n",
-                message, (unsigned long long)wparam);
-      break;
-    default:
-      break;
-  }
 
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
@@ -213,22 +134,11 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
 
   const UINT32 pointer_id = GET_POINTERID_WPARAM(wparam);
   POINTER_INPUT_TYPE pointer_type = PT_POINTER;
-  const BOOL got_type = GetPointerType(pointer_id, &pointer_type);
-  NativeLog(
-      "[Pen] msg=0x%04x pid=%u gotType=%d type=%d\n",
-      message, pointer_id, got_type, (int)pointer_type);
-  if (!got_type) return;
+  if (!GetPointerType(pointer_id, &pointer_type)) return;
   if (pointer_type != PT_PEN) return;
 
   POINTER_PEN_INFO pen_info{};
-  if (!GetPointerPenInfo(pointer_id, &pen_info)) {
-    NativeLog("[Pen] GetPointerPenInfo failed pid=%u\n", pointer_id);
-    return;
-  }
-  NativeLog(
-      "[Pen] penFlags=0x%08x pressure=%u rotation=%u tiltX=%d tiltY=%d\n",
-      pen_info.penFlags, pen_info.pressure, pen_info.rotation,
-      pen_info.tiltX, pen_info.tiltY);
+  if (!GetPointerPenInfo(pointer_id, &pen_info)) return;
 
   // PEN_FLAG_BARREL is the lower side button. Gaomon (and most
   // Huion-class tablets) report the upper button by flipping

@@ -91,17 +91,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   bool _showPrevPageHint = false;
   bool _showNextPageHint = false;
 
-  // Diagnostic throttles — keep the log readable when the user
-  // hovers / draws for a while. Reset across app restarts (fine,
-  // we only want the cadence quiet, not deduplicated forever).
-  int _lastStylusDiagAt = 0;
-  int _lastKeyDiagAt = 0;
-  int _lastHoverDiagAt = 0;
-  /// Device IDs whose first hover/down has already been logged via
-  /// the DEVICE-SEEN line. Lets us capture the identity of each
-  /// physical input once without spamming for every event.
-  final Set<int> _seenDevices = <int>{};
-
   // Stylus barrel button — OneNote-style temporary tool override.
   // Two buttons supported (Wacom EMR / Surface / Galaxy stylus all
   // report the same Flutter button bits):
@@ -593,17 +582,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
-    // Diagnostic — log every keydown so we can spot Gaomon-style
-    // drivers that emit pen-button presses as keyboard shortcuts
-    // (F-keys, custom binds) instead of PointerEvent.buttons.
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    if (nowMs - _lastKeyDiagAt > 300) {
-      _lastKeyDiagAt = nowMs;
-      unawaited(CrashLogger.append(
-        '[Key] DOWN key=${event.logicalKey.keyLabel} '
-        'id=0x${event.logicalKey.keyId.toRadixString(16)}',
-      ));
-    }
     final ctrl = HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed;
     final shift = HardwareKeyboard.instance.isShiftPressed;
 
@@ -1127,34 +1105,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
     _activePointers++;
 
-    // ── Universal pointer diagnostic ──
-    // Logs every PointerDown with full disambiguation fields so we
-    // can tell a Gaomon-barrel-pretending-to-be-middle-click from a
-    // physical mouse middle click.
-    {
-      if (_seenDevices.add(event.device)) {
-        unawaited(CrashLogger.append(
-          '[Ptr] DEVICE-SEEN kind=${event.kind.name} '
-          'device=${event.device} '
-          'embedderId=${event.embedderId} '
-          'pointer=${event.pointer}',
-        ));
-      }
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
-      if (nowMs - _lastStylusDiagAt > 250) {
-        _lastStylusDiagAt = nowMs;
-        unawaited(CrashLogger.append(
-          '[Ptr] DOWN kind=${event.kind.name} '
-          'buttons=0x${event.buttons.toRadixString(16)} '
-          'pressure=${event.pressure.toStringAsFixed(2)} '
-          'tilt=${event.tilt.toStringAsFixed(2)} '
-          'orient=${event.orientation.toStringAsFixed(2)} '
-          'device=${event.device} '
-          'embedderId=${event.embedderId} '
-          'pointer=${event.pointer}',
-        ));
-      }
-    }
 
     // Track stylus presence so we can suppress palm-triggered long-press
     if (event.kind == PointerDeviceKind.stylus || event.kind == PointerDeviceKind.invertedStylus) {
@@ -3110,36 +3060,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   },
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
-                  onPointerHover: (e) {
-                    // Logs hover for ANY pointer kind. Two channels:
-                    //   1) Always log the FIRST hover event seen
-                    //      from each unique device ID so we get the
-                    //      pen's identity even when buttons=0.
-                    //   2) Log every hover with non-zero buttons
-                    //      (throttled), so a barrel press during
-                    //      hover is visible.
-                    if (_seenDevices.add(e.device)) {
-                      unawaited(CrashLogger.append(
-                        '[Ptr] DEVICE-SEEN kind=${e.kind.name} '
-                        'device=${e.device} '
-                        'embedderId=${e.embedderId} '
-                        'pointer=${e.pointer}',
-                      ));
-                    }
-                    if (e.buttons == 0) return;
-                    final nowMs = DateTime.now().millisecondsSinceEpoch;
-                    if (nowMs - _lastHoverDiagAt > 400) {
-                      _lastHoverDiagAt = nowMs;
-                      unawaited(CrashLogger.append(
-                        '[Ptr] HOVER kind=${e.kind.name} '
-                        'buttons=0x${e.buttons.toRadixString(16)} '
-                        'pressure=${e.pressure.toStringAsFixed(2)} '
-                        'device=${e.device} '
-                        'embedderId=${e.embedderId} '
-                        'pointer=${e.pointer}',
-                      ));
-                    }
-                  },
                   onPointerSignal: (event) {
                     // Read live state — `canvasState` from the build
                     // closure is intentionally STALE on pan/zoom/cursor
