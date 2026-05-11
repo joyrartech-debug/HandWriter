@@ -29,6 +29,7 @@ import 'package:handwriter/features/canvas/presentation/symbol_library_panel.dar
 import 'package:handwriter/shared/models/ncnote_format.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:handwriter/core/services/crash_logger.dart';
+import 'package:handwriter/core/services/pen_input_channel.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_painter_notifiers.dart';
 import 'package:handwriter/features/canvas/presentation/canvas_crop_dialog.dart';
@@ -291,6 +292,57 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     WidgetsBinding.instance.addObserver(this);
     _startAutoSave();
     _watchForPendingImport();
+    // Hook the Windows-side pen-button bridge. No-op on other
+    // platforms. See PenInputChannel for why this exists.
+    PenInputChannel.register(
+      onBarrel: (down) => _onNativeBarrelChange(_NativeBarrel.lower, down),
+      onInverted: (down) => _onNativeBarrelChange(_NativeBarrel.upper, down),
+    );
+  }
+
+  /// Active native-barrel override — `null` when neither side button
+  /// is held. Distinct from `_barrelButtonOverride` (which is the
+  /// pointer-event-side override for Wacom-class stylus pens that DO
+  /// report buttons through Flutter's normal pipeline).
+  _NativeBarrel? _activeNativeBarrel;
+  CanvasTool? _nativeBarrelPreviousTool;
+
+  /// Called by the WM_POINTER bridge when the user presses or releases
+  /// a side button. Press = save the current tool and switch to the
+  /// override target; release = restore.
+  void _onNativeBarrelChange(_NativeBarrel button, bool down) {
+    if (!mounted) return;
+    final notif = ref.read(canvasProvider.notifier);
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+
+    if (down) {
+      // Already in another override → ignore the second press so the
+      // restore-tool slot doesn't get clobbered.
+      if (_activeNativeBarrel != null) return;
+      _activeNativeBarrel = button;
+      _nativeBarrelPreviousTool = state.currentTool;
+      switch (button) {
+        case _NativeBarrel.upper:
+          // Honour the user's last-picked eraser sub-mode (per-stroke
+          // vs per-area) instead of hardcoding eraserStroke.
+          notif.setTool(notif.lastEraserMode);
+          break;
+        case _NativeBarrel.lower:
+          notif.setTool(CanvasTool.lasso);
+          break;
+      }
+      HapticFeedback.selectionClick();
+    } else {
+      // Release only restores if we were actually overriding via
+      // THIS button — guards against the C++ defensive-release path
+      // firing twice or a transient flap.
+      if (_activeNativeBarrel != button) return;
+      _activeNativeBarrel = null;
+      final prev = _nativeBarrelPreviousTool;
+      _nativeBarrelPreviousTool = null;
+      if (prev != null) notif.setTool(prev);
+    }
   }
 
   /// Waits for the notebook to finish loading, then runs any pending share
@@ -354,6 +406,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    PenInputChannel.unregister();
     // Flush any pending deferred stylus commit before tearing down so a
     // partial stroke isn't lost on screen close. Cancel the timer first
     // since dispose is the terminal callsite. Notifier clear happens in
@@ -6179,4 +6232,9 @@ Future<Uint8List> _buildPdfOnIsolate(List<_PdfPagePayload> payloads) async {
   }
   return Uint8List.fromList(await doc.save());
 }
+
+/// Identifies which side button of the pen triggered the native
+/// barrel override. Mirrors the two `penFlags` bits the C++ runner
+/// reads — see `PenInputChannel` doc comment.
+enum _NativeBarrel { upper, lower }
 
