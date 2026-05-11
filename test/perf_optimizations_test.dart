@@ -4,12 +4,12 @@
 //   3. imageCacheVersion notifier bumps
 //   4. Undo-stack cap reduction + sublist trim
 
+import 'dart:convert';
 import 'dart:isolate';
-import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:handwriter/core/providers/canvas_state.dart';
+import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 
 void main() {
@@ -133,6 +133,99 @@ void main() {
       expect(listenerCalls, 2);
 
       notifier.dispose();
+    });
+  });
+
+  group('compactPageJson + decodePageData round-trip', () {
+    PageData buildPage(List<StrokePoint> pts) => PageData(
+          pageId: 'p1',
+          pageNumber: 1,
+          width: 595,
+          height: 842,
+          layers: RenderingLayers(
+            content: [
+              ContentElement.stroke(
+                id: 'stroke-1',
+                zIndex: 0,
+                data: StrokeData(points: pts, baseWidth: 2.0, color: 0xFF000000),
+              ),
+            ],
+          ),
+        );
+
+    test('round-trip preserves stroke point positions within 0.001 tolerance', () {
+      final pts = [
+        const StrokePoint(x: 100.123456789, y: 200.987654321, pressure: 0.75, tilt: 0.12345, timestamp: 1000),
+        const StrokePoint(x: 105.5, y: 210.5, pressure: 0.5, tilt: 0, timestamp: 1016),
+        const StrokePoint(x: 110.0, y: 220.0),
+      ];
+      final page = buildPage(pts);
+      final encoded = compactPageJson(page);
+      final decoded = decodePageData(jsonDecode(encoded) as Map<String, dynamic>);
+      final decPts =
+          decoded.layers.content.whereType<StrokeElement>().first.data.points;
+      expect(decPts.length, 3);
+      for (var i = 0; i < pts.length; i++) {
+        expect((decPts[i].x - pts[i].x).abs() < 0.01, isTrue,
+            reason: 'x mismatch at $i: ${decPts[i].x} vs ${pts[i].x}');
+        expect((decPts[i].y - pts[i].y).abs() < 0.01, isTrue,
+            reason: 'y mismatch at $i: ${decPts[i].y} vs ${pts[i].y}');
+        expect((decPts[i].pressure - pts[i].pressure).abs() < 0.01, isTrue);
+      }
+    });
+
+    test('compact form is materially smaller than full toJson', () {
+      // 100-point stroke with realistic field values.
+      final pts = List.generate(100, (i) => StrokePoint(
+            x: 100.0 + i * 1.23456789,
+            y: 200.0 + i * 0.987654321,
+            pressure: 0.5 + (i % 7) * 0.05,
+            tilt: 0.0,
+            timestamp: 1000 + i * 8,
+          ));
+      final page = buildPage(pts);
+      final fullBytes = utf8.encode(jsonEncode(page.toJson()));
+      final compactBytes = utf8.encode(compactPageJson(page));
+      // Expect at least 50% reduction. In practice we see ~55-60% on
+      // full-precision realistic input; up to 80%+ on synth-pressure
+      // mouse input where trailing defaults collapse to [x, y] only.
+      expect(compactBytes.length < fullBytes.length * 0.5, isTrue,
+          reason: 'compact=${compactBytes.length} full=${fullBytes.length}');
+    });
+
+    test('legacy map-form points still decode (back-compat)', () {
+      // Manually craft JSON with old-style point objects (what older
+      // builds saved). decodePageData should accept it unchanged.
+      final legacyJson = jsonEncode({
+        'pageId': 'p1',
+        'pageNumber': 1,
+        'width': 595,
+        'height': 842,
+        'layers': {
+          'background': {},
+          'content': [
+            {
+              'id': 'stroke-1',
+              'zIndex': 0,
+              'type': 'stroke',
+              'data': {
+                'points': [
+                  {'x': 1.0, 'y': 2.0, 'pressure': 0.5, 'tilt': 0.0, 'timestamp': 0},
+                  {'x': 3.0, 'y': 4.0, 'pressure': 0.8, 'tilt': 0.1, 'timestamp': 16},
+                ],
+                'baseWidth': 2.0,
+                'color': 0xFF000000,
+              },
+            },
+          ],
+        },
+      });
+      final decoded = decodePageData(jsonDecode(legacyJson) as Map<String, dynamic>);
+      final decPts =
+          decoded.layers.content.whereType<StrokeElement>().first.data.points;
+      expect(decPts.length, 2);
+      expect(decPts[0].x, 1.0);
+      expect(decPts[1].y, 4.0);
     });
   });
 

@@ -3,7 +3,8 @@ import 'dart:convert';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:handwriter/config/app_config.dart';
-import 'package:handwriter/core/providers/canvas_provider.dart' show compactPageJson;
+import 'package:handwriter/core/providers/canvas_provider.dart'
+    show compactPageJson, decodePageData;
 import 'package:handwriter/core/services/file_service.dart';
 import 'package:handwriter/core/services/webdav_service.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
@@ -332,7 +333,7 @@ class SyncService {
     }
 
     final json = jsonDecode(utf8.decode(pageFile.content as List<int>));
-    return PageData.fromJson(json as Map<String, dynamic>);
+    return decodePageData(json as Map<String, dynamic>);
   }
 
   /// Crea un pacchetto .ncnote da metadata, document e pagine.
@@ -955,7 +956,7 @@ class SyncService {
       '${_deltaDir(notebookId)}pages/$pageFileName',
     );
     final json = jsonDecode(utf8.decode(data));
-    return PageData.fromJson(json as Map<String, dynamic>);
+    return decodePageData(json as Map<String, dynamic>);
   }
 
   /// Fetches ONLY `.sync/<id>/metadata.json` — a ≤1 KB file containing the
@@ -1091,7 +1092,7 @@ class SyncService {
         try {
           final data = await _webdav.downloadFile('${dir}pages/$fileName');
           final json = jsonDecode(utf8.decode(data));
-          pages[fileName] = PageData.fromJson(json as Map<String, dynamic>);
+          pages[fileName] = decodePageData(json as Map<String, dynamic>);
           return;
         } catch (e) {
           if (attempt == maxPageRetries - 1) {
@@ -1224,7 +1225,7 @@ class SyncService {
           file.name.endsWith('.json')) {
         final fileName = file.name.split('/').last;
         final json = jsonDecode(utf8.decode(file.content as List<int>));
-        pages[fileName] = PageData.fromJson(json as Map<String, dynamic>);
+        pages[fileName] = decodePageData(json as Map<String, dynamic>);
       }
     }
 
@@ -1355,7 +1356,7 @@ Map<String, PageData> _extractAllPagesInIsolate(Uint8List data) {
     if (file.name.startsWith(prefix) && file.name.endsWith('.json')) {
       final fileName = file.name.split('/').last;
       final json = jsonDecode(utf8.decode(file.content as List<int>));
-      pages[fileName] = PageData.fromJson(json as Map<String, dynamic>);
+      pages[fileName] = decodePageData(json as Map<String, dynamic>);
     }
   }
   return pages;

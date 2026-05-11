@@ -53,6 +53,11 @@ dependencies:
   # PDF rendering
   printing: ^5.12.0
   pdf: ^3.11.1
+
+  # Image re-encoding (PDF rasters → JPEG q=85). Cuts asset bytes
+  # 4-6× compared to PNG so PDF imports sync in seconds instead of
+  # minutes on Tailscale.
+  image: ^4.1.0
   super_clipboard: ^0.9.1
   
   # Sharing (iOS share sheet for export)

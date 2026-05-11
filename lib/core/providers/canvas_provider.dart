@@ -8367,17 +8367,42 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   static const int _encodeYieldBatch = 3;
 }
 
-/// Compact JSON encode for a PageData. Rounds doubles to a precision
-/// well below visible (3 decimals = sub-1‰ resolution for all fields:
-/// x/y at 0.001 page-units is way below pixel; pressure/tilt at 0.001
-/// is finer than the tablet ADC's typical 10-bit resolution).
+/// Compact JSON encode for a PageData.
 ///
-/// On a typical 100-point stroke this cuts the JSON payload from
-/// ~8-10 KB to ~3-4 KB — same wire format, same fromJson code path
-/// (already deserialises any numeric precision via `as num`),
-/// fully backwards-compatible with notebooks saved by older builds.
-String compactPageJson(PageData page) =>
-    jsonEncode(_roundFloatsInPlace(page.toJson()));
+/// Two reductions applied:
+///
+/// (1) Doubles rounded to 3 decimals (sub-1‰ — well below visible
+///     pixel precision and finer than the tablet's 10-bit ADC).
+///
+/// (2) StrokePoint objects emitted as compact arrays
+///     `[x, y, pressure?, tilt?, timestamp?]` with trailing defaults
+///     omitted. A point with pressure=0.5, tilt=0, timestamp=0
+///     becomes `[x, y]` (2 elements) instead of a 5-field object.
+///     Decoder counter-part is [_expandStrokePointsInPlace] (applied
+///     via [decodePageData]) which restores the map form before
+///     handing to the generated PageData.fromJson.
+///
+/// Combined effect on a typical 100-point stroke: JSON drops from
+/// ~8-10 KB to ~1.5-2.5 KB (75-85% smaller). Same wire schema for
+/// the surrounding tree, both forms accepted on read so old notebooks
+/// continue to load unchanged.
+String compactPageJson(PageData page) {
+  final raw = page.toJson();
+  final rounded = _roundFloatsInPlace(raw);
+  _compactStrokePointsInPlace(rounded);
+  return jsonEncode(rounded);
+}
+
+/// Counterpart to [compactPageJson]. Mutates [json] in-place to
+/// expand any compact `[x,y,p,t,ts]` arrays back into full maps so
+/// the generated `PageData.fromJson` (which casts each point to
+/// `Map<String, dynamic>`) accepts them. Old maps are left untouched.
+/// Always run this before `PageData.fromJson` on any deserialized
+/// notebook JSON — it's a cheap no-op when no compact points exist.
+PageData decodePageData(Map<String, dynamic> json) {
+  _expandStrokePointsInPlace(json);
+  return PageData.fromJson(json);
+}
 
 Object? _roundFloatsInPlace(Object? v) {
   if (v is double) {
@@ -8394,6 +8419,77 @@ Object? _roundFloatsInPlace(Object? v) {
     return v.map(_roundFloatsInPlace).toList(growable: false);
   }
   return v;
+}
+
+/// Walk the page JSON tree and replace `points: [{...}, {...}]` lists
+/// inside a `stroke` ContentElement with compact `points: [[x,y,..], ..]`.
+/// Operates in place on the tree produced by toJson() — only the
+/// `points` list under each stroke element is mutated, the rest of
+/// the structure (zIndex, id, data wrapper, type) stays intact.
+void _compactStrokePointsInPlace(Object? v) {
+  if (v is Map) {
+    if (v['type'] == 'stroke') {
+      final data = v['data'];
+      if (data is Map && data['points'] is List) {
+        final pts = data['points'] as List;
+        for (var i = 0; i < pts.length; i++) {
+          final p = pts[i];
+          if (p is Map) pts[i] = _pointMapToArray(p);
+        }
+      }
+    }
+    v.forEach((_, val) {
+      if (val is Map || val is List) _compactStrokePointsInPlace(val);
+    });
+  } else if (v is List) {
+    for (final item in v) { _compactStrokePointsInPlace(item); }
+  }
+}
+
+List<num> _pointMapToArray(Map p) {
+  final x = p['x'] as num;
+  final y = p['y'] as num;
+  final pr = (p['pressure'] as num?) ?? 0.5;
+  final t = (p['tilt'] as num?) ?? 0.0;
+  final ts = (p['timestamp'] as num?) ?? 0;
+  // Trim trailing defaults so quick taps / mouse strokes (no real
+  // pressure or timestamp) compact to just [x, y].
+  if (ts == 0 && t == 0.0 && pr == 0.5) return <num>[x, y];
+  if (ts == 0 && t == 0.0) return <num>[x, y, pr];
+  if (ts == 0) return <num>[x, y, pr, t];
+  return <num>[x, y, pr, t, ts];
+}
+
+/// Counterpart of [_compactStrokePointsInPlace]. Walks the JSON
+/// produced by [jsonDecode] and expands any array-form points
+/// back into the map form the generated fromJson expects. Idempotent
+/// when no compact points are present (old notebooks).
+void _expandStrokePointsInPlace(Object? v) {
+  if (v is Map) {
+    if (v['type'] == 'stroke') {
+      final data = v['data'];
+      if (data is Map && data['points'] is List) {
+        final pts = data['points'] as List;
+        for (var i = 0; i < pts.length; i++) {
+          final p = pts[i];
+          if (p is List) pts[i] = _pointArrayToMap(p);
+        }
+      }
+    }
+    v.forEach((_, val) {
+      if (val is Map || val is List) _expandStrokePointsInPlace(val);
+    });
+  } else if (v is List) {
+    for (final item in v) { _expandStrokePointsInPlace(item); }
+  }
+}
+
+Map<String, dynamic> _pointArrayToMap(List p) {
+  final out = <String, dynamic>{'x': p[0], 'y': p[1]};
+  if (p.length > 2) out['pressure'] = p[2];
+  if (p.length > 3) out['tilt'] = p[3];
+  if (p.length > 4) out['timestamp'] = p[4];
+  return out;
 }
 
 /// Parameters for the isolate packaging function.

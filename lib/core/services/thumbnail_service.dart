@@ -10,6 +10,8 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:handwriter/config/app_config.dart';
+import 'package:handwriter/core/providers/canvas_provider.dart'
+    show decodePageData;
 import 'package:handwriter/features/canvas/data/render_engine.dart';
 import 'package:handwriter/shared/models/ncnote_format.dart';
 
@@ -164,7 +166,7 @@ class ThumbnailService {
       }
       if (firstPageFile == null) return null;
       final json = jsonDecode(utf8.decode(firstPageFile.content as List<int>));
-      final page = PageData.fromJson(json as Map<String, dynamic>);
+      final page = decodePageData(json as Map<String, dynamic>);
 
       // Collect only the asset bytes referenced by this first page so the
       // thumbnail renders image elements instead of blank rectangles.

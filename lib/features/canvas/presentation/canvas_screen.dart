@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:printing/printing.dart';
+import 'package:image/image.dart' as image_lib;
 import 'package:pdf/pdf.dart' as pw_pdf;
 import 'package:pdf/widgets.dart' as pw;
 import 'package:flutter/foundation.dart';
@@ -2142,6 +2143,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         final png = await raster.toPng();
         if (!mounted) return;
 
+        // Re-encode PNG → JPEG q=85 off the UI thread. PDF rasters are
+        // photo-like (gradients, anti-aliased text) where PNG's lossless
+        // is overkill — typical page goes from ~500 KB-1.5 MB PNG to
+        // ~80-200 KB JPEG (~6× smaller). Same .png filename is kept
+        // because Flutter's ui.instantiateImageCodec decodes by magic
+        // bytes (0xFFD8 for JPEG, 0x8950 for PNG), not extension. So
+        // no schema migration needed; older builds load these bytes
+        // fine via the same code path. The +200-500 ms one-shot
+        // re-encode per page is dwarfed by the 4-6× wire-size win on
+        // every subsequent sync.
+        final assetBytes = await compute(_reencodePngAsJpeg, png);
+        if (!mounted) return;
+
         if (processed > 0) notifier.addPage();
 
         final st = ref.read(canvasProvider);
@@ -2156,7 +2170,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         notifier.addImageElement(
           insertPos,
           '${name}_p${processed + 1}.png',
-          png,
+          assetBytes,
           imgW,
           imgH,
           locked: true,
@@ -5840,4 +5854,24 @@ Future<Uint8List> _buildPdfOnIsolate(List<_PdfPagePayload> payloads) async {
     );
   }
   return Uint8List.fromList(await doc.save());
+}
+
+/// Top-level so it can run via [compute()] inside a worker isolate.
+/// Decodes the PNG and re-encodes as JPEG quality 85. Returns the
+/// JPEG bytes; if decoding fails for any reason (corrupt PNG, unknown
+/// format quirks), returns the input PNG unchanged so the import
+/// still succeeds — losing the size win is preferable to losing the
+/// page.
+Uint8List _reencodePngAsJpeg(Uint8List pngBytes) {
+  try {
+    final decoded = image_lib.decodePng(pngBytes);
+    if (decoded == null) return pngBytes;
+    // q=85 is the standard "indistinguishable from lossless on
+    // photographic content" point. PDF page rasters have anti-aliased
+    // text edges that JPEG handles cleanly at this quality.
+    final jpegBytes = image_lib.encodeJpg(decoded, quality: 85);
+    return Uint8List.fromList(jpegBytes);
+  } catch (_) {
+    return pngBytes;
+  }
 }
