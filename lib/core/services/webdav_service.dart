@@ -315,6 +315,25 @@ class WebDavService {
 
         final bytes = response.bodyBytes;
 
+        // Empty-body short-circuit. When Tailscale closes the connection
+        // before the server's response body is sent (very common on flap),
+        // we get a 200 OK with zero bytes. Without this guard:
+        //   - Per-PUT verify "trusted the body" → 0-byte was accepted
+        //   - Caller jsonDecode("") → FormatException
+        //   - Pull aborted, _lastPageEtags never persisted, next tick
+        //     restarts a full re-pull from scratch → infinite loop
+        // Treat empty 200 as a transient failure and retry.
+        if (bytes.isEmpty) {
+          _recordFailure('downloadFile', 'empty body ($remotePath)');
+          lastError = WebDavTruncatedDownloadException(remotePath, -1, 0);
+          if (attempt < _downloadMaxAttempts - 1) {
+            await Future.delayed(
+                Duration(milliseconds: 400 * (1 << attempt)));
+            continue;
+          }
+          throw lastError as WebDavTruncatedDownloadException;
+        }
+
         // Detect gzipped responses. dart:io decompresses transparently
         // (autoUncompress=true) but does NOT update the Content-Length
         // header — it still reflects the *compressed* wire size, while

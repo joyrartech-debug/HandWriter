@@ -7256,7 +7256,42 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // `_maxConnectionsPerHost` (16), so this queues the rest rather than
     // overwhelming the server.
     await Future.wait(pagesToPull.map(pullOne));
-    remoteMeta = await metaFuture;
+    // ── Defensive meta-fetch: never let document.json / metadata.json
+    //    failure abort the whole pull cycle.
+    //
+    // metaFuture is downloadDeltaMeta() which throws on truncated /
+    // empty / unparseable body (very common during Tailscale flaps:
+    // server closes the connection mid-response → 200 OK with 0
+    // bytes → jsonDecode('') → FormatException). If we let that
+    // propagate, the function aborts BEFORE line 7836 where per-page
+    // ETags get persisted. Next pull tick sees _lastPageEtags = 1
+    // again and tries the full 102-page re-pull from scratch — the
+    // infinite-loop bug.
+    //
+    // On meta failure: mark _pullHadFailures so the meta ETag stays
+    // stale (next tick will retry the whole cycle), but still persist
+    // the per-page ETags we DID successfully fetch and return false
+    // gracefully.
+    try {
+      remoteMeta = await metaFuture;
+    } catch (e) {
+      print('[Canvas] Meta fetch failed mid-pull '
+          '(${completed.length} pages still got through): $e');
+      _pullHadFailures = true;
+      // Persist what we DID download so subsequent ticks don't re-fetch
+      // the same pages. remotePageEtags was already restricted at
+      // lines 7280-7295 to remove failed/cooled/corrupt pages, so
+      // it now contains only the successful ones.
+      remotePageEtags = Map.of(remotePageEtags);
+      for (final fn in failedPages) { remotePageEtags.remove(fn); }
+      for (final fn in cooledDown) { remotePageEtags.remove(fn); }
+      for (final fn in corruptedPages) { remotePageEtags.remove(fn); }
+      for (final entry in remotePageEtags.entries) {
+        _lastPageEtags[entry.key] = entry.value;
+      }
+      await _persistLastPageEtags(s.metadata.id);
+      return false;
+    }
 
     if (anyPageChanged) {
       print('[Canvas] Pulled ${completed.length}/${pagesToPull.length} pages '
