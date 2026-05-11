@@ -2143,17 +2143,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         final png = await raster.toPng();
         if (!mounted) return;
 
-        // Re-encode PNG → JPEG q=85 off the UI thread. PDF rasters are
-        // photo-like (gradients, anti-aliased text) where PNG's lossless
-        // is overkill — typical page goes from ~500 KB-1.5 MB PNG to
-        // ~80-200 KB JPEG (~6× smaller). Same .png filename is kept
-        // because Flutter's ui.instantiateImageCodec decodes by magic
-        // bytes (0xFFD8 for JPEG, 0x8950 for PNG), not extension. So
-        // no schema migration needed; older builds load these bytes
-        // fine via the same code path. The +200-500 ms one-shot
-        // re-encode per page is dwarfed by the 4-6× wire-size win on
-        // every subsequent sync.
-        final assetBytes = await compute(_reencodePngAsJpeg, png);
+        // Re-encode the PDF raster as a PNG-8 (256-color palette)
+        // flattened on white. Previous JPEG re-encoding dropped the
+        // alpha channel and rendered transparent pixels as black,
+        // which made any black-pen ink the user drew on those zones
+        // invisible (line art over an inked page). PNG-8 keeps the
+        // page paper white, line-art compresses tighter than JPEG
+        // (typical: ~60-80 KB vs the prior ~80-200 KB for JPEG q=85)
+        // and the file format is universally decodable on iOS/Android/
+        // Linux/macOS. Same .png filename — Flutter still decodes by
+        // magic bytes, so older builds load these unchanged.
+        final assetBytes = await compute(_reencodePngFlattenWhite, png);
         if (!mounted) return;
 
         if (processed > 0) notifier.addPage();
@@ -5857,20 +5857,37 @@ Future<Uint8List> _buildPdfOnIsolate(List<_PdfPagePayload> payloads) async {
 }
 
 /// Top-level so it can run via [compute()] inside a worker isolate.
-/// Decodes the PNG and re-encodes as JPEG quality 85. Returns the
-/// JPEG bytes; if decoding fails for any reason (corrupt PNG, unknown
-/// format quirks), returns the input PNG unchanged so the import
-/// still succeeds — losing the size win is preferable to losing the
-/// page.
-Uint8List _reencodePngAsJpeg(Uint8List pngBytes) {
+/// Decodes the PDF-raster PNG, composites it onto a solid white
+/// background (so transparent zones become page paper instead of
+/// black), and re-encodes as PNG-8 with a 256-color palette. Returns
+/// the new bytes; if decoding fails for any reason, returns the input
+/// unchanged — losing the size win beats losing the page.
+Uint8List _reencodePngFlattenWhite(Uint8List pngBytes) {
   try {
     final decoded = image_lib.decodePng(pngBytes);
     if (decoded == null) return pngBytes;
-    // q=85 is the standard "indistinguishable from lossless on
-    // photographic content" point. PDF page rasters have anti-aliased
-    // text edges that JPEG handles cleanly at this quality.
-    final jpegBytes = image_lib.encodeJpg(decoded, quality: 85);
-    return Uint8List.fromList(jpegBytes);
+    // Composite onto white. image_lib renders alpha-0 pixels as
+    // black by default when an alpha channel is dropped — overlaying
+    // onto a white canvas first makes the transparent regions render
+    // as page paper, preserving visibility of any black ink the user
+    // draws over them.
+    final canvas = image_lib.Image(
+      width: decoded.width,
+      height: decoded.height,
+      numChannels: 3,
+      backgroundColor: image_lib.ColorRgb8(255, 255, 255),
+    );
+    image_lib.compositeImage(canvas, decoded);
+    // Median-cut quantize to 256 colors. Line-art / text PDFs
+    // compress better as palette PNG than as JPEG, and zero-loss
+    // for the typical 5-10 colors actually present on a page.
+    final quantized = image_lib.quantize(
+      canvas,
+      numberOfColors: 256,
+      method: image_lib.QuantizeMethod.octree,
+    );
+    final out = image_lib.encodePng(quantized, level: 9);
+    return Uint8List.fromList(out);
   } catch (_) {
     return pngBytes;
   }
