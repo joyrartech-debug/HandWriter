@@ -1,8 +1,38 @@
 #include "flutter_window.h"
 
+#include <shlobj.h>
+
+#include <cstdio>
 #include <optional>
+#include <string>
 
 #include "flutter/generated_plugin_registrant.h"
+
+namespace {
+// Quick native-side log so we can diagnose whether the Win32 runner
+// actually receives WM_POINTER* messages for a Gaomon driverless pen.
+// Writes to <My Documents>\handwriter_native.log. Tiny overhead per
+// call; no rotation — wipe by hand if it grows.
+void NativeLog(const char* fmt, ...) {
+  static FILE* f = nullptr;
+  static bool tried = false;
+  if (!tried) {
+    tried = true;
+    wchar_t docs[MAX_PATH] = {};
+    if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_PERSONAL, nullptr, 0, docs))) {
+      wchar_t path[MAX_PATH] = {};
+      swprintf_s(path, MAX_PATH, L"%s\\handwriter_native.log", docs);
+      _wfopen_s(&f, path, L"a, ccs=UTF-8");
+    }
+  }
+  if (!f) return;
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(f, fmt, args);
+  va_end(args);
+  fflush(f);
+}
+}  // namespace
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -13,6 +43,13 @@ bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
     return false;
   }
+  // Force every input source (mouse, touch, pen) to deliver via the
+  // WM_POINTER* family so HandlePenPointerMessage actually receives
+  // pen events from drivers that would otherwise route through the
+  // legacy WM_MOUSE / WM_TOUCH path. Has no effect on Flutter's own
+  // pointer pipeline, which keeps reading from the same source.
+  EnableMouseInPointer(TRUE);
+  NativeLog("[Init] OnCreate, EnableMouseInPointer(TRUE) called\n");
 
   RECT frame = GetClientArea();
 
@@ -66,10 +103,25 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
   // table, not from the WPARAM payload, so it's safe to call here
   // regardless of who handles the message afterwards.
   switch (message) {
+    case WM_POINTERENTER:
+    case WM_POINTERLEAVE:
     case WM_POINTERDOWN:
     case WM_POINTERUPDATE:
     case WM_POINTERUP:
+    case WM_NCPOINTERDOWN:
+    case WM_NCPOINTERUPDATE:
+    case WM_NCPOINTERUP:
+      NativeLog("[Msg] pointer=0x%04x wparam=0x%llx\n",
+                message, (unsigned long long)wparam);
       HandlePenPointerMessage(message, wparam);
+      break;
+    case WM_MBUTTONDOWN:
+    case WM_MBUTTONUP:
+    case WM_RBUTTONDOWN:
+    case WM_RBUTTONUP:
+    case WM_TOUCH:
+      NativeLog("[Msg] legacy=0x%04x wparam=0x%llx\n",
+                message, (unsigned long long)wparam);
       break;
     default:
       break;
