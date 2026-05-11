@@ -122,6 +122,32 @@ class NotebookCover extends StatelessWidget {
                   ),
                 ),
               ),
+              // Bottom darkening scrim behind the title — pushes the
+              // white-text contrast up on the lighter cover swatches
+              // (mustard, sage, dusty rose) to clear WCAG AA. The single
+              // 0x26 text shadow alone landed white-on-mustard around
+              // ~3.5:1 (below 4.5:1).
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 80,
+                child: IgnorePointer(
+                  child: DecoratedBox(
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        begin: Alignment.topCenter,
+                        end: Alignment.bottomCenter,
+                        colors: [Color(0x00000000), Color(0x66000000)],
+                      ),
+                      borderRadius: BorderRadius.only(
+                        bottomLeft: radius.bottomLeft,
+                        bottomRight: radius.bottomRight,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
               // Title
               Positioned(
                 left: 24,
@@ -138,7 +164,7 @@ class NotebookCover extends StatelessWidget {
                     letterSpacing: -0.15,
                     height: 1.2,
                     shadows: [
-                      Shadow(color: Color(0x26000000), offset: Offset(0, 1), blurRadius: 2),
+                      Shadow(color: Color(0x66000000), offset: Offset(0, 1), blurRadius: 4),
                     ],
                   ),
                 ),

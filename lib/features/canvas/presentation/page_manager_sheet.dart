@@ -7,6 +7,7 @@
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/core/providers/canvas_provider.dart';
 import 'package:handwriter/core/providers/page_clipboard_provider.dart';
@@ -419,6 +420,10 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                 selectedDocIndices: _isSelecting ? _selected : null,
                 onToggleSelect: _toggleSelect,
                 onLongPressToSelect: (docIdx) {
+                  // Light haptic on entering selection mode — long-press is
+                  // a hidden gesture and the visual change (checkboxes
+                  // appearing) is easy to miss in peripheral vision.
+                  HapticFeedback.lightImpact();
                   setState(() => _selected.add(docIdx));
                 },
                 onReorder: (oldVisIdx, newVisIdx) {

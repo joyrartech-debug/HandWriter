@@ -878,13 +878,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // Commit threshold: page edge must be past 50% of screen
     if (pageRightScreen < canvasSize.width * 0.50) {
       if (isLastPage) {
+        HapticFeedback.mediumImpact();
         ref.read(canvasProvider.notifier).addPage();
       } else if (hasNext) {
         // Swipe commit: reset zoom/pan so the next page opens centered.
+        HapticFeedback.selectionClick();
         ref.read(canvasProvider.notifier).nextPage(resetViewport: true);
       }
     } else if (pageLeftScreen > canvasSize.width * 0.50 && hasPrev) {
       // Swipe commit: reset zoom/pan so the prev page opens centered.
+      HapticFeedback.selectionClick();
       ref.read(canvasProvider.notifier).prevPage(resetViewport: true);
     }
 
@@ -1610,6 +1613,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final pts = List<Offset>.from(_lassoPathNotifier.points); // copy before clear
       _lassoPathNotifier.clear();
       ref.read(canvasProvider.notifier).commitLassoPath(pts);
+      // Read fresh state — commitLassoPath sets lassoSelection synchronously
+      // if any element was caught by the polygon. Fire a small confirm
+      // haptic on success so the user knows their selection landed.
+      final afterCommit = ref.read(canvasProvider);
+      if (afterCommit?.lassoSelection != null) {
+        HapticFeedback.selectionClick();
+      }
       return;
     }
 
@@ -3233,27 +3243,42 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
                           ),
                           const SizedBox(width: 12),
-                          GestureDetector(
-                            onTap: () => ref.read(canvasProvider.notifier).commitRecognizedShape(),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.white24,
-                                borderRadius: BorderRadius.circular(12),
+                          Semantics(
+                            button: true,
+                            label: 'Conferma forma riconosciuta',
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () {
+                                HapticFeedback.lightImpact();
+                                ref.read(canvasProvider.notifier).commitRecognizedShape();
+                              },
+                              child: Container(
+                                // Slightly larger tap area for fingers — the
+                                // original padding gave a 26-px-tall target.
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.white24,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Text('Conferma', style: TextStyle(color: Colors.white, fontSize: 11)),
                               ),
-                              child: const Text('Conferma', style: TextStyle(color: Colors.white, fontSize: 11)),
                             ),
                           ),
                           const SizedBox(width: 4),
-                          GestureDetector(
-                            onTap: () => ref.read(canvasProvider.notifier).dismissRecognizedShape(),
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: Colors.white24,
-                                borderRadius: BorderRadius.circular(12),
+                          Semantics(
+                            button: true,
+                            label: 'Annulla forma riconosciuta',
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => ref.read(canvasProvider.notifier).dismissRecognizedShape(),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                decoration: BoxDecoration(
+                                  color: Colors.white24,
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                                child: const Text('Annulla', style: TextStyle(color: Colors.white, fontSize: 11)),
                               ),
-                              child: const Text('Annulla', style: TextStyle(color: Colors.white, fontSize: 11)),
                             ),
                           ),
                         ],
@@ -3285,9 +3310,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
                           ),
                           const SizedBox(width: 8),
-                          GestureDetector(
-                            onTap: () => ref.read(canvasProvider.notifier).clearPendingSymbol(),
-                            child: const Icon(Icons.close, color: Colors.white70, size: 16),
+                          Semantics(
+                            button: true,
+                            label: 'Annulla inserimento simbolo',
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => ref.read(canvasProvider.notifier).clearPendingSymbol(),
+                              child: const Padding(
+                                // 12px on every side gives a 40-px hit area
+                                // around the 16-px icon — close to Material's
+                                // 48-px recommendation without bloating the
+                                // pill's height.
+                                padding: EdgeInsets.all(12),
+                                child: Icon(Icons.close, color: Colors.white70, size: 16),
+                              ),
+                            ),
                           ),
                         ],
                       ),
@@ -3318,9 +3355,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             style: TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w500),
                           ),
                           const SizedBox(width: 8),
-                          GestureDetector(
-                            onTap: () => ref.read(canvasProvider.notifier).cancelPendingPaste(),
-                            child: const Icon(Icons.close, color: Colors.white70, size: 16),
+                          Semantics(
+                            button: true,
+                            label: 'Annulla incolla',
+                            child: GestureDetector(
+                              behavior: HitTestBehavior.opaque,
+                              onTap: () => ref.read(canvasProvider.notifier).cancelPendingPaste(),
+                              child: const Padding(
+                                padding: EdgeInsets.all(12),
+                                child: Icon(Icons.close, color: Colors.white70, size: 16),
+                              ),
+                            ),
                           ),
                         ],
                       ),
@@ -5350,23 +5395,35 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               ),
               Tooltip(
                 message: 'Apri gestione pagine',
-                child: GestureDetector(
-                  onTap: () => _showPageManager(canvasState),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: isDark
-                          ? Theme.of(context).colorScheme.surfaceContainerHighest
-                          : Colors.grey.shade100,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text(
-                      filteredCount > 0 && filteredPos >= 0
-                          ? '${filteredPos + 1} / $filteredCount'
-                          : '— / $filteredCount',
-                      style: TextStyle(
-                          color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800,
-                          fontSize: 13, fontWeight: FontWeight.w500),
+                child: Semantics(
+                  button: true,
+                  label: filteredCount > 0 && filteredPos >= 0
+                      ? 'Pagina ${filteredPos + 1} di $filteredCount — '
+                          'apri gestione pagine'
+                      : 'Apri gestione pagine',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () => _showPageManager(canvasState),
+                    // Padding on the gesture gives a 36-px-tall hit area.
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: isDark
+                              ? Theme.of(context).colorScheme.surfaceContainerHighest
+                              : Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text(
+                          filteredCount > 0 && filteredPos >= 0
+                              ? '${filteredPos + 1} / $filteredCount'
+                              : '— / $filteredCount',
+                          style: TextStyle(
+                              color: isDark ? Theme.of(context).colorScheme.onSurface : Colors.grey.shade800,
+                              fontSize: 13, fontWeight: FontWeight.w500),
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -5384,26 +5441,39 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
               // Zoom indicator — tap to reset to 200%
               Tooltip(
                 message: 'Tocca per azzerare lo zoom (Ctrl+0)',
-                child: GestureDetector(
-                  onTap: () {
-                    ref.read(canvasProvider.notifier).resetZoom();
-                  },
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                    decoration: BoxDecoration(
-                      color: canvasState.zoom != 2.0
-                          ? (isDark ? Colors.blue.shade900.withValues(alpha: 0.4) : Colors.blue.shade50)
-                          : (isDark ? Theme.of(context).colorScheme.surfaceContainerHighest : Colors.grey.shade100),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      '${(canvasState.zoom * 100).round()}%',
-                      style: TextStyle(
-                        color: canvasState.zoom != 2.0
-                            ? (isDark ? Colors.blue.shade200 : Colors.blue.shade700)
-                            : (isDark ? Theme.of(context).colorScheme.onSurfaceVariant : Colors.grey.shade600),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w500,
+                child: Semantics(
+                  button: true,
+                  label:
+                      'Zoom ${(canvasState.zoom * 100).round()} percento — '
+                      'tocca per azzerare',
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: () {
+                      ref.read(canvasProvider.notifier).resetZoom();
+                    },
+                    // Outer padding gives the gesture a 36-px-tall hit
+                    // area without enlarging the visible chip — fingers
+                    // and styluses miss the original 18-px pill.
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: canvasState.zoom != 2.0
+                              ? (isDark ? Colors.blue.shade900.withValues(alpha: 0.4) : Colors.blue.shade50)
+                              : (isDark ? Theme.of(context).colorScheme.surfaceContainerHighest : Colors.grey.shade100),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Text(
+                          '${(canvasState.zoom * 100).round()}%',
+                          style: TextStyle(
+                            color: canvasState.zoom != 2.0
+                                ? (isDark ? Colors.blue.shade200 : Colors.blue.shade700)
+                                : (isDark ? Theme.of(context).colorScheme.onSurfaceVariant : Colors.grey.shade600),
+                            fontSize: 11,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
                       ),
                     ),
                   ),

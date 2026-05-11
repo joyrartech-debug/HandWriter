@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:handwriter/config/app_config.dart';
 import 'package:handwriter/core/providers/app_settings_provider.dart';
@@ -319,6 +320,9 @@ class _LibraryScreenV2State extends ConsumerState<LibraryScreenV2> {
   }
 
   void _showNotebookMenu(NotebookEntry entry) async {
+    // Long-press is a hidden affordance; the bottom sheet feels more
+    // intentional with a confirmatory haptic.
+    HapticFeedback.lightImpact();
     final settings = ref.read(appSettingsProvider);
     final isFav = settings.favoriteNotebookIds.contains(entry.metadata.id);
 

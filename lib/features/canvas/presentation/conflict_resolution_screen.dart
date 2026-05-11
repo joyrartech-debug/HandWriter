@@ -41,8 +41,12 @@ class _ConflictResolutionScreenState
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E293B),
         elevation: 0,
+        // Tooltip + a11y label make it clear this is "decide later", not
+        // "discard everything" — bare close icon on a dark conflict screen
+        // is easy to misread as a destructive cancel.
         leading: IconButton(
           icon: const Icon(Icons.close, color: Colors.white70),
+          tooltip: 'Decidi più tardi',
           onPressed: () => _confirmDismiss(context, conflicts),
         ),
         title: Text(
