@@ -117,7 +117,7 @@ class ToolSettings {
 
   const ToolSettings({
     this.color = 0xFF000000,
-    this.strokeWidth = 2.0,
+    this.strokeWidth = 1.5,
     this.opacity = 1.0,
     this.shapeType = 'rectangle',
     this.eraserSize = EraserSize.medium,

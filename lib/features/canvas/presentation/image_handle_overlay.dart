@@ -323,12 +323,13 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               _actionBtn(Icons.crop_rounded, Colors.blueGrey, widget.onCrop!, 'Ritaglia'),
               _divider(),
             ],
-            if (widget.onBringToFront != null) ...[
-              _actionBtn(Icons.flip_to_front_rounded, Colors.indigo, widget.onBringToFront!, 'In primo piano'),
-              _divider(),
-            ],
-            if (widget.onSendToBack != null) ...[
-              _actionBtn(Icons.flip_to_back_rounded, Colors.indigo, widget.onSendToBack!, 'Dietro a tutto'),
+            // "Copia" is the top-priority frequent action: copying an
+            // image to paste into another app is the only way to get
+            // the pixels out (Ctrl+C now does the same, but the
+            // floating bar is the discoverable path). Was buried in
+            // the overflow menu pre-fix.
+            if (widget.onCopy != null) ...[
+              _actionBtn(Icons.copy_rounded, Colors.blueGrey, widget.onCopy!, 'Copia'),
               _divider(),
             ],
             if (widget.onToggleLock != null) ...[
@@ -344,7 +345,11 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
               _actionBtn(Icons.delete_outline_rounded, Colors.red, widget.onDelete, 'Elimina'),
               _divider(),
             ],
-            // Overflow menu for less-used actions (comment, reflect, copy, cut)
+            // Overflow menu for less-used actions: bring-to-front,
+            // send-to-back, comment, reflect, cut. Z-order shuffle is
+            // rare enough that exposing the two big icons in the main
+            // bar wasted space (and crowded the bar above the cropped
+            // image — was harder to grab the resize handles).
             if (_hasOverflowActions()) ...[
               _buildOverflowMenu(),
               _divider(),
@@ -362,8 +367,9 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
 
   bool _hasOverflowActions() {
     return widget.onEditComment != null ||
+        widget.onBringToFront != null ||
+        widget.onSendToBack != null ||
         (widget.onFlipHorizontal != null && !widget.isLocked) ||
-        widget.onCopy != null ||
         (widget.onCut != null && !widget.isLocked);
   }
 
@@ -378,14 +384,17 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
           icon: Icon(Icons.more_vert_rounded, size: 18, color: inactiveIcon),
           onSelected: (value) {
             switch (value) {
+              case 'front':
+                widget.onBringToFront?.call();
+                break;
+              case 'back':
+                widget.onSendToBack?.call();
+                break;
               case 'comment':
                 widget.onEditComment?.call();
                 break;
               case 'flip':
                 widget.onFlipHorizontal?.call();
-                break;
-              case 'copy':
-                widget.onCopy?.call();
                 break;
               case 'cut':
                 widget.onCut?.call();
@@ -393,6 +402,24 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
             }
           },
           itemBuilder: (ctx) => [
+            if (widget.onBringToFront != null)
+              const PopupMenuItem<String>(
+                value: 'front',
+                child: Row(children: [
+                  Icon(Icons.flip_to_front_rounded, size: 18, color: Colors.indigo),
+                  SizedBox(width: 10),
+                  Text('In primo piano'),
+                ]),
+              ),
+            if (widget.onSendToBack != null)
+              const PopupMenuItem<String>(
+                value: 'back',
+                child: Row(children: [
+                  Icon(Icons.flip_to_back_rounded, size: 18, color: Colors.indigo),
+                  SizedBox(width: 10),
+                  Text('Dietro a tutto'),
+                ]),
+              ),
             if (widget.onEditComment != null)
               PopupMenuItem<String>(
                 value: 'comment',
@@ -417,15 +444,6 @@ class _ImageHandleOverlayState extends State<ImageHandleOverlay> {
                   ),
                   const SizedBox(width: 10),
                   Text(widget.isFlipped ? 'Rifletti H ✓' : 'Rifletti H'),
-                ]),
-              ),
-            if (widget.onCopy != null)
-              const PopupMenuItem<String>(
-                value: 'copy',
-                child: Row(children: [
-                  Icon(Icons.copy_rounded, size: 18, color: Colors.blueGrey),
-                  SizedBox(width: 10),
-                  Text('Copia'),
                 ]),
               ),
             if (widget.onCut != null && !widget.isLocked)

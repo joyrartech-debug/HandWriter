@@ -46,11 +46,12 @@ class AppConfig {
   static const String deltaSyncDir = '_delta/';
 
   // ── Canvas ──
-  // 2.2 matches GoodNotes "M" Fountain Pen and Notability Ink Pen
-  // defaults. 2.0 read as slightly anemic on 1080p+ displays once
-  // velocity-thinning kicked in (worst case dropped to ~1.26 px on
-  // fast strokes — hairline territory).
-  static const double defaultStrokeWidth = 2.2;
+  // 1.5 is the user-preferred fine handwriting default (matches a
+  // 0.5 mm fineliner at typical writing zoom). Tool-specific widths
+  // are remembered separately in CanvasNotifier and persisted in
+  // SharedPreferences, so each tool keeps its last chosen size across
+  // restarts.
+  static const double defaultStrokeWidth = 1.5;
   static const double minStrokeWidth = 0.5;
   static const double maxStrokeWidth = 20.0;
   static const double pressureSensitivity = 1.0;

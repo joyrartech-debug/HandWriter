@@ -97,6 +97,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   bool _popupOpen = false;
   final DockPosition _dockPosition = DockPosition.floating;
 
+  // ── Arrow-key hold acceleration ────────────────────────────────
+  // Tracks consecutive same-direction arrow presses so holding the
+  // key gradually jumps multiple pages per tick instead of one.
+  // Reset whenever the gap between events exceeds ~220 ms (typical
+  // OS key-repeat is ~30 Hz, so 220 ms gives a comfortable margin).
+  DateTime? _lastArrowAt;
+  int _lastArrowDir = 0; // -1 = left, 1 = right
+  int _arrowHoldCount = 0;
+
   // Long-press context menu for touch
   Timer? _longPressTimer;
   Offset _longPressGlobalPos = Offset.zero;
@@ -541,7 +550,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             if (s?.lassoSelection != null) {
               notif.copySelection();
             } else if (s?.selectedElementId != null) {
-              notif.copyElement(s!.selectedElementId!);
+              final elId = s!.selectedElementId!;
+              notif.copyElement(elId);
+              // Mirror image bytes to the system clipboard so paste in
+              // Word / browsers / other apps just works. Without this,
+              // Ctrl+C only filled the in-app cross-notebook clipboard
+              // and the user had to dig the floating menu's "Copia"
+              // entry for a real system-clipboard image copy.
+              unawaited(_copyImageElementToSystemClipboard(elId));
             } else {
               return KeyEventResult.ignored;
             }
@@ -597,12 +613,38 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
             event.logicalKey == LogicalKeyboardKey.pageUp;
         final isRight = event.logicalKey == LogicalKeyboardKey.arrowRight ||
             event.logicalKey == LogicalKeyboardKey.pageDown;
-        if (isLeft) {
-          notifier.prevPage();
-          return KeyEventResult.handled;
-        }
-        if (isRight) {
-          notifier.nextPage();
+        if (isLeft || isRight) {
+          // Hold-to-accelerate: each event within 220 ms of the last
+          // one is treated as a continued hold. After ~0.6 s we jump
+          // 2 pages per tick, after ~1.3 s 3 pages, after ~2 s 5
+          // pages. Reset on first press or after a 220 ms gap.
+          final now = DateTime.now();
+          final isContinuation = _lastArrowAt != null &&
+              _lastArrowDir == (isLeft ? -1 : 1) &&
+              now.difference(_lastArrowAt!).inMilliseconds < 220;
+          if (!isContinuation) {
+            _arrowHoldCount = 0;
+          }
+          _arrowHoldCount++;
+          _lastArrowAt = now;
+          _lastArrowDir = isLeft ? -1 : 1;
+          // Slower ramp than the typical OS key-repeat (~30 Hz) so a
+          // brief tap stays single-page even if the user happens to
+          // hit two keys close together.
+          final step = _arrowHoldCount < 6
+              ? 1
+              : _arrowHoldCount < 12
+                  ? 2
+                  : _arrowHoldCount < 20
+                      ? 3
+                      : 5;
+          for (int i = 0; i < step; i++) {
+            if (isLeft) {
+              notifier.prevPage();
+            } else {
+              notifier.nextPage();
+            }
+          }
           return KeyEventResult.handled;
         }
         if (event.logicalKey == LogicalKeyboardKey.home) {
@@ -652,9 +694,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       ref.read(canvasProvider.notifier).setTool(CanvasTool.pen);
       return KeyEventResult.handled;
     }
-    // E — eraser
+    // E — eraser (restores last picked sub-mode: per-stroke or per-area)
     if (event.logicalKey == LogicalKeyboardKey.keyE && !ctrl) {
-      ref.read(canvasProvider.notifier).setTool(CanvasTool.eraserStroke);
+      final n = ref.read(canvasProvider.notifier);
+      n.setTool(n.lastEraserMode);
       return KeyEventResult.handled;
     }
     // L — lasso select
@@ -675,11 +718,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // B — brush tool
     if (event.logicalKey == LogicalKeyboardKey.keyB && !ctrl) {
       ref.read(canvasProvider.notifier).setTool(CanvasTool.brush);
-      return KeyEventResult.handled;
-    }
-    // S (without Ctrl) — shape tool
-    if (event.logicalKey == LogicalKeyboardKey.keyS && !ctrl) {
-      ref.read(canvasProvider.notifier).setTool(CanvasTool.shape);
       return KeyEventResult.handled;
     }
 
@@ -2555,6 +2593,8 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                     onUndo: () => notifier.undo(),
                     onRedo: () => notifier.redo(),
                     onPagesTap: () => _showPageManager(canvasState),
+                    onAddPage: () =>
+                        ref.read(canvasProvider.notifier).addPage(),
                     onSymbolsTap: () =>
                         _showSymbolsDialog(_visibleCenterPagePos(canvasState)),
                     onExportTap: () => _showExportSheet(),
@@ -2595,6 +2635,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   child: HwFloatingDock(
                     currentTool: canvasState.currentTool,
                     activeInkColor: activeColor,
+                    lastEraserMode: notifier.lastEraserMode,
                     shapeGuess: canvasState.toolSettings.shapeRecognition,
                     onShapeGuessChanged: (v) {
                       notifier.setToolSettings(canvasState.toolSettings

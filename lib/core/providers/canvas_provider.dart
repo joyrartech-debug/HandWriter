@@ -77,6 +77,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// already cover. Walking 200 elements × 80 points per skipped
   /// sample dominated CPU on dense ink pages.
   Offset _lastEraseAtPos = const Offset(-1e9, -1e9);
+
+  /// Wall-clock start of the current eraser gesture. Used by [_eraseAt]
+  /// to grow the effective radius after the user has been holding the
+  /// gesture for a while — same affordance as macOS Notes / Apple
+  /// Pencil's "press harder to erase faster", without needing pressure
+  /// data which finger/mouse don't have.
+  DateTime? _eraseGestureStart;
   // 0.1 (was 0.3): the previous threshold was tuned for iPad 120 Hz
   // dense sub-mm samples but blocked legitimate slow erase drags on
   // graphics tablets (200-300 Hz) where each sample moves <1 page-unit.
@@ -375,7 +382,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// through Riverpod.
   final ValueNotifier<int> imageCacheVersion = ValueNotifier<int>(0);
 
-  CanvasNotifier(this._ref) : super(null);
+  /// Last eraser sub-mode the user explicitly picked. Tapping the
+  /// toolbar's eraser button restores THIS instead of always falling
+  /// back to eraserStroke — fixes the bug where eraser-area → pen →
+  /// eraser would reset back to eraser-stroke.
+  CanvasTool _lastEraserMode = CanvasTool.eraserStroke;
+  CanvasTool get lastEraserMode => _lastEraserMode;
+
+  /// Per-tool memory of (strokeWidth, color, opacity, eraserSize).
+  /// Restored when the user re-enters a tool, so changing tools no
+  /// longer resets the pen width back to the global default. Highlighter
+  /// has its own hardcoded defaults (12 px, 35% opacity, yellow) on
+  /// FIRST entry only — subsequent visits restore whatever the user
+  /// last set inside highlighter mode.
+  final Map<CanvasTool, ToolSettings> _toolPrefs = {};
+  ToolSettings? toolPrefFor(CanvasTool tool) => _toolPrefs[tool];
+
+  CanvasNotifier(this._ref) : super(null) {
+    // Restore per-tool preferences from SharedPreferences ASAP so the
+    // very first tool the user touches already shows the previous
+    // session's width/color/eraser size.
+    unawaited(_loadToolPrefs());
+  }
 
   void setViewportSize(Size size) {
     final wasNull = _viewportSize == null;
@@ -1444,40 +1472,64 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   void setTool(CanvasTool tool) {
     if (state == null) return;
-    
+
     // Bake any pending lasso transformations before switching tools
     if (tool != CanvasTool.lasso && state!.lassoSelection != null) {
       applySelectionTransform();
     }
 
-    // Auto-set highlighter to yellow; always restore pen defaults (width/opacity
-    // and color only when it was the default yellow) when leaving highlighter,
-    // so picking a custom color in highlighter mode doesn't leak into the pen.
-    ToolSettings? updatedSettings;
-    if (tool == CanvasTool.highlighter &&
-        state!.currentTool != CanvasTool.highlighter) {
-      updatedSettings = state!.toolSettings.copyWith(
-        color: state!.toolSettings.color == 0xFF000000
-            ? 0xFFFFEB3B
-            : state!.toolSettings.color,
+    final s = state!;
+    final fromTool = s.currentTool;
+
+    // Persist the OUTGOING tool's settings so the next visit restores
+    // them. Lasso/text/image/pan/laser don't have user-tunable settings,
+    // so we skip recording for those.
+    if (_toolHasSettings(fromTool)) {
+      _toolPrefs[fromTool] = s.toolSettings;
+    }
+
+    // Remember the eraser sub-mode the user just picked so the dock
+    // button restores it next time. Updated when the target is one of
+    // the eraser variants OR when leaving eraser (in which case the
+    // current value is already correct — no update needed).
+    if (tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke) {
+      _lastEraserMode = tool;
+    }
+
+    // Resolve the INCOMING tool's settings:
+    //   1) per-tool memory if we have one
+    //   2) tool-specific first-visit defaults (highlighter yellow/12 px/35 %)
+    //   3) fall back to whatever the current toolSettings hold (rare —
+    //      happens only for lasso/text/etc. that don't track settings).
+    ToolSettings updatedSettings = s.toolSettings;
+    final remembered = _toolPrefs[tool];
+    if (remembered != null) {
+      updatedSettings = remembered;
+    } else if (tool == CanvasTool.highlighter) {
+      updatedSettings = s.toolSettings.copyWith(
+        color: 0xFFFFEB3B,
         strokeWidth: 12.0,
         opacity: 0.35,
       );
-    } else if (state!.currentTool == CanvasTool.highlighter &&
-        tool != CanvasTool.highlighter) {
-      updatedSettings = state!.toolSettings.copyWith(
-        color: state!.toolSettings.color == 0xFFFFEB3B
-            ? 0xFF000000
-            : state!.toolSettings.color,
+    } else if (_toolHasSettings(tool)) {
+      // First visit to a pen-class tool — start with the global default
+      // width and full opacity, keeping whatever colour the user had on
+      // a previous pen-class tool (so pen → ballpoint stays the same
+      // colour when ballpoint has never been touched before).
+      updatedSettings = s.toolSettings.copyWith(
         strokeWidth: AppConfig.defaultStrokeWidth,
         opacity: 1.0,
+        color: s.toolSettings.color == 0xFFFFEB3B
+            ? 0xFF000000  // coming from highlighter default — neutralise
+            : s.toolSettings.color,
       );
     }
-    state = state!.copyWith(
+
+    state = s.copyWith(
       currentTool: tool,
-      toolSettings: updatedSettings ?? state!.toolSettings,
+      toolSettings: updatedSettings,
       clearLasso: tool != CanvasTool.lasso,
-      lassoPath: tool != CanvasTool.lasso ? const [] : state!.lassoPath,
+      lassoPath: tool != CanvasTool.lasso ? const [] : s.lassoPath,
       showToolOptions: false,
       activeStroke: [],
       clearShapeStart: true,
@@ -1486,6 +1538,83 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       clearRecognizedShape: true,
       isAdjustingRecognized: false,
     );
+    _persistToolPrefs();
+  }
+
+  /// Tools that have user-tunable settings worth remembering across
+  /// switches. Lasso/text/image/pan/laser/shape don't carry width/colour
+  /// state so they're omitted.
+  bool _toolHasSettings(CanvasTool t) {
+    return t == CanvasTool.pen ||
+        t == CanvasTool.ballpoint ||
+        t == CanvasTool.brush ||
+        t == CanvasTool.calligraphy ||
+        t == CanvasTool.highlighter ||
+        t == CanvasTool.eraserStandard ||
+        t == CanvasTool.eraserStroke;
+  }
+
+  Timer? _toolPrefsPersistDebounce;
+  /// Debounced persist of _toolPrefs to SharedPreferences. We don't need
+  /// to flush on every keystroke of the width slider — once the gesture
+  /// settles, write the JSON blob once.
+  void _persistToolPrefs() {
+    _toolPrefsPersistDebounce?.cancel();
+    _toolPrefsPersistDebounce =
+        Timer(const Duration(milliseconds: 600), () async {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final blob = <String, dynamic>{
+          'lastEraserMode': _lastEraserMode.name,
+          'tools': {
+            for (final e in _toolPrefs.entries)
+              e.key.name: {
+                'color': e.value.color,
+                'strokeWidth': e.value.strokeWidth,
+                'opacity': e.value.opacity,
+                'eraserSize': e.value.eraserSize.name,
+              },
+          },
+        };
+        await prefs.setString('canvas_tool_prefs_v1', jsonEncode(blob));
+      } catch (_) {/* non-critical */}
+    });
+  }
+
+  Future<void> _loadToolPrefs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('canvas_tool_prefs_v1');
+      if (raw == null || raw.isEmpty) return;
+      final blob = jsonDecode(raw) as Map<String, dynamic>;
+      final lastEr = blob['lastEraserMode'] as String?;
+      if (lastEr != null) {
+        _lastEraserMode = CanvasTool.values.firstWhere(
+          (t) => t.name == lastEr,
+          orElse: () => CanvasTool.eraserStroke,
+        );
+      }
+      final tools = blob['tools'] as Map<String, dynamic>?;
+      if (tools != null) {
+        tools.forEach((toolName, settings) {
+          final tool = CanvasTool.values.firstWhere(
+            (t) => t.name == toolName,
+            orElse: () => CanvasTool.pen,
+          );
+          final s = settings as Map<String, dynamic>;
+          _toolPrefs[tool] = ToolSettings(
+            color: s['color'] as int? ?? 0xFF000000,
+            strokeWidth:
+                (s['strokeWidth'] as num?)?.toDouble() ?? AppConfig.defaultStrokeWidth,
+            opacity: (s['opacity'] as num?)?.toDouble() ?? 1.0,
+            eraserSize: EraserSize.values.firstWhere(
+              (e) => e.name == (s['eraserSize'] as String?),
+              orElse: () => EraserSize.medium,
+            ),
+          );
+        });
+      }
+    } catch (_) {/* non-critical */}
   }
 
   void toggleToolOptions() {
@@ -1496,6 +1625,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void setToolSettings(ToolSettings settings) {
     if (state == null) return;
     state = state!.copyWith(toolSettings: settings);
+    _rememberToolPref();
   }
 
   void setColor(int color) {
@@ -1504,12 +1634,26 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(
       toolSettings: state!.toolSettings.copyWith(color: color),
     );
+    _rememberToolPref();
+  }
+
+  /// Snapshot the current toolSettings into the per-tool memory and
+  /// schedule a persist. Called whenever the user tweaks width / color /
+  /// opacity / eraser size for the active tool so the next tool switch
+  /// (and the next app launch) can restore those exact values.
+  void _rememberToolPref() {
+    final s = state;
+    if (s == null) return;
+    if (!_toolHasSettings(s.currentTool)) return;
+    _toolPrefs[s.currentTool] = s.toolSettings;
+    _persistToolPrefs();
   }
 
   /// Cancel the current stroke without committing (e.g. when pinch-to-zoom starts)
   void cancelStroke() {
     if (state == null) return;
     _eraserUndoPushed = false;
+    _eraseGestureStart = null;
     state = state!.copyWith(
       activeStroke: [],
       clearShapeStart: true,
@@ -1524,6 +1668,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(
       toolSettings: state!.toolSettings.copyWith(strokeWidth: width),
     );
+    _rememberToolPref();
   }
 
   void setEraserSize(EraserSize size) {
@@ -1532,6 +1677,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = state!.copyWith(
       toolSettings: state!.toolSettings.copyWith(eraserSize: size),
     );
+    _rememberToolPref();
   }
 
   void toggleShapeRecognition() {
@@ -1603,6 +1749,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (tool == CanvasTool.eraserStandard || tool == CanvasTool.eraserStroke) {
       _eraserUndoPushed = false; // Reset at start of each eraser gesture
       _lastEraseAtPos = const Offset(-1e9, -1e9); // unfreeze dist-throttle
+      _eraseGestureStart = DateTime.now(); // for progressive growth
       state = state!.copyWith(eraserCursorPos: position);
       _eraseAt(position);
       return;
@@ -1678,6 +1825,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       if (_pendingErasePage != null) {
         _flushPendingErase();
       }
+      _eraseGestureStart = null; // reset progressive-growth timer
       state = state!.copyWith(clearEraserCursor: true);
       return;
     }
@@ -2502,7 +2650,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   void _eraseAt(Offset position) {
     if (state == null) return;
     final s = state!;
-    final eraseRadius = eraserSizeToRadius(s.toolSettings.eraserSize);
+    // Base radius from the user's eraser-size pref, scaled up after a
+    // sustained gesture. Curve: starts at 1.0, ramps to ~2.5 over 5 s
+    // of continuous drawing, then caps. The user keeps moving →
+    // effective radius keeps growing, so "wipe everything in this
+    // region" works without flipping size from the popup.
+    final base = eraserSizeToRadius(s.toolSettings.eraserSize);
+    final startedAt = _eraseGestureStart;
+    double growth = 1.0;
+    if (startedAt != null) {
+      final secs = DateTime.now().difference(startedAt).inMilliseconds / 1000;
+      // Linear up to 5 s, capped at 2.5×. Gesture under ~0.8 s leaves
+      // growth ≈ 1.05 — imperceptible, doesn't surprise the user on
+      // quick taps.
+      growth = (1.0 + secs * 0.30).clamp(1.0, 2.5);
+    }
+    final eraseRadius = base * growth;
     // Sub-radius movement check: any element a closer-spaced previous
     // sample might erase is also reachable from this near-identical
     // position, so skip the O(elements × points) scan entirely.

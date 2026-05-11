@@ -24,6 +24,7 @@ class HwEditorTopBar extends StatelessWidget {
   final VoidCallback? onUndo;
   final VoidCallback? onRedo;
   final VoidCallback? onPagesTap;
+  final VoidCallback? onAddPage;
   final VoidCallback? onSymbolsTap;
   final VoidCallback? onExportTap;
   final VoidCallback? onMoreTap;
@@ -42,6 +43,7 @@ class HwEditorTopBar extends StatelessWidget {
     this.onUndo,
     this.onRedo,
     this.onPagesTap,
+    this.onAddPage,
     this.onSymbolsTap,
     this.onExportTap,
     this.onMoreTap,
@@ -164,6 +166,12 @@ class HwEditorTopBar extends StatelessWidget {
                 onPressed: onPagesTap,
                 tooltip: 'Tutte le pagine',
               ),
+            if (onAddPage != null)
+              HwButton.icon(
+                icon: const HwIcon('plus', size: 16),
+                tooltip: 'Aggiungi pagina',
+                onPressed: onAddPage,
+              ),
             // Secondary actions: keep visible on wide, fold into the
             // overflow menu on compact.
             if (!isCompact) ...[
@@ -262,6 +270,11 @@ class HwFloatingDock extends StatelessWidget {
   final DockPosition position;
   final bool shapeGuess;
   final ValueChanged<bool> onShapeGuessChanged;
+  /// Last eraser sub-mode the user picked (per-stroke vs per-area). The
+  /// dock's eraser button activates THIS instead of always defaulting
+  /// to `eraserStroke`, so going pen → eraser → pen → eraser keeps the
+  /// area mode the user just chose.
+  final CanvasTool lastEraserMode;
 
   const HwFloatingDock({
     super.key,
@@ -271,6 +284,7 @@ class HwFloatingDock extends StatelessWidget {
     required this.activeInkColor,
     required this.shapeGuess,
     required this.onShapeGuessChanged,
+    this.lastEraserMode = CanvasTool.eraserStroke,
     this.position = DockPosition.floating,
   });
 
@@ -291,19 +305,19 @@ class HwFloatingDock extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           _toolBtn(context, CanvasTool.pen, 'pen', 'Penna · P'),
-          _toolBtn(
-              context, CanvasTool.calligraphy, 'calligraphy', 'Calligrafia'),
           _toolBtn(context, CanvasTool.highlighter, 'highlighter',
               'Evidenziatore'),
           _gap(isVert, context),
-          // Default eraser is "per stroke" — full-stroke removal is what
-          // the user reaches for most often. The popup still lets them
-          // flip to per-area mode.
-          _toolBtn(
-              context, CanvasTool.eraserStroke, 'eraser', 'Gomma · E'),
+          // Eraser button restores whichever sub-mode (per-stroke or
+          // per-area) the user picked last. `lastEraserMode` is the
+          // memory; flipping it happens in CanvasNotifier.setTool
+          // whenever the user explicitly chooses one variant via the
+          // popup. Tapping this dock button when eraser is NOT active
+          // restores that memory; tapping it when active opens the
+          // popup so the user can flip.
+          _toolBtn(context, lastEraserMode, 'eraser', 'Gomma · E'),
           _toolBtn(context, CanvasTool.lasso, 'lasso', 'Lasso · L'),
           _toolBtn(context, CanvasTool.text, 'text', 'Testo · T'),
-          _toolBtn(context, CanvasTool.shape, 'shape', 'Forma · S'),
           _toolBtn(context, CanvasTool.laser, 'laser', 'Laser'),
           _toolBtn(context, CanvasTool.pan, 'hand', 'Mano · H'),
           _gap(isVert, context),
