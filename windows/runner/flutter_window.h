@@ -57,22 +57,14 @@ class FlutterWindow : public Win32Window {
   // button is pressed.
   bool last_tip_in_contact_ = false;
   bool pen_gesture_active_ = false;
-  // Diagnostic: last seen `penFlags` and the relevant subset of
-  // `pointerInfo.pointerFlags` (buttons + INCONTACT + INRANGE).
-  // Forwarded on every transition so investigating an off-brand
-  // tablet's button mapping (e.g. Gaomon upper barrel without the
-  // official driver) only needs the user to press the button and
-  // send the log — we see exactly which bit moves.
-  uint32_t last_pen_flags_ = 0;
-  uint32_t last_pointer_state_ = 0;
-  // Upper-barrel latch for Gaomon-class driverless tablets: the
-  // upper side button on those drivers sets POINTER_FLAG_FIRSTBUTTON
-  // in the pen WM_POINTER stream WITHOUT POINTER_FLAG_INCONTACT (a
-  // real tip touch sets both). When we see that combo we latch it
-  // here and pretend PEN_FLAG_INVERTED was set, so the existing
-  // `inverted` override (eraser) path triggers. The latch survives
-  // the user touching the tip mid-gesture (both bits set) and only
-  // clears when FIRSTBUTTON drops.
+  // Upper-barrel latch for Gaomon-class driverless tablets: their
+  // upper side button reports identically to a real tip touch in
+  // `pointerFlags` (FIRSTBUTTON + INCONTACT both set), but with
+  // `pen_info.pressure == 0` — a real tip touch always registers
+  // non-zero pressure (even a feather-light tap reads ~30-150 /
+  // 1024). We latch on the FIRSTBUTTON 0→1 transition when pressure
+  // is zero, hold until FIRSTBUTTON drops, and OR the latch into
+  // `inverted_now` so the existing eraser override path triggers.
   bool last_first_button_pen_ = false;
   bool upper_button_latched_ = false;
   // HWND of the Flutter view child window we subclass to intercept
@@ -85,9 +77,6 @@ class FlutterWindow : public Win32Window {
   void NotifyBarrelChange(const std::string& button, bool down);
   void NotifyBarrelPen(const std::string& phase, double x, double y,
                        double pressure);
-  void NotifyPenFlagsChange(uint32_t pen_flags, uint32_t pointer_flags,
-                            uint32_t msg, uint32_t button_change_type,
-                            uint32_t pressure, int32_t input_data);
 
   static LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg,
                                             WPARAM wparam, LPARAM lparam,

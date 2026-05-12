@@ -288,32 +288,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       onBarrel: (down) => _onNativeBarrelChange(_NativeBarrel.lower, down),
       onInverted: (down) => _onNativeBarrelChange(_NativeBarrel.upper, down),
       onBarrelPen: _onBarrelPen,
-      onPenFlagsChange: (penFlags, pointerFlags, msg, buttonChange, pressure,
-          inputData) {
-        // Decode WM_POINTER* message id into a short name for the log.
-        String msgName;
-        switch (msg) {
-          case 0x0245:
-            msgName = 'UPDATE';
-            break;
-          case 0x0246:
-            msgName = 'DOWN';
-            break;
-          case 0x0247:
-            msgName = 'UP';
-            break;
-          default:
-            msgName = 'msg=0x${msg.toRadixString(16)}';
-        }
-        unawaited(CrashLogger.append(
-          '[BarrelTip] FLAGS msg=$msgName '
-          'pen=0x${penFlags.toRadixString(16)} '
-          'ptr=0x${pointerFlags.toRadixString(16)} '
-          'btnChg=$buttonChange '
-          'pressure=$pressure '
-          'inputData=$inputData',
-        ));
-      },
     );
   }
 
@@ -346,10 +320,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   /// a side button. Press = save the current tool and switch to the
   /// override target; release = restore.
   void _onNativeBarrelChange(_NativeBarrel button, bool down) {
-    unawaited(CrashLogger.append(
-      '[BarrelTip] BRIDGE button=${button.name} down=$down '
-      'prevActive=${_activeNativeBarrel?.name ?? "none"}',
-    ));
     if (!mounted) return;
     final notif = ref.read(canvasProvider.notifier);
     final state = ref.read(canvasProvider);
@@ -440,11 +410,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   /// as "global". We convert to canvas-local via `_canvasStackKey`'s
   /// RenderBox, then to page coords via `_toPageCoords`.
   void _onBarrelPen(String phase, Offset clientPos, double pressure) {
-    unawaited(CrashLogger.append(
-      '[BarrelTip] BRIDGE_PEN phase=$phase pos=$clientPos pressure=${pressure.toStringAsFixed(2)} '
-      'bridgeTool=${_bridgePenTool?.name ?? "none"} '
-      'activeBarrel=${_activeNativeBarrel?.name ?? "none"}',
-    ));
     if (!mounted) return;
     final box = _canvasStackKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || !box.attached) return;
@@ -1257,21 +1222,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
-    // Log every stylus/mouse-with-buttons down regardless of barrel
-    // state — gating on _activeNativeBarrel hides the case where the
-    // bridge never fires.
-    if (event.kind == PointerDeviceKind.stylus ||
-        event.kind == PointerDeviceKind.invertedStylus ||
-        (event.kind == PointerDeviceKind.mouse && event.buttons != 0)) {
-      unawaited(CrashLogger.append(
-        '[BarrelTip] DOWN kind=${event.kind.name} '
-        'buttons=0x${event.buttons.toRadixString(16)} '
-        'p=${event.pressure.toStringAsFixed(2)} '
-        'pid=${event.pointer} activePtrs=$_activePointers '
-        'tool=${state.currentTool.name} '
-        'activeBarrel=${_activeNativeBarrel?.name ?? "none"}',
-      ));
-    }
     // Gaomon driverless: barrel-held + tip-contact arrives as a
     // synth mouse event in parallel with the suppressed pen stream.
     // For the lower barrel it's WM_MBUTTONDOWN (kind=mouse,
@@ -1286,10 +1236,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         event.buttons != 0 &&
         _activeNativeBarrel != null) {
       _suppressedSynthBarrelPointers.add(event.pointer);
-      unawaited(CrashLogger.append(
-        '[BarrelTip]   suppressed synth-mouse '
-        'buttons=0x${event.buttons.toRadixString(16)}',
-      ));
       return;
     }
     _activePointers++;
@@ -1678,11 +1624,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // path already contains its first point — the user perceives this as the
     // new lasso "starting offset" from the true touch location.
     if (tool == CanvasTool.lasso) {
-      if (_activeNativeBarrel != null) {
-        unawaited(CrashLogger.append(
-          '[BarrelTip]   LASSO branch reached, start at $pagePos',
-        ));
-      }
       ref.read(canvasProvider.notifier).clearLassoPath(); // bake previous + reset provider path
       _lassoPathNotifier.start(pagePos);
       return;
@@ -1702,20 +1643,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerMove(PointerMoveEvent event, CanvasState state, Size canvasSize) {
-    if (event.kind == PointerDeviceKind.stylus ||
-        event.kind == PointerDeviceKind.invertedStylus ||
-        (event.kind == PointerDeviceKind.mouse && event.buttons != 0)) {
-      unawaited(CrashLogger.append(
-        '[BarrelTip] MOVE kind=${event.kind.name} '
-        'buttons=0x${event.buttons.toRadixString(16)} '
-        'p=${event.pressure.toStringAsFixed(2)} '
-        'pid=${event.pointer} activePtrs=$_activePointers '
-        'tool=${state.currentTool.name} '
-        'activeBarrel=${_activeNativeBarrel?.name ?? "none"} '
-        'lassoActive=${_lassoPathNotifier.isActive} '
-        'lassoPts=${_lassoPathNotifier.points.length}',
-      ));
-    }
     if (_suppressedSynthBarrelPointers.contains(event.pointer)) return;
     if (_activePointers >= 2) return;
 
@@ -1863,11 +1790,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onLassoPointerMove(Offset pagePos) {
-    if (_activeNativeBarrel != null) {
-      unawaited(CrashLogger.append(
-        '[BarrelTip]   ADDPOINT $pagePos active=${_lassoPathNotifier.isActive}',
-      ));
-    }
     if (!_lassoPathNotifier.isActive) return;
     _lassoPathNotifier.addPoint(pagePos);
   }
@@ -1893,17 +1815,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerUp(PointerUpEvent event) {
-    if (event.kind == PointerDeviceKind.stylus ||
-        event.kind == PointerDeviceKind.invertedStylus ||
-        event.kind == PointerDeviceKind.mouse) {
-      unawaited(CrashLogger.append(
-        '[BarrelTip] UP kind=${event.kind.name} pid=${event.pointer} '
-        'activePtrs=$_activePointers '
-        'activeBarrel=${_activeNativeBarrel?.name ?? "none"} '
-        'lassoActive=${_lassoPathNotifier.isActive} '
-        'lassoPts=${_lassoPathNotifier.points.length}',
-      ));
-    }
     // Matching cleanup for the synth-mouse pointer suppressed in
     // `_onPointerDown` — never bumped `_activePointers`, so don't
     // decrement it here either.
@@ -3296,15 +3207,6 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   onPointerMove: (e) {
                     final live = ref.read(canvasProvider) ?? canvasState;
                     _onPointerMove(e, live, canvasSize);
-                  },
-                  onPointerHover: (e) {
-                    if (_activeNativeBarrel != null) {
-                      unawaited(CrashLogger.append(
-                        '[BarrelTip] HOVER kind=${e.kind.name} '
-                        'buttons=0x${e.buttons.toRadixString(16)} '
-                        'pid=${e.pointer}',
-                      ));
-                    }
                   },
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
