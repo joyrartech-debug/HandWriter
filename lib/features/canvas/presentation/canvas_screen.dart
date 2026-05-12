@@ -1220,22 +1220,24 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         'activeBarrel=${_activeNativeBarrel?.name ?? "none"}',
       ));
     }
-    // Gaomon driverless: barrel-held + tip-contact arrives as TWO
-    // parallel Flutter pointers — the real pen via WM_POINTER
-    // (kind=stylus) AND a synth WM_MBUTTONDOWN (kind=mouse,
-    // buttons=0x4). The synth is the driver's way of exposing the
-    // gesture as a "right click" to legacy apps; we have no use for
-    // it because the C++ barrel bridge already switched the tool and
-    // the stylus stream carries all the contact data we need. Drop
-    // the synth pointer here so `_activePointers` stays at 1 and the
-    // multi-touch guard in `_onPointerMove` doesn't eat every move
-    // — without this the lasso path starts at the down position and
-    // then never accumulates points, so nothing visible appears.
+    // Gaomon driverless: barrel-held + tip-contact arrives as a
+    // synth mouse event in parallel with the suppressed pen stream.
+    // For the lower barrel it's WM_MBUTTONDOWN (kind=mouse,
+    // buttons=0x4 = middle); for the upper barrel it's
+    // WM_LBUTTONDOWN (kind=mouse, buttons=0x1 = left). Either way
+    // the C++ bridge has already switched tool and is driving the
+    // gesture via `_onBarrelPen` — we don't want the synth click
+    // ALSO landing in the regular pointer flow (would start a
+    // phantom stroke / pan at the cursor location). Drop any
+    // non-zero-button mouse DOWN while a barrel override is active.
     if (event.kind == PointerDeviceKind.mouse &&
-        event.buttons == kMiddleMouseButton &&
+        event.buttons != 0 &&
         _activeNativeBarrel != null) {
       _suppressedSynthBarrelPointers.add(event.pointer);
-      unawaited(CrashLogger.append('[BarrelTip]   suppressed synth-mouse'));
+      unawaited(CrashLogger.append(
+        '[BarrelTip]   suppressed synth-mouse '
+        'buttons=0x${event.buttons.toRadixString(16)}',
+      ));
       return;
     }
     _activePointers++;

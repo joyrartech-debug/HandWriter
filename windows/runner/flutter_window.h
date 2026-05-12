@@ -57,14 +57,24 @@ class FlutterWindow : public Win32Window {
   // button is pressed.
   bool last_tip_in_contact_ = false;
   bool pen_gesture_active_ = false;
-  // Diagnostic: last seen `penFlags` and the button subset of
-  // `pointerInfo.pointerFlags` (FIRST/SECOND/THIRD/FOURTH/FIFTH).
+  // Diagnostic: last seen `penFlags` and the relevant subset of
+  // `pointerInfo.pointerFlags` (buttons + INCONTACT + INRANGE).
   // Forwarded on every transition so investigating an off-brand
   // tablet's button mapping (e.g. Gaomon upper barrel without the
   // official driver) only needs the user to press the button and
   // send the log — we see exactly which bit moves.
   uint32_t last_pen_flags_ = 0;
-  uint32_t last_pointer_button_flags_ = 0;
+  uint32_t last_pointer_state_ = 0;
+  // Upper-barrel latch for Gaomon-class driverless tablets: the
+  // upper side button on those drivers sets POINTER_FLAG_FIRSTBUTTON
+  // in the pen WM_POINTER stream WITHOUT POINTER_FLAG_INCONTACT (a
+  // real tip touch sets both). When we see that combo we latch it
+  // here and pretend PEN_FLAG_INVERTED was set, so the existing
+  // `inverted` override (eraser) path triggers. The latch survives
+  // the user touching the tip mid-gesture (both bits set) and only
+  // clears when FIRSTBUTTON drops.
+  bool last_first_button_pen_ = false;
+  bool upper_button_latched_ = false;
   // HWND of the Flutter view child window we subclass to intercept
   // WM_POINTER*. Pointer events on Windows are delivered to the
   // window UNDER the cursor — that's the Flutter renderer child,

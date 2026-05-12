@@ -147,28 +147,47 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
   // standard WM_POINTERUPDATE stream, even when the pen is just
   // hovering (no tip contact) over the window.
   const bool barrel_now = (pen_info.penFlags & PEN_FLAG_BARREL) != 0;
-  const bool inverted_now = (pen_info.penFlags & PEN_FLAG_INVERTED) != 0;
   const bool tip_in_contact =
       (pen_info.pointerInfo.pointerFlags & POINTER_FLAG_INCONTACT) != 0;
+  const bool first_button_pen =
+      (pen_info.pointerInfo.pointerFlags & POINTER_FLAG_FIRSTBUTTON) != 0;
   last_pen_pointer_id_ = pointer_id;
 
-  // Diagnostic: forward any `penFlags` or button-bit transition so we
-  // can see, from the log file alone, which bit (if any) a tablet's
-  // upper barrel actually toggles. Costs one MethodChannel call per
-  // real transition — hover noise is filtered out because the mask
-  // only includes meaningful state bits.
-  const uint32_t pointer_button_mask =
+  // Diagnostic: forward any `penFlags` transition OR a transition of
+  // the relevant `pointerInfo.pointerFlags` subset (buttons +
+  // INCONTACT + INRANGE) so we can see, from the log file alone,
+  // which bit (if any) a tablet's upper barrel actually toggles.
+  const uint32_t pointer_state_mask =
       POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_SECONDBUTTON |
       POINTER_FLAG_THIRDBUTTON | POINTER_FLAG_FOURTHBUTTON |
-      POINTER_FLAG_FIFTHBUTTON;
-  const uint32_t pointer_button_flags =
-      pen_info.pointerInfo.pointerFlags & pointer_button_mask;
+      POINTER_FLAG_FIFTHBUTTON | POINTER_FLAG_INCONTACT |
+      POINTER_FLAG_INRANGE;
+  const uint32_t pointer_state =
+      pen_info.pointerInfo.pointerFlags & pointer_state_mask;
   if (pen_info.penFlags != last_pen_flags_ ||
-      pointer_button_flags != last_pointer_button_flags_) {
-    NotifyPenFlagsChange(pen_info.penFlags, pointer_button_flags);
+      pointer_state != last_pointer_state_) {
+    NotifyPenFlagsChange(pen_info.penFlags, pointer_state);
     last_pen_flags_ = pen_info.penFlags;
-    last_pointer_button_flags_ = pointer_button_flags;
+    last_pointer_state_ = pointer_state;
   }
+
+  // Latch the Gaomon-driverless upper-barrel state. Only LATCH when
+  // FIRSTBUTTON transitions from 0→1 with the tip NOT in contact —
+  // that combo never happens for a real tip touch (which would also
+  // set INCONTACT) so it uniquely identifies the upper barrel on
+  // driver setups that don't expose PEN_FLAG_INVERTED. Once latched,
+  // we keep the override alive until FIRSTBUTTON drops, even if the
+  // user touches the tip mid-gesture (both bits set then).
+  if (first_button_pen && !last_first_button_pen_ && !tip_in_contact) {
+    upper_button_latched_ = true;
+  }
+  if (!first_button_pen) {
+    upper_button_latched_ = false;
+  }
+  last_first_button_pen_ = first_button_pen;
+
+  const bool inverted_now =
+      ((pen_info.penFlags & PEN_FLAG_INVERTED) != 0) || upper_button_latched_;
 
   // Compute current logical client coordinates once — used for any
   // pen-gesture phase we forward below.
