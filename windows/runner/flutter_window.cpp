@@ -171,7 +171,7 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
                          static_cast<uint32_t>(
                              pen_info.pointerInfo.ButtonChangeType),
                          pen_info.pressure,
-                         pen_info.pointerInfo.inputData);
+                         pen_info.pointerInfo.InputData);
     last_pen_flags_ = pen_info.penFlags;
     last_pointer_state_ = pen_info.pointerInfo.pointerFlags;
   }
