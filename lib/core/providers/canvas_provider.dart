@@ -4737,6 +4737,61 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Public read-only view of [_corruptAssetIds] for UI consumers.
   Set<String> get corruptAssetIds => _corruptAssetIds;
 
+  /// Tracks per-session asset IDs that have already been the target of
+  /// a one-shot fresh-fetch attempt. Without this we'd loop pulling
+  /// the same asset every paint frame if the server bytes are STILL
+  /// corrupt (the failure path re-fires every paint).
+  final Set<String> _healAttempted = <String>{};
+
+  /// One-shot heal: pull fresh bytes for [assetId] from the delta
+  /// folder and, if they decode this time, write them into state +
+  /// remove the corrupt flag. Called from [_decodeAndCacheImage]'s
+  /// failure branch so a user who re-imported the source on another
+  /// device gets the fix automatically on the affected device's next
+  /// paint instead of having to wait for a sync round-trip.
+  Future<void> _healCorruptAsset(String assetId, String ownerNotebookId) async {
+    try {
+      final syncService = _ref.read(syncServiceProvider);
+      if (syncService == null) return;
+      final fresh = await syncService.downloadDeltaAsset(
+          ownerNotebookId, assetId);
+      if (_disposed ||
+          state == null ||
+          state!.metadata.id != ownerNotebookId) {
+        return;
+      }
+      final existing = state!.assetBytes[assetId];
+      if (existing != null &&
+          existing.length == fresh.length &&
+          _bytesEqual(existing, fresh)) {
+        // Same corrupt bytes — server still poisoned. Keep the flag.
+        return;
+      }
+      // New bytes — replace and retry decode. _decodeAndCacheImage
+      // clears _corruptAssetIds on success.
+      final mergedAssets =
+          Map<String, Uint8List>.from(state!.assetBytes);
+      mergedAssets[assetId] = fresh;
+      state = state!.copyWith(assetBytes: mergedAssets);
+      // Mark the notebook dirty so the next save persists the fresh
+      // bytes into the on-disk ZIP — otherwise a fresh app launch
+      // hits the stale ZIP cache again.
+      // (state.copyWith already sets isDirty via the asset write —
+      // belt-and-braces.)
+      await _decodeAndCacheImage(assetId, fresh);
+    } catch (_) {
+      // Network blip / server-side 404 / etc — keep corrupt flag.
+    }
+  }
+
+  bool _bytesEqual(Uint8List a, Uint8List b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
   /// AssetIds whose decode is currently in flight. Used to prevent two
   /// parallel decodes from racing — priority loop and background loop can
   /// both fire `_decodeAndCacheImage(assetId, bytes)` for the same id, and
@@ -4801,6 +4856,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           // Bump the version so the painter repaints (corruptAssetIds
           // membership controls the placeholder render path).
           imageCacheVersion.value++;
+        }
+        // ── Auto-heal ──
+        // If another device re-uploaded clean bytes for this asset
+        // (after the user manually re-imported the source PDF/image
+        // from a different machine), the server now has good bytes
+        // but our local copy is the truncated leftover. Try a
+        // one-shot fresh fetch from the delta folder; on success
+        // replace the cached bytes and retry the decode.
+        // Throttled to once per asset per session via _healAttempted
+        // so we don't loop on assets the server STILL has corrupt.
+        if (_healAttempted.add(assetId)) {
+          unawaited(_healCorruptAsset(assetId, ownerNotebookId));
         }
       }
     } finally {
