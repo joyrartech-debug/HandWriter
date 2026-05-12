@@ -283,6 +283,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     _watchForPendingImport();
     // Hook the Windows-side pen-button bridge. No-op on other
     // platforms. See PenInputChannel for why this exists.
+    _watchForLassoCleared();
     PenInputChannel.register(
       onBarrel: (down) => _onNativeBarrelChange(_NativeBarrel.lower, down),
       onInverted: (down) => _onNativeBarrelChange(_NativeBarrel.upper, down),
@@ -377,23 +378,54 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       // firing twice or a transient flap.
       if (_activeNativeBarrel != button) return;
       _activeNativeBarrel = null;
-      final prev = _nativeBarrelPreviousTool;
-      _nativeBarrelPreviousTool = null;
       // If the lower-barrel lasso override just committed a real
       // selection (polygon caught at least one element), stay in
       // lasso so the user can manipulate it — drag / scale / rotate
       // / duplicate / delete. Restoring the previous tool here would
       // run `setTool(prev)`, whose `clearLasso: tool != lasso`
       // copyWith wipes `lassoSelection` and the marquee visibly
-      // disappears the instant the user releases the barrel. The
-      // user falls back to writing by tapping the pen tool in the
-      // toolbar, which dismisses the selection at the same time.
+      // disappears the instant the user releases the barrel. We
+      // KEEP `_nativeBarrelPreviousTool` set in that case — the
+      // `_watchForLassoCleared` listener restores the tool when the
+      // user eventually deselects (tap outside / clearSelection /
+      // anything that nulls `lassoSelection`).
       final live = ref.read(canvasProvider);
       final keepLassoForSelection = button == _NativeBarrel.lower &&
           live?.lassoSelection != null;
       if (keepLassoForSelection) return;
+      final prev = _nativeBarrelPreviousTool;
+      _nativeBarrelPreviousTool = null;
       if (prev != null) notif.setTool(prev);
     }
+  }
+
+  /// Restore the previous tool when a barrel-driven lasso selection
+  /// is cleared. The barrel-release path intentionally keeps the user
+  /// in lasso mode while `lassoSelection != null` so the marquee is
+  /// interactive (drag / scale / duplicate). When the user finally
+  /// deselects — by tapping outside the marquee, by `clearSelection`,
+  /// by undo, by any path that nulls `lassoSelection` — we want the
+  /// tool to fall back to whatever they were using before the barrel
+  /// press (typically the pen), instead of leaving them stuck in lasso.
+  ///
+  /// The guard `_activeNativeBarrel == null` ensures we only fire in
+  /// the "post-release, selection visible" state: a barrel still held
+  /// means the user is mid-gesture and the normal release path will
+  /// own the restoration when they let go.
+  void _watchForLassoCleared() {
+    ref.listenManual<LassoSelection?>(
+      canvasProvider.select((s) => s?.lassoSelection),
+      (prev, next) {
+        if (prev != null &&
+            next == null &&
+            _activeNativeBarrel == null &&
+            _nativeBarrelPreviousTool != null) {
+          final tool = _nativeBarrelPreviousTool!;
+          _nativeBarrelPreviousTool = null;
+          ref.read(canvasProvider.notifier).setTool(tool);
+        }
+      },
+    );
   }
 
   /// Called by the WM_POINTER bridge while a side button is held and
