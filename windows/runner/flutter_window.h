@@ -57,6 +57,14 @@ class FlutterWindow : public Win32Window {
   // button is pressed.
   bool last_tip_in_contact_ = false;
   bool pen_gesture_active_ = false;
+  // Diagnostic: last seen `penFlags` and the button subset of
+  // `pointerInfo.pointerFlags` (FIRST/SECOND/THIRD/FOURTH/FIFTH).
+  // Forwarded on every transition so investigating an off-brand
+  // tablet's button mapping (e.g. Gaomon upper barrel without the
+  // official driver) only needs the user to press the button and
+  // send the log — we see exactly which bit moves.
+  uint32_t last_pen_flags_ = 0;
+  uint32_t last_pointer_button_flags_ = 0;
   // HWND of the Flutter view child window we subclass to intercept
   // WM_POINTER*. Pointer events on Windows are delivered to the
   // window UNDER the cursor — that's the Flutter renderer child,
@@ -67,6 +75,7 @@ class FlutterWindow : public Win32Window {
   void NotifyBarrelChange(const std::string& button, bool down);
   void NotifyBarrelPen(const std::string& phase, double x, double y,
                        double pressure);
+  void NotifyPenFlagsChange(uint32_t pen_flags, uint32_t pointer_flags);
 
   static LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg,
                                             WPARAM wparam, LPARAM lparam,

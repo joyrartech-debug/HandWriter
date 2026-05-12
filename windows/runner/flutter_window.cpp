@@ -152,6 +152,24 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
       (pen_info.pointerInfo.pointerFlags & POINTER_FLAG_INCONTACT) != 0;
   last_pen_pointer_id_ = pointer_id;
 
+  // Diagnostic: forward any `penFlags` or button-bit transition so we
+  // can see, from the log file alone, which bit (if any) a tablet's
+  // upper barrel actually toggles. Costs one MethodChannel call per
+  // real transition — hover noise is filtered out because the mask
+  // only includes meaningful state bits.
+  const uint32_t pointer_button_mask =
+      POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_SECONDBUTTON |
+      POINTER_FLAG_THIRDBUTTON | POINTER_FLAG_FOURTHBUTTON |
+      POINTER_FLAG_FIFTHBUTTON;
+  const uint32_t pointer_button_flags =
+      pen_info.pointerInfo.pointerFlags & pointer_button_mask;
+  if (pen_info.penFlags != last_pen_flags_ ||
+      pointer_button_flags != last_pointer_button_flags_) {
+    NotifyPenFlagsChange(pen_info.penFlags, pointer_button_flags);
+    last_pen_flags_ = pen_info.penFlags;
+    last_pointer_button_flags_ = pointer_button_flags;
+  }
+
   // Compute current logical client coordinates once — used for any
   // pen-gesture phase we forward below.
   POINT pt = pen_info.pointerInfo.ptPixelLocation;
@@ -221,6 +239,20 @@ void FlutterWindow::NotifyBarrelChange(const std::string& button, bool down) {
   };
   pen_channel_->InvokeMethod(
       "onBarrelChange",
+      std::make_unique<flutter::EncodableValue>(args));
+}
+
+void FlutterWindow::NotifyPenFlagsChange(uint32_t pen_flags,
+                                         uint32_t pointer_flags) {
+  if (!pen_channel_) return;
+  flutter::EncodableMap args = {
+      {flutter::EncodableValue("penFlags"),
+       flutter::EncodableValue(static_cast<int64_t>(pen_flags))},
+      {flutter::EncodableValue("pointerFlags"),
+       flutter::EncodableValue(static_cast<int64_t>(pointer_flags))},
+  };
+  pen_channel_->InvokeMethod(
+      "onPenFlagsChange",
       std::make_unique<flutter::EncodableValue>(args));
 }
 

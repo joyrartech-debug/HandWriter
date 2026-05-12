@@ -42,6 +42,7 @@ class PenInputChannel {
     required void Function(bool down) onBarrel,
     required void Function(bool down) onInverted,
     void Function(String phase, Offset position, double pressure)? onBarrelPen,
+    void Function(int penFlags, int pointerFlags)? onPenFlagsChange,
   }) {
     if (kIsWeb || !Platform.isWindows) return;
     _channel.setMethodCallHandler((call) async {
@@ -68,6 +69,12 @@ class PenInputChannel {
           final pressure = (args['pressure'] as num?)?.toDouble() ?? 0.5;
           if (phase == null || x == null || y == null) return;
           onBarrelPen(phase, Offset(x, y), pressure);
+          break;
+        case 'onPenFlagsChange':
+          if (onPenFlagsChange == null) return;
+          final penFlags = (args['penFlags'] as num?)?.toInt() ?? 0;
+          final pointerFlags = (args['pointerFlags'] as num?)?.toInt() ?? 0;
+          onPenFlagsChange(penFlags, pointerFlags);
           break;
       }
     });

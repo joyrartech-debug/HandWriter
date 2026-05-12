@@ -287,6 +287,12 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       onBarrel: (down) => _onNativeBarrelChange(_NativeBarrel.lower, down),
       onInverted: (down) => _onNativeBarrelChange(_NativeBarrel.upper, down),
       onBarrelPen: _onBarrelPen,
+      onPenFlagsChange: (penFlags, pointerFlags) {
+        unawaited(CrashLogger.append(
+          '[BarrelTip] FLAGS pen=0x${penFlags.toRadixString(16)} '
+          'ptrButtons=0x${pointerFlags.toRadixString(16)}',
+        ));
+      },
     );
   }
 
@@ -395,26 +401,35 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     if (state == null) return;
     final pagePos = _toPageCoords(localPos, state, _lastCanvasSize);
 
+    final notif = ref.read(canvasProvider.notifier);
+    final p = pressure > 0 ? pressure : 0.5;
     switch (phase) {
       case 'down':
         _bridgePenTool = state.currentTool;
         if (_bridgePenTool == CanvasTool.lasso) {
-          ref.read(canvasProvider.notifier).clearLassoPath();
+          notif.clearLassoPath();
           _lassoPathNotifier.start(pagePos);
+        } else if (_bridgePenTool == CanvasTool.eraserStandard ||
+            _bridgePenTool == CanvasTool.eraserStroke) {
+          notif.startStroke(pagePos, p);
         }
-        // (Eraser/other tools intentionally not handled here yet — the
-        // user-reported bug is lasso-only. Add cases as needed.)
         break;
       case 'move':
         if (_bridgePenTool == CanvasTool.lasso && _lassoPathNotifier.isActive) {
           _lassoPathNotifier.addPoint(pagePos);
+        } else if (_bridgePenTool == CanvasTool.eraserStandard ||
+            _bridgePenTool == CanvasTool.eraserStroke) {
+          notif.continueStroke(pagePos, p);
         }
         break;
       case 'up':
         if (_bridgePenTool == CanvasTool.lasso && _lassoPathNotifier.isActive) {
           final pts = List<Offset>.from(_lassoPathNotifier.points);
           _lassoPathNotifier.clear();
-          ref.read(canvasProvider.notifier).commitLassoPath(pts);
+          notif.commitLassoPath(pts);
+        } else if (_bridgePenTool == CanvasTool.eraserStandard ||
+            _bridgePenTool == CanvasTool.eraserStroke) {
+          notif.endStroke();
         }
         _bridgePenTool = null;
         break;
