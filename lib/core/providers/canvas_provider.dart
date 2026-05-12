@@ -7608,13 +7608,23 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
 
     // Download new assets in parallel
-    // Collect asset references from both assetReferences list AND image elements
+    // Collect asset references from both assetReferences list AND image elements.
+    //
+    // An asset is considered "missing" and worth pulling from the server if:
+    //   1. It's NOT in the local assetBytes map, OR
+    //   2. It IS in the local map but flagged as corrupt — this is the
+    //      heal path for the historic 1024-aligned-truncation bug. If
+    //      another device re-uploaded clean bytes after we cached the
+    //      corrupt copy, the path hasn't changed and the previous
+    //      `containsKey` short-circuit kept the broken bytes forever.
+    //      Re-fetching forces a fresh decode attempt; on success
+    //      `_decodeAndCacheImage` clears the corrupt flag.
     final missingAssets = <String>{};
+    bool needsHeal(String ref) =>
+        !updatedAssets.containsKey(ref) || _corruptAssetIds.contains(ref);
     for (final page in updatedPages.values) {
       for (final ref in page.assetReferences) {
-        if (!updatedAssets.containsKey(ref)) {
-          missingAssets.add(ref);
-        }
+        if (needsHeal(ref)) missingAssets.add(ref);
       }
       // Also scan image elements directly (assetReferences may be out of date)
       for (final el in page.layers.content) {
@@ -7624,12 +7634,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           shape: (_) {},
           image: (img) {
             final path = img.data.assetPath;
-            if (path.isNotEmpty && !updatedAssets.containsKey(path)) {
+            if (path.isNotEmpty && needsHeal(path)) {
               missingAssets.add(path);
             }
           },
         );
       }
+    }
+    // Drop the cached bytes for any asset we're about to re-pull so the
+    // download path actually writes the fresh bytes back instead of
+    // short-circuiting on "already in updatedAssets".
+    for (final ref in missingAssets) {
+      updatedAssets.remove(ref);
     }
     // ── Asset download: priority (current page) sync, rest in background ─
     //
