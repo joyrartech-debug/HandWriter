@@ -1111,6 +1111,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
+    if (_activeNativeBarrel != null) {
+      unawaited(CrashLogger.append(
+        '[BarrelTip] DOWN kind=${event.kind.name} '
+        'buttons=0x${event.buttons.toRadixString(16)} '
+        'p=${event.pressure.toStringAsFixed(2)} '
+        'pid=${event.pointer} activePtrs=$_activePointers '
+        'tool=${state.currentTool.name}',
+      ));
+    }
     // Gaomon driverless: barrel-held + tip-contact arrives as TWO
     // parallel Flutter pointers — the real pen via WM_POINTER
     // (kind=stylus) AND a synth WM_MBUTTONDOWN (kind=mouse,
@@ -1126,6 +1135,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         event.buttons == kMiddleMouseButton &&
         _activeNativeBarrel != null) {
       _suppressedSynthBarrelPointers.add(event.pointer);
+      unawaited(CrashLogger.append('[BarrelTip]   suppressed synth-mouse'));
       return;
     }
     _activePointers++;
@@ -1514,6 +1524,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     // path already contains its first point — the user perceives this as the
     // new lasso "starting offset" from the true touch location.
     if (tool == CanvasTool.lasso) {
+      if (_activeNativeBarrel != null) {
+        unawaited(CrashLogger.append(
+          '[BarrelTip]   LASSO branch reached, start at $pagePos',
+        ));
+      }
       ref.read(canvasProvider.notifier).clearLassoPath(); // bake previous + reset provider path
       _lassoPathNotifier.start(pagePos);
       return;
@@ -1533,6 +1548,17 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerMove(PointerMoveEvent event, CanvasState state, Size canvasSize) {
+    if (_activeNativeBarrel != null) {
+      unawaited(CrashLogger.append(
+        '[BarrelTip] MOVE kind=${event.kind.name} '
+        'buttons=0x${event.buttons.toRadixString(16)} '
+        'p=${event.pressure.toStringAsFixed(2)} '
+        'pid=${event.pointer} activePtrs=$_activePointers '
+        'tool=${state.currentTool.name} '
+        'lassoActive=${_lassoPathNotifier.isActive} '
+        'lassoPts=${_lassoPathNotifier.points.length}',
+      ));
+    }
     if (_suppressedSynthBarrelPointers.contains(event.pointer)) return;
     if (_activePointers >= 2) return;
 
@@ -1680,6 +1706,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onLassoPointerMove(Offset pagePos) {
+    if (_activeNativeBarrel != null) {
+      unawaited(CrashLogger.append(
+        '[BarrelTip]   ADDPOINT $pagePos active=${_lassoPathNotifier.isActive}',
+      ));
+    }
     if (!_lassoPathNotifier.isActive) return;
     _lassoPathNotifier.addPoint(pagePos);
   }
@@ -1705,6 +1736,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    if (_activeNativeBarrel != null) {
+      unawaited(CrashLogger.append(
+        '[BarrelTip] UP kind=${event.kind.name} pid=${event.pointer} '
+        'activePtrs=$_activePointers '
+        'lassoActive=${_lassoPathNotifier.isActive} '
+        'lassoPts=${_lassoPathNotifier.points.length}',
+      ));
+    }
     // Matching cleanup for the synth-mouse pointer suppressed in
     // `_onPointerDown` — never bumped `_activePointers`, so don't
     // decrement it here either.
@@ -3097,6 +3136,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                   onPointerMove: (e) {
                     final live = ref.read(canvasProvider) ?? canvasState;
                     _onPointerMove(e, live, canvasSize);
+                  },
+                  onPointerHover: (e) {
+                    if (_activeNativeBarrel != null) {
+                      unawaited(CrashLogger.append(
+                        '[BarrelTip] HOVER kind=${e.kind.name} '
+                        'buttons=0x${e.buttons.toRadixString(16)} '
+                        'pid=${e.pointer}',
+                      ));
+                    }
                   },
                   onPointerUp: _onPointerUp,
                   onPointerCancel: _onPointerCancel,
