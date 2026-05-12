@@ -308,6 +308,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   /// a side button. Press = save the current tool and switch to the
   /// override target; release = restore.
   void _onNativeBarrelChange(_NativeBarrel button, bool down) {
+    unawaited(CrashLogger.append(
+      '[BarrelTip] BRIDGE button=${button.name} down=$down '
+      'prevActive=${_activeNativeBarrel?.name ?? "none"}',
+    ));
     if (!mounted) return;
     final notif = ref.read(canvasProvider.notifier);
     final state = ref.read(canvasProvider);
@@ -1111,13 +1115,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
-    if (_activeNativeBarrel != null) {
+    // Log every stylus/mouse-with-buttons down regardless of barrel
+    // state — gating on _activeNativeBarrel hides the case where the
+    // bridge never fires.
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus ||
+        (event.kind == PointerDeviceKind.mouse && event.buttons != 0)) {
       unawaited(CrashLogger.append(
         '[BarrelTip] DOWN kind=${event.kind.name} '
         'buttons=0x${event.buttons.toRadixString(16)} '
         'p=${event.pressure.toStringAsFixed(2)} '
         'pid=${event.pointer} activePtrs=$_activePointers '
-        'tool=${state.currentTool.name}',
+        'tool=${state.currentTool.name} '
+        'activeBarrel=${_activeNativeBarrel?.name ?? "none"}',
       ));
     }
     // Gaomon driverless: barrel-held + tip-contact arrives as TWO
@@ -1548,13 +1558,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerMove(PointerMoveEvent event, CanvasState state, Size canvasSize) {
-    if (_activeNativeBarrel != null) {
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus ||
+        (event.kind == PointerDeviceKind.mouse && event.buttons != 0)) {
       unawaited(CrashLogger.append(
         '[BarrelTip] MOVE kind=${event.kind.name} '
         'buttons=0x${event.buttons.toRadixString(16)} '
         'p=${event.pressure.toStringAsFixed(2)} '
         'pid=${event.pointer} activePtrs=$_activePointers '
         'tool=${state.currentTool.name} '
+        'activeBarrel=${_activeNativeBarrel?.name ?? "none"} '
         'lassoActive=${_lassoPathNotifier.isActive} '
         'lassoPts=${_lassoPathNotifier.points.length}',
       ));
@@ -1736,10 +1749,13 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerUp(PointerUpEvent event) {
-    if (_activeNativeBarrel != null) {
+    if (event.kind == PointerDeviceKind.stylus ||
+        event.kind == PointerDeviceKind.invertedStylus ||
+        event.kind == PointerDeviceKind.mouse) {
       unawaited(CrashLogger.append(
         '[BarrelTip] UP kind=${event.kind.name} pid=${event.pointer} '
         'activePtrs=$_activePointers '
+        'activeBarrel=${_activeNativeBarrel?.name ?? "none"} '
         'lassoActive=${_lassoPathNotifier.isActive} '
         'lassoPts=${_lassoPathNotifier.points.length}',
       ));
