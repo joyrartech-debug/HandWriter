@@ -85,7 +85,9 @@ class FlutterWindow : public Win32Window {
   void NotifyBarrelChange(const std::string& button, bool down);
   void NotifyBarrelPen(const std::string& phase, double x, double y,
                        double pressure);
-  void NotifyPenFlagsChange(uint32_t pen_flags, uint32_t pointer_flags);
+  void NotifyPenFlagsChange(uint32_t pen_flags, uint32_t pointer_flags,
+                            uint32_t msg, uint32_t button_change_type,
+                            uint32_t pressure, int32_t input_data);
 
   static LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg,
                                             WPARAM wparam, LPARAM lparam,

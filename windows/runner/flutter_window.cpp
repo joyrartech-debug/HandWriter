@@ -153,22 +153,27 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
       (pen_info.pointerInfo.pointerFlags & POINTER_FLAG_FIRSTBUTTON) != 0;
   last_pen_pointer_id_ = pointer_id;
 
-  // Diagnostic: forward any `penFlags` transition OR a transition of
-  // the relevant `pointerInfo.pointerFlags` subset (buttons +
-  // INCONTACT + INRANGE) so we can see, from the log file alone,
-  // which bit (if any) a tablet's upper barrel actually toggles.
-  const uint32_t pointer_state_mask =
-      POINTER_FLAG_FIRSTBUTTON | POINTER_FLAG_SECONDBUTTON |
-      POINTER_FLAG_THIRDBUTTON | POINTER_FLAG_FOURTHBUTTON |
-      POINTER_FLAG_FIFTHBUTTON | POINTER_FLAG_INCONTACT |
-      POINTER_FLAG_INRANGE;
-  const uint32_t pointer_state =
-      pen_info.pointerInfo.pointerFlags & pointer_state_mask;
+  // Diagnostic: forward every meaningful transition with FULL context
+  // so we can see, from the log file alone, exactly what a tablet's
+  // upper barrel toggles. Includes:
+  //   - msg: the WM_POINTER message type (DOWN/UPDATE/UP)
+  //   - penFlags: raw PEN_FLAG_* bits
+  //   - pointerFlags: raw POINTER_FLAG_* bits (NO masking)
+  //   - buttonChange: POINTER_BUTTON_CHANGE_TYPE for this event
+  //   - pressure: raw pen pressure (0..1024)
+  //   - inputData: wheel/scroll data if any
+  // Transition trigger: penFlags OR pointerFlags change. Fires once
+  // per real state change, hover noise is negligible.
   if (pen_info.penFlags != last_pen_flags_ ||
-      pointer_state != last_pointer_state_) {
-    NotifyPenFlagsChange(pen_info.penFlags, pointer_state);
+      pen_info.pointerInfo.pointerFlags != last_pointer_state_) {
+    NotifyPenFlagsChange(pen_info.penFlags,
+                         pen_info.pointerInfo.pointerFlags, message,
+                         static_cast<uint32_t>(
+                             pen_info.pointerInfo.ButtonChangeType),
+                         pen_info.pressure,
+                         pen_info.pointerInfo.inputData);
     last_pen_flags_ = pen_info.penFlags;
-    last_pointer_state_ = pointer_state;
+    last_pointer_state_ = pen_info.pointerInfo.pointerFlags;
   }
 
   // Latch the Gaomon-driverless upper-barrel state. Only LATCH when
@@ -262,13 +267,25 @@ void FlutterWindow::NotifyBarrelChange(const std::string& button, bool down) {
 }
 
 void FlutterWindow::NotifyPenFlagsChange(uint32_t pen_flags,
-                                         uint32_t pointer_flags) {
+                                         uint32_t pointer_flags,
+                                         uint32_t msg,
+                                         uint32_t button_change_type,
+                                         uint32_t pressure,
+                                         int32_t input_data) {
   if (!pen_channel_) return;
   flutter::EncodableMap args = {
       {flutter::EncodableValue("penFlags"),
        flutter::EncodableValue(static_cast<int64_t>(pen_flags))},
       {flutter::EncodableValue("pointerFlags"),
        flutter::EncodableValue(static_cast<int64_t>(pointer_flags))},
+      {flutter::EncodableValue("msg"),
+       flutter::EncodableValue(static_cast<int64_t>(msg))},
+      {flutter::EncodableValue("buttonChange"),
+       flutter::EncodableValue(static_cast<int64_t>(button_change_type))},
+      {flutter::EncodableValue("pressure"),
+       flutter::EncodableValue(static_cast<int64_t>(pressure))},
+      {flutter::EncodableValue("inputData"),
+       flutter::EncodableValue(static_cast<int64_t>(input_data))},
   };
   pen_channel_->InvokeMethod(
       "onPenFlagsChange",

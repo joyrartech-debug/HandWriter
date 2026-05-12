@@ -287,10 +287,30 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       onBarrel: (down) => _onNativeBarrelChange(_NativeBarrel.lower, down),
       onInverted: (down) => _onNativeBarrelChange(_NativeBarrel.upper, down),
       onBarrelPen: _onBarrelPen,
-      onPenFlagsChange: (penFlags, pointerFlags) {
+      onPenFlagsChange: (penFlags, pointerFlags, msg, buttonChange, pressure,
+          inputData) {
+        // Decode WM_POINTER* message id into a short name for the log.
+        String msgName;
+        switch (msg) {
+          case 0x0245:
+            msgName = 'UPDATE';
+            break;
+          case 0x0246:
+            msgName = 'DOWN';
+            break;
+          case 0x0247:
+            msgName = 'UP';
+            break;
+          default:
+            msgName = 'msg=0x${msg.toRadixString(16)}';
+        }
         unawaited(CrashLogger.append(
-          '[BarrelTip] FLAGS pen=0x${penFlags.toRadixString(16)} '
-          'ptrButtons=0x${pointerFlags.toRadixString(16)}',
+          '[BarrelTip] FLAGS msg=$msgName '
+          'pen=0x${penFlags.toRadixString(16)} '
+          'ptr=0x${pointerFlags.toRadixString(16)} '
+          'btnChg=$buttonChange '
+          'pressure=$pressure '
+          'inputData=$inputData',
         ));
       },
     );
