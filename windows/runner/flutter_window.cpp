@@ -176,15 +176,21 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
     last_pointer_state_ = pen_info.pointerInfo.pointerFlags;
   }
 
-  // Latch the Gaomon-driverless upper-barrel state. Only LATCH when
-  // FIRSTBUTTON transitions from 0→1 with the tip NOT in contact —
-  // that combo never happens for a real tip touch (which would also
-  // set INCONTACT) so it uniquely identifies the upper barrel on
-  // driver setups that don't expose PEN_FLAG_INVERTED. Once latched,
-  // we keep the override alive until FIRSTBUTTON drops, even if the
-  // user touches the tip mid-gesture (both bits set then).
-  if (first_button_pen && !last_first_button_pen_ && !tip_in_contact) {
-    upper_button_latched_ = true;
+  // Latch the Gaomon-driverless upper-barrel state via the
+  // pressure-zero signature. On this hardware the upper side button
+  // reports identically to a real tip touch in `pointerFlags`:
+  // FIRSTBUTTON + INCONTACT + INRANGE + DOWN all set, same
+  // ButtonChangeType (FIRSTBUTTON_DOWN). The ONLY distinguishing
+  // field is `pressure` — a physical tip touch always registers
+  // non-zero (even the lightest tap reads ~30-150 out of 1024)
+  // because the pen has a pressure sensor, while the upper button
+  // is a discrete switch with no sensor and reports pressure=0.
+  // We latch on the FIRSTBUTTON 0→1 transition when pressure is
+  // exactly 0, and keep the latch alive until FIRSTBUTTON drops —
+  // so the override survives the user touching the tip mid-gesture
+  // (pressure rises to >0 then, but the latch stays on).
+  if (first_button_pen && !last_first_button_pen_) {
+    upper_button_latched_ = (pen_info.pressure == 0);
   }
   if (!first_button_pen) {
     upper_button_latched_ = false;
@@ -193,6 +199,16 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
 
   const bool inverted_now =
       ((pen_info.penFlags & PEN_FLAG_INVERTED) != 0) || upper_button_latched_;
+
+  // Gate the pen-gesture flow on REAL tip contact (INCONTACT bit AND
+  // non-zero pressure), not the bit alone. The Gaomon driverless
+  // upper-button click sets INCONTACT even though the tip isn't
+  // actually touching, which would otherwise start an eraser stroke
+  // at the cursor the moment the user presses the upper barrel —
+  // even before they bring the pen down. Pressure>0 ensures we only
+  // fire bridge-pen events when the user is genuinely drawing on the
+  // surface.
+  const bool real_tip_contact = tip_in_contact && (pen_info.pressure > 0);
 
   // Compute current logical client coordinates once — used for any
   // pen-gesture phase we forward below.
@@ -212,7 +228,7 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
   const bool button_releasing =
       (last_barrel_pressed_ && !barrel_now) ||
       (last_inverted_ && !inverted_now);
-  if (pen_gesture_active_ && (!tip_in_contact || button_releasing)) {
+  if (pen_gesture_active_ && (!real_tip_contact || button_releasing)) {
     NotifyBarrelPen("up", x_logical, y_logical, pressure_norm);
     pen_gesture_active_ = false;
   }
@@ -233,7 +249,7 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
   // WM_POINTER stream we already read above; Dart's _onBarrelPen
   // drives the override directly from these.
   const bool any_button_held = last_barrel_pressed_ || last_inverted_;
-  if (any_button_held && tip_in_contact) {
+  if (any_button_held && real_tip_contact) {
     if (!pen_gesture_active_) {
       pen_gesture_active_ = true;
       NotifyBarrelPen("down", x_logical, y_logical, pressure_norm);
