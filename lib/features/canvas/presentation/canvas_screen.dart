@@ -296,6 +296,14 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   _NativeBarrel? _activeNativeBarrel;
   CanvasTool? _nativeBarrelPreviousTool;
 
+  /// Pointer IDs of synth middle-mouse events the Gaomon driver injects
+  /// in parallel with the real stylus stream when barrel-held + tip-
+  /// contact. Tracked so the matching move/up/cancel can be dropped
+  /// without touching `_activePointers` — otherwise the parallel synth
+  /// pointer pushes the counter to 2 and the multi-touch guard in
+  /// `_onPointerMove` drops every lasso point.
+  final Set<int> _suppressedSynthBarrelPointers = <int>{};
+
   /// Called by the WM_POINTER bridge when the user presses or releases
   /// a side button. Press = save the current tool and switch to the
   /// override target; release = restore.
@@ -1103,6 +1111,23 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerDown(PointerDownEvent event, CanvasState state, Size canvasSize) {
+    // Gaomon driverless: barrel-held + tip-contact arrives as TWO
+    // parallel Flutter pointers — the real pen via WM_POINTER
+    // (kind=stylus) AND a synth WM_MBUTTONDOWN (kind=mouse,
+    // buttons=0x4). The synth is the driver's way of exposing the
+    // gesture as a "right click" to legacy apps; we have no use for
+    // it because the C++ barrel bridge already switched the tool and
+    // the stylus stream carries all the contact data we need. Drop
+    // the synth pointer here so `_activePointers` stays at 1 and the
+    // multi-touch guard in `_onPointerMove` doesn't eat every move
+    // — without this the lasso path starts at the down position and
+    // then never accumulates points, so nothing visible appears.
+    if (event.kind == PointerDeviceKind.mouse &&
+        event.buttons == kMiddleMouseButton &&
+        _activeNativeBarrel != null) {
+      _suppressedSynthBarrelPointers.add(event.pointer);
+      return;
+    }
     _activePointers++;
 
 
@@ -1508,6 +1533,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerMove(PointerMoveEvent event, CanvasState state, Size canvasSize) {
+    if (_suppressedSynthBarrelPointers.contains(event.pointer)) return;
     if (_activePointers >= 2) return;
 
     if (_isTouchPanning) {
@@ -1679,6 +1705,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerUp(PointerUpEvent event) {
+    // Matching cleanup for the synth-mouse pointer suppressed in
+    // `_onPointerDown` — never bumped `_activePointers`, so don't
+    // decrement it here either.
+    if (_suppressedSynthBarrelPointers.remove(event.pointer)) return;
     final wasMultiTouch = _activePointers >= 2;
     _activePointers = max(0, _activePointers - 1);
 
@@ -1839,6 +1869,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _onPointerCancel(PointerCancelEvent event) {
+    if (_suppressedSynthBarrelPointers.remove(event.pointer)) return;
     _activePointers = max(0, _activePointers - 1);
     _strokeDbg(
       'CANCEL kind=${event.kind.name} p=${event.pointer} '
