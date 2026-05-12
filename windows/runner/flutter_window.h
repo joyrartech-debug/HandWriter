@@ -50,6 +50,13 @@ class FlutterWindow : public Win32Window {
   bool last_barrel_pressed_ = false;
   bool last_inverted_ = false;
   uint32_t last_pen_pointer_id_ = 0;
+  // Tracks an active barrel-driven pen gesture (barrel-held + tip in
+  // contact). Drives the down→move→up sequence forwarded to Dart so
+  // the canvas can drive the lasso/eraser even though Gaomon
+  // driverless suppresses Flutter's PointerEvents while the barrel
+  // button is pressed.
+  bool last_tip_in_contact_ = false;
+  bool pen_gesture_active_ = false;
   // HWND of the Flutter view child window we subclass to intercept
   // WM_POINTER*. Pointer events on Windows are delivered to the
   // window UNDER the cursor — that's the Flutter renderer child,
@@ -58,6 +65,8 @@ class FlutterWindow : public Win32Window {
 
   void HandlePenPointerMessage(UINT message, WPARAM wparam);
   void NotifyBarrelChange(const std::string& button, bool down);
+  void NotifyBarrelPen(const std::string& phase, double x, double y,
+                       double pressure);
 
   static LRESULT CALLBACK ChildSubclassProc(HWND hwnd, UINT msg,
                                             WPARAM wparam, LPARAM lparam,

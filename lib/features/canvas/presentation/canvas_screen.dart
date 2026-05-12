@@ -286,6 +286,7 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     PenInputChannel.register(
       onBarrel: (down) => _onNativeBarrelChange(_NativeBarrel.lower, down),
       onInverted: (down) => _onNativeBarrelChange(_NativeBarrel.upper, down),
+      onBarrelPen: _onBarrelPen,
     );
   }
 
@@ -303,6 +304,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   /// pointer pushes the counter to 2 and the multi-touch guard in
   /// `_onPointerMove` drops every lasso point.
   final Set<int> _suppressedSynthBarrelPointers = <int>{};
+
+  /// Tool the current bridge-driven pen gesture is driving. Set on
+  /// `_onBarrelPen("down", …)` from the live state and used through
+  /// `"up"` so the commit doesn't depend on `_activeNativeBarrel`
+  /// still being non-null at that moment (the C++ bridge fires "up"
+  /// before any matching barrel-release transition, so this normally
+  /// holds — but if the user releases the barrel BEFORE lifting the
+  /// tip the bridge tears the gesture down first, and the captured
+  /// tool here lets us still commit the partial path).
+  CanvasTool? _bridgePenTool;
 
   /// Called by the WM_POINTER bridge when the user presses or releases
   /// a side button. Press = save the current tool and switch to the
@@ -343,6 +354,57 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       final prev = _nativeBarrelPreviousTool;
       _nativeBarrelPreviousTool = null;
       if (prev != null) notif.setTool(prev);
+    }
+  }
+
+  /// Called by the WM_POINTER bridge while a side button is held and
+  /// the pen tip is in contact (or had been on the most recent frame).
+  /// Drives the lasso path directly because Gaomon driverless
+  /// suppresses Flutter's PointerEvents for the duration of the
+  /// barrel press — the canvas Listener never sees the gesture, so
+  /// the regular onPointerDown/Move/Up flow can't update the path.
+  ///
+  /// [clientPos] is in Flutter logical pixels relative to the
+  /// renderer's child window — same coordinate space Flutter treats
+  /// as "global". We convert to canvas-local via `_canvasStackKey`'s
+  /// RenderBox, then to page coords via `_toPageCoords`.
+  void _onBarrelPen(String phase, Offset clientPos, double pressure) {
+    unawaited(CrashLogger.append(
+      '[BarrelTip] BRIDGE_PEN phase=$phase pos=$clientPos pressure=${pressure.toStringAsFixed(2)} '
+      'bridgeTool=${_bridgePenTool?.name ?? "none"} '
+      'activeBarrel=${_activeNativeBarrel?.name ?? "none"}',
+    ));
+    if (!mounted) return;
+    final box = _canvasStackKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached) return;
+    final localPos = box.globalToLocal(clientPos);
+    final state = ref.read(canvasProvider);
+    if (state == null) return;
+    final pagePos = _toPageCoords(localPos, state, _lastCanvasSize);
+
+    switch (phase) {
+      case 'down':
+        _bridgePenTool = state.currentTool;
+        if (_bridgePenTool == CanvasTool.lasso) {
+          ref.read(canvasProvider.notifier).clearLassoPath();
+          _lassoPathNotifier.start(pagePos);
+        }
+        // (Eraser/other tools intentionally not handled here yet — the
+        // user-reported bug is lasso-only. Add cases as needed.)
+        break;
+      case 'move':
+        if (_bridgePenTool == CanvasTool.lasso && _lassoPathNotifier.isActive) {
+          _lassoPathNotifier.addPoint(pagePos);
+        }
+        break;
+      case 'up':
+        if (_bridgePenTool == CanvasTool.lasso && _lassoPathNotifier.isActive) {
+          final pts = List<Offset>.from(_lassoPathNotifier.points);
+          _lassoPathNotifier.clear();
+          ref.read(canvasProvider.notifier).commitLassoPath(pts);
+        }
+        _bridgePenTool = null;
+        break;
     }
   }
 

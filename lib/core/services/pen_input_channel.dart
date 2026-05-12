@@ -28,25 +28,46 @@ class PenInputChannel {
 
   static bool _registered = false;
 
-  /// Hook callbacks for barrel-button state transitions. Idempotent
-  /// — calling twice with new callbacks replaces the previous ones.
+  /// Hook callbacks for barrel-button state transitions and the
+  /// barrel-driven pen gesture. Idempotent — calling twice with new
+  /// callbacks replaces the previous ones.
+  ///
+  /// [onBarrelPen] receives `phase` ("down" / "move" / "up"),
+  /// `position` in Flutter logical pixels (renderer-local — convert
+  /// with `RenderBox.globalToLocal` before feeding the canvas), and
+  /// normalised `pressure` in `[0, 1]`. Fires only while a side button
+  /// is held — needed because Gaomon driverless suppresses Flutter's
+  /// regular PointerEvents while the barrel is pressed.
   static void register({
     required void Function(bool down) onBarrel,
     required void Function(bool down) onInverted,
+    void Function(String phase, Offset position, double pressure)? onBarrelPen,
   }) {
     if (kIsWeb || !Platform.isWindows) return;
     _channel.setMethodCallHandler((call) async {
-      if (call.method != 'onBarrelChange') return;
       final args = (call.arguments as Map?)?.cast<Object?, Object?>();
       if (args == null) return;
-      final button = args['button'] as String?;
-      final down = args['down'] as bool? ?? false;
-      switch (button) {
-        case 'barrel':
-          onBarrel(down);
+      switch (call.method) {
+        case 'onBarrelChange':
+          final button = args['button'] as String?;
+          final down = args['down'] as bool? ?? false;
+          switch (button) {
+            case 'barrel':
+              onBarrel(down);
+              break;
+            case 'inverted':
+              onInverted(down);
+              break;
+          }
           break;
-        case 'inverted':
-          onInverted(down);
+        case 'onBarrelPen':
+          if (onBarrelPen == null) return;
+          final phase = args['phase'] as String?;
+          final x = (args['x'] as num?)?.toDouble();
+          final y = (args['y'] as num?)?.toDouble();
+          final pressure = (args['pressure'] as num?)?.toDouble() ?? 0.5;
+          if (phase == null || x == null || y == null) return;
+          onBarrelPen(phase, Offset(x, y), pressure);
           break;
       }
     });

@@ -148,7 +148,32 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
   // hovering (no tip contact) over the window.
   const bool barrel_now = (pen_info.penFlags & PEN_FLAG_BARREL) != 0;
   const bool inverted_now = (pen_info.penFlags & PEN_FLAG_INVERTED) != 0;
+  const bool tip_in_contact =
+      (pen_info.pointerInfo.pointerFlags & POINTER_FLAG_INCONTACT) != 0;
   last_pen_pointer_id_ = pointer_id;
+
+  // Compute current logical client coordinates once — used for any
+  // pen-gesture phase we forward below.
+  POINT pt = pen_info.pointerInfo.ptPixelLocation;
+  if (child_hwnd_) ScreenToClient(child_hwnd_, &pt);
+  const UINT dpi = child_hwnd_ ? GetDpiForWindow(child_hwnd_) : 96;
+  const double dpr = dpi > 0 ? dpi / 96.0 : 1.0;
+  const double x_logical = pt.x / dpr;
+  const double y_logical = pt.y / dpr;
+  const double pressure_norm = pen_info.pressure > 0
+      ? static_cast<double>(pen_info.pressure) / 1024.0
+      : 0.5;
+
+  // End an active pen gesture FIRST (before announcing the button
+  // release) so Dart's _onBarrelPen still has access to the
+  // override-target tool when it commits the lasso / eraser stroke.
+  const bool button_releasing =
+      (last_barrel_pressed_ && !barrel_now) ||
+      (last_inverted_ && !inverted_now);
+  if (pen_gesture_active_ && (!tip_in_contact || button_releasing)) {
+    NotifyBarrelPen("up", x_logical, y_logical, pressure_norm);
+    pen_gesture_active_ = false;
+  }
 
   if (barrel_now != last_barrel_pressed_) {
     NotifyBarrelChange("barrel", barrel_now);
@@ -159,21 +184,33 @@ void FlutterWindow::HandlePenPointerMessage(UINT message, WPARAM wparam) {
     last_inverted_ = inverted_now;
   }
 
-  // Defensive: if the pen leaves the digitizer altogether, Windows
-  // emits WM_POINTERUP without a corresponding state-change flag, so
-  // we force-release any held buttons here so the Dart side never
-  // sits stuck in barrel-override mode after the pen lifts out of
-  // range.
-  if (message == WM_POINTERUP) {
-    if (last_barrel_pressed_) {
-      NotifyBarrelChange("barrel", false);
-      last_barrel_pressed_ = false;
-    }
-    if (last_inverted_) {
-      NotifyBarrelChange("inverted", false);
-      last_inverted_ = false;
+  // While a side button is held and the tip is in contact, Gaomon
+  // driverless never delivers a Flutter PointerEvent — the canvas
+  // Listener stays silent and the lasso/eraser never sees the
+  // gesture. Synthesise the down/move/up sequence from the raw
+  // WM_POINTER stream we already read above; Dart's _onBarrelPen
+  // drives the override directly from these.
+  const bool any_button_held = last_barrel_pressed_ || last_inverted_;
+  if (any_button_held && tip_in_contact) {
+    if (!pen_gesture_active_) {
+      pen_gesture_active_ = true;
+      NotifyBarrelPen("down", x_logical, y_logical, pressure_norm);
+    } else {
+      NotifyBarrelPen("move", x_logical, y_logical, pressure_norm);
     }
   }
+
+  last_tip_in_contact_ = tip_in_contact;
+
+  // No defensive cleanup on WM_POINTERUP: the previous version
+  // force-released the barrel on every tip-lift, which caused a
+  // spurious flap (barrel goes false → next hover update sees
+  // PEN_FLAG_BARREL still set → fires true again, 5 ms later) and
+  // dropped `_activeNativeBarrel` mid-gesture. The actual barrel
+  // state is now tracked exclusively through penFlags transitions
+  // above. If the pen leaves the digitizer entirely the Dart side
+  // simply stays in override-mode until the user returns the pen,
+  // at which point a fresh transition restores the correct state.
 }
 
 void FlutterWindow::NotifyBarrelChange(const std::string& button, bool down) {
@@ -184,5 +221,19 @@ void FlutterWindow::NotifyBarrelChange(const std::string& button, bool down) {
   };
   pen_channel_->InvokeMethod(
       "onBarrelChange",
+      std::make_unique<flutter::EncodableValue>(args));
+}
+
+void FlutterWindow::NotifyBarrelPen(const std::string& phase, double x,
+                                    double y, double pressure) {
+  if (!pen_channel_) return;
+  flutter::EncodableMap args = {
+      {flutter::EncodableValue("phase"), flutter::EncodableValue(phase)},
+      {flutter::EncodableValue("x"), flutter::EncodableValue(x)},
+      {flutter::EncodableValue("y"), flutter::EncodableValue(y)},
+      {flutter::EncodableValue("pressure"), flutter::EncodableValue(pressure)},
+  };
+  pen_channel_->InvokeMethod(
+      "onBarrelPen",
       std::make_unique<flutter::EncodableValue>(args));
 }
