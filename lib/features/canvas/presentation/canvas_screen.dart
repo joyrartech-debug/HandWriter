@@ -353,6 +353,19 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       _activeNativeBarrel = null;
       final prev = _nativeBarrelPreviousTool;
       _nativeBarrelPreviousTool = null;
+      // If the lower-barrel lasso override just committed a real
+      // selection (polygon caught at least one element), stay in
+      // lasso so the user can manipulate it — drag / scale / rotate
+      // / duplicate / delete. Restoring the previous tool here would
+      // run `setTool(prev)`, whose `clearLasso: tool != lasso`
+      // copyWith wipes `lassoSelection` and the marquee visibly
+      // disappears the instant the user releases the barrel. The
+      // user falls back to writing by tapping the pen tool in the
+      // toolbar, which dismisses the selection at the same time.
+      final live = ref.read(canvasProvider);
+      final keepLassoForSelection = button == _NativeBarrel.lower &&
+          live?.lassoSelection != null;
+      if (keepLassoForSelection) return;
       if (prev != null) notif.setTool(prev);
     }
   }
