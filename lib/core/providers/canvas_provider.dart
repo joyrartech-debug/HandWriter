@@ -3715,9 +3715,16 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// (e.g. swipe-to-turn-page).
   void goToPage(int index, {bool resetViewport = false}) {
     if (state == null || index < 0 || index >= state!.pageCount) return;
+    final s = state!;
+    // Record the index we're leaving so the page nav bar can offer a
+    // one-tap jump back. Only update if the user is actually changing
+    // pages — re-navigating to the current page (e.g. through "Vai a
+    // pagina N") shouldn't trash the prior memory.
+    final prev = (s.currentPageIndex != index) ? s.currentPageIndex : s.previousPageIndex;
     if (resetViewport) {
-      state = state!.copyWith(
+      state = s.copyWith(
         currentPageIndex: index,
+        previousPageIndex: prev,
         activeStroke: [],
         clearLasso: true,
         lassoPath: [],
@@ -3726,8 +3733,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         panOffset: _centeredPanOffset(2.0),
       );
     } else {
-      state = state!.copyWith(
+      state = s.copyWith(
         currentPageIndex: index,
+        previousPageIndex: prev,
         activeStroke: [],
         clearLasso: true,
         lassoPath: [],
@@ -5100,12 +5108,85 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     state = s.copyWith(pages: updatedPages, undoStack: undoStack, redoStack: [], isDirty: true, clearLasso: true, lassoPath: []);
   }
 
+  /// Duplicate the current lasso selection in place, then keep the
+  /// new copies selected so the user can drag/scale/rotate them via
+  /// the existing lasso handles. Pasting in select mode replaces the
+  /// previous "tap somewhere to drop" flow which was disorienting for
+  /// large selections (the user couldn't tell where the duplicate
+  /// would land before committing).
   void duplicateSelection() {
-    copySelection();
-    // Enter placement mode — user taps to place the copy
-    if (state != null && state!.clipboard != null) {
-      state = state!.copyWith(pendingPaste: true, clearLasso: true);
+    if (state == null || state!.lassoSelection == null) return;
+    final s = state!;
+    final sel = s.lassoSelection!;
+    final page = s.currentPage;
+    if (page == null) return;
+
+    final fileName = s.currentPageFileName;
+    final originals = page.layers.content.where((element) {
+      final id = element.map(
+        stroke: (e) => e.id,
+        text: (e) => e.id,
+        image: (e) => e.id,
+        shape: (e) => e.id,
+      );
+      return sel.selectedIds.contains(id);
+    }).toList();
+    if (originals.isEmpty) return;
+
+    // Update clipboard so a follow-up Ctrl+V works as expected.
+    final clip = CanvasClipboard(elements: originals, bounds: sel.bounds);
+    _ref.read(crossNotebookClipboardProvider.notifier).state = clip;
+
+    final undoStack = _pushUndo(s, fileName, page);
+
+    // Offset the copy by a small constant so it's visible next to the
+    // original instead of overlapping it pixel-perfect.
+    const offset = Offset(20, 20);
+
+    final baseZ = _nextZIndex(page);
+    final newElements = <ContentElement>[];
+    final newIds = <String>[];
+    for (int idx = 0; idx < originals.length; idx++) {
+      final translated = _translateElement(originals[idx], offset);
+      final newId = const Uuid().v4();
+      newIds.add(newId);
+      final z = baseZ + idx;
+      newElements.add(translated.map(
+        stroke: (e) => ContentElement.stroke(id: newId, zIndex: z, data: e.data),
+        text: (e) => ContentElement.text(id: newId, zIndex: z, data: e.data),
+        image: (e) => ContentElement.image(id: newId, zIndex: z, data: e.data),
+        shape: (e) => ContentElement.shape(id: newId, zIndex: z, data: e.data),
+      ));
     }
+
+    final updatedPage = PageData(
+      pageId: page.pageId,
+      pageNumber: page.pageNumber,
+      width: page.width,
+      height: page.height,
+      layers: RenderingLayers(
+        background: page.layers.background,
+        content: [...page.layers.content, ...newElements],
+      ),
+      assetReferences: page.assetReferences,
+      createdAt: page.createdAt,
+      modifiedAt: DateTime.now(),
+    );
+    final updatedPages = Map<String, PageData>.from(s.pages);
+    updatedPages[fileName] = updatedPage;
+
+    final newBounds = sel.bounds.shift(offset);
+
+    state = s.copyWith(
+      pages: updatedPages,
+      clipboard: clip,
+      undoStack: undoStack,
+      redoStack: [],
+      isDirty: true,
+      lassoPath: [],
+      lassoSelection:
+          LassoSelection(selectedIds: newIds, bounds: newBounds),
+    );
   }
 
   void duplicateElement(String elementId) {
@@ -5877,6 +5958,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       document: updatedDoc,
       pages: updatedPages,
       currentPageIndex: newIndex,
+      // Deletion shifts all subsequent indices; the previously-tracked
+      // page index would now point to a different page. Drop it so the
+      // bottom-strip "↺ previous" badge doesn't mislead the user.
+      clearPreviousPage: true,
       activeChapterId: clearChapter ? null : newActiveChapterId,
       clearActiveChapter: clearChapter,
       metadata: cleanedMeta,
@@ -5953,6 +6038,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       document: updatedDoc,
       pages: updatedPagesMap,
       currentPageIndex: newIndex,
+      // Bulk deletion invalidates any prior "previous page" reference.
+      clearPreviousPage: true,
       activeChapterId: clearChapter ? null : newActiveChapterId,
       clearActiveChapter: clearChapter,
       metadata: s.metadata.copyWith(

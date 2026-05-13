@@ -1,4 +1,5 @@
 import 'dart:io' as io;
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
@@ -592,7 +593,7 @@ class HwToolPopup extends StatelessWidget {
               children: [
                 for (final c in presetColors)
                   _colorChip(c, p),
-                _customColorChip(p),
+                _customColorChip(context, p),
               ],
             ),
             const SizedBox(height: 14),
@@ -729,22 +730,31 @@ class HwToolPopup extends StatelessWidget {
     );
   }
 
-  Widget _customColorChip(HwPalette p) {
-    return Container(
-      width: 26,
-      height: 26,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        border: Border.all(color: p.paper3),
-        gradient: const SweepGradient(colors: [
-          Colors.red,
-          Colors.yellow,
-          Colors.green,
-          Colors.cyan,
-          Colors.blue,
-          Colors.purple,
-          Colors.red,
-        ]),
+  Widget _customColorChip(BuildContext context, HwPalette p) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: () async {
+          final picked = await showHwColorPicker(context, color);
+          if (picked != null) onColorChanged(picked);
+        },
+        child: Container(
+          width: 26,
+          height: 26,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            border: Border.all(color: p.paper3),
+            gradient: const SweepGradient(colors: [
+              Colors.red,
+              Colors.yellow,
+              Colors.green,
+              Colors.cyan,
+              Colors.blue,
+              Colors.purple,
+              Colors.red,
+            ]),
+          ),
+        ),
       ),
     );
   }
@@ -904,6 +914,12 @@ class HwBottomPageStrip extends StatefulWidget {
   /// filter, no thumbnail is highlighted).
   final int currentPage;
 
+  /// 1-based page number of the page visited immediately before
+  /// [currentPage]. The strip highlights it with a dashed/dotted outline
+  /// so the user can flip between two pages with a single tap. `null`
+  /// when there's no prior page (fresh notebook open).
+  final int? previousPage;
+
   /// Tapping a thumbnail emits the underlying 1-based page number.
   final ValueChanged<int> onPageTap;
   /// Right-click / long-press on a thumbnail — opens a contextual menu.
@@ -917,6 +933,7 @@ class HwBottomPageStrip extends StatefulWidget {
     this.chapterLabel,
     required this.pageNumbers,
     required this.currentPage,
+    this.previousPage,
     required this.onPageTap,
     this.onPageSecondary,
     required this.onAllPagesTap,
@@ -1042,10 +1059,14 @@ class _HwBottomPageStripState extends State<HwBottomPageStrip> {
                       // followed by 212+ when 208–211 belong elsewhere).
                       final n = widget.pageNumbers[i];
                       final selected = n == widget.currentPage;
+                      final isPrevious = !selected &&
+                          widget.previousPage != null &&
+                          n == widget.previousPage;
                       final displayLabel = i + 1;
                       return _PageThumb(
                         number: displayLabel,
                         selected: selected,
+                        previous: isPrevious,
                         globalPageNumber: n,
                         onTap: () => widget.onPageTap(n),
                         onSecondary: widget.onPageSecondary == null
@@ -1077,6 +1098,9 @@ class _PageThumb extends StatelessWidget {
   /// so the user can still find the page in the global numbering.
   final int? globalPageNumber;
   final bool selected;
+  /// Highlights the page the user was on right before the current one,
+  /// so they can flip back with a single tap.
+  final bool previous;
   final VoidCallback onTap;
   /// Right-click / long-press → contextual menu. Receives the global
   /// pointer position so the caller can anchor the menu correctly.
@@ -1085,6 +1109,7 @@ class _PageThumb extends StatelessWidget {
     required this.number,
     required this.selected,
     required this.onTap,
+    this.previous = false,
     this.globalPageNumber,
     this.onSecondary,
   });
@@ -1092,9 +1117,23 @@ class _PageThumb extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final p = HwThemeScope.of(context);
-    final tooltip = globalPageNumber != null && globalPageNumber != number
-        ? 'Pagina $number del capitolo · pagina $globalPageNumber del taccuino'
-        : 'Pagina $number';
+    final tooltip = previous
+        ? 'Pagina precedente $number — tocca per tornare indietro'
+        : (globalPageNumber != null && globalPageNumber != number
+            ? 'Pagina $number del capitolo · pagina $globalPageNumber del taccuino'
+            : 'Pagina $number');
+    final Color borderColor;
+    final double borderWidth;
+    if (selected) {
+      borderColor = p.accent;
+      borderWidth = 1.8;
+    } else if (previous) {
+      borderColor = p.accentDeep;
+      borderWidth = 1.6;
+    } else {
+      borderColor = p.paper3;
+      borderWidth = 1;
+    }
     return Tooltip(
       message: tooltip,
       waitDuration: const Duration(milliseconds: 600),
@@ -1112,41 +1151,68 @@ class _PageThumb extends StatelessWidget {
           duration: const Duration(milliseconds: 140),
           width: 50,
           decoration: BoxDecoration(
-            color: p.paper0,
+            color: previous && !selected ? p.accentSoft : p.paper0,
             border: Border.all(
-              color: selected ? p.accent : p.paper3,
-              width: selected ? 1.8 : 1,
+              color: borderColor,
+              width: borderWidth,
             ),
             borderRadius: BorderRadius.circular(3),
             boxShadow: selected ? hwShadow1(p.brightness) : null,
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Stack(
             children: [
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(5, 5, 5, 2),
-                  child: CustomPaint(
-                    painter: _MiniPagePainter(
-                      lineColor: p.ink3.withValues(alpha: 0.5),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(5, 5, 5, 2),
+                      child: CustomPaint(
+                        painter: _MiniPagePainter(
+                          lineColor: p.ink3.withValues(alpha: 0.5),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Container(
+                    padding: const EdgeInsets.symmetric(vertical: 1),
+                    alignment: Alignment.center,
+                    color: selected
+                        ? p.accent
+                        : previous
+                            ? p.accentDeep
+                            : Colors.transparent,
+                    child: Text(
+                      number.toString(),
+                      style: TextStyle(
+                        fontSize: 9,
+                        color: selected || previous ? p.paper0 : p.ink3,
+                        fontFamily: HwTheme.fontMono,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              // "↺" badge on the previously visited page — visual cue that
+              // this thumbnail is the quick way back.
+              if (previous && !selected)
+                Positioned(
+                  top: 2,
+                  right: 2,
+                  child: Container(
+                    padding: const EdgeInsets.all(1.5),
+                    decoration: BoxDecoration(
+                      color: p.accentDeep,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.history_rounded,
+                      size: 9,
+                      color: p.paper0,
                     ),
                   ),
                 ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(vertical: 1),
-                alignment: Alignment.center,
-                color: selected ? p.accent : Colors.transparent,
-                child: Text(
-                  number.toString(),
-                  style: TextStyle(
-                    fontSize: 9,
-                    color: selected ? p.paper0 : p.ink3,
-                    fontFamily: HwTheme.fontMono,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ),
             ],
           ),
         ),
@@ -1178,3 +1244,375 @@ class _MiniPagePainter extends CustomPainter {
   @override
   bool shouldRepaint(_MiniPagePainter old) => old.lineColor != lineColor;
 }
+
+// ═══════════════════════════════════════════════════════════════
+//  CUSTOM COLOR PICKER DIALOG (color wheel)
+// ═══════════════════════════════════════════════════════════════
+
+/// Color picker triggered by the sweep-gradient chip in the tool popup.
+/// Uses a classic color-wheel layout — a hue ring around a square that
+/// drives saturation (X) and value (Y) — plus a value slider for fine
+/// brightness control. Replaces an earlier 3-slider variant the user
+/// found unwieldy.
+Future<Color?> showHwColorPicker(BuildContext context, Color initial) {
+  return showDialog<Color>(
+    context: context,
+    builder: (ctx) => _HwColorPickerDialog(initial: initial),
+  );
+}
+
+class _HwColorPickerDialog extends StatefulWidget {
+  final Color initial;
+  const _HwColorPickerDialog({required this.initial});
+
+  @override
+  State<_HwColorPickerDialog> createState() => _HwColorPickerDialogState();
+}
+
+class _HwColorPickerDialogState extends State<_HwColorPickerDialog> {
+  late HSVColor _hsv;
+  late TextEditingController _hexCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _hsv = HSVColor.fromColor(widget.initial);
+    _hexCtrl = TextEditingController(text: _toHex(widget.initial));
+  }
+
+  @override
+  void dispose() {
+    _hexCtrl.dispose();
+    super.dispose();
+  }
+
+  String _toHex(Color c) {
+    final argb = c.toARGB32();
+    return '#${(argb & 0xFFFFFF).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+  }
+
+  void _syncHexFromHsv() {
+    _hexCtrl.text = _toHex(_hsv.toColor());
+  }
+
+  void _tryParseHex(String text) {
+    final clean = text.trim().replaceAll('#', '');
+    if (clean.length != 6) return;
+    final v = int.tryParse(clean, radix: 16);
+    if (v == null) return;
+    setState(() {
+      _hsv = HSVColor.fromColor(Color(0xFF000000 | v));
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = HwThemeScope.of(context);
+    final current = _hsv.toColor();
+    return AlertDialog(
+      backgroundColor: p.paper0,
+      contentPadding: const EdgeInsets.fromLTRB(20, 20, 20, 12),
+      content: SizedBox(
+        width: 300,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            // ── Color wheel: hue ring + SV square at center ──
+            _ColorWheel(
+              size: 260,
+              hsv: _hsv,
+              onChanged: (h) => setState(() {
+                _hsv = h;
+                _syncHexFromHsv();
+              }),
+            ),
+            const SizedBox(height: 12),
+            // ── Value (brightness) slider — separate so users can dim
+            // a saturated hue without losing position on the SV square.
+            _ValueSlider(
+              hsv: _hsv,
+              onChanged: (v) => setState(() {
+                _hsv = _hsv.withValue(v);
+                _syncHexFromHsv();
+              }),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: current,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: p.paperEdge),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: TextField(
+                    controller: _hexCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Esadecimale',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: _tryParseHex,
+                    onChanged: (v) {
+                      if (v.replaceAll('#', '').length == 6) _tryParseHex(v);
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Annulla'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(current),
+          child: const Text('Applica'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Color wheel: hue ring on the outside, saturation/value square in the
+/// middle. Dragging on the ring sets hue; dragging inside the square
+/// sets (saturation, value). Both gestures live in one widget so the
+/// pointer naturally hands off when the user slides from one to the
+/// other.
+class _ColorWheel extends StatelessWidget {
+  final double size;
+  final HSVColor hsv;
+  final ValueChanged<HSVColor> onChanged;
+  const _ColorWheel({
+    required this.size,
+    required this.hsv,
+    required this.onChanged,
+  });
+
+  static const double _ringThickness = 28;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: size,
+      height: size,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanStart: (d) => _handlePointer(d.localPosition),
+        onPanUpdate: (d) => _handlePointer(d.localPosition),
+        onTapDown: (d) => _handlePointer(d.localPosition),
+        child: CustomPaint(
+          painter: _ColorWheelPainter(
+            hsv: hsv,
+            ringThickness: _ringThickness,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _handlePointer(Offset local) {
+    final center = Offset(size / 2, size / 2);
+    final outerR = size / 2;
+    final innerR = outerR - _ringThickness;
+    final v = local - center;
+    final dist = v.distance;
+
+    if (dist >= innerR - 4) {
+      // On (or near) the hue ring — set hue from polar angle.
+      final angle = math.atan2(v.dy, v.dx); // -pi..pi, 0 = +x axis
+      // Map so 0° = red at the right (standard wheel orientation).
+      final degRaw = angle * 180.0 / math.pi;
+      final deg = (degRaw + 360) % 360;
+      onChanged(hsv.withHue(deg));
+      return;
+    }
+
+    // Otherwise we're in the SV square inscribed in the inner circle.
+    final squareHalf = innerR / math.sqrt2; // largest square inside circle
+    final sx = (local.dx - (center.dx - squareHalf)) / (squareHalf * 2);
+    final sy = (local.dy - (center.dy - squareHalf)) / (squareHalf * 2);
+    final s = sx.clamp(0.0, 1.0);
+    final val = (1.0 - sy).clamp(0.0, 1.0);
+    onChanged(hsv.withSaturation(s).withValue(val));
+  }
+}
+
+class _ColorWheelPainter extends CustomPainter {
+  final HSVColor hsv;
+  final double ringThickness;
+  _ColorWheelPainter({required this.hsv, required this.ringThickness});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final outerR = math.min(size.width, size.height) / 2;
+    final innerR = outerR - ringThickness;
+
+    // ── Hue ring ──
+    final ringRect = Rect.fromCircle(
+      center: center,
+      radius: outerR - ringThickness / 2,
+    );
+    final hueGradient = const SweepGradient(
+      colors: [
+        Color(0xFFFF0000),
+        Color(0xFFFFFF00),
+        Color(0xFF00FF00),
+        Color(0xFF00FFFF),
+        Color(0xFF0000FF),
+        Color(0xFFFF00FF),
+        Color(0xFFFF0000),
+      ],
+    );
+    final ringPaint = Paint()
+      ..shader = hueGradient.createShader(
+        Rect.fromCircle(center: center, radius: outerR),
+      )
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = ringThickness;
+    canvas.drawArc(ringRect, 0, 2 * math.pi, false, ringPaint);
+
+    // ── Hue indicator dot on the ring ──
+    final hueRad = hsv.hue * math.pi / 180;
+    final hueR = outerR - ringThickness / 2;
+    final hueDot = center + Offset(math.cos(hueRad), math.sin(hueRad)) * hueR;
+    canvas.drawCircle(
+      hueDot,
+      ringThickness / 2 - 2,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 3,
+    );
+    canvas.drawCircle(
+      hueDot,
+      ringThickness / 2 - 2,
+      Paint()
+        ..color = Colors.black54
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+
+    // ── SV square inscribed in the inner circle ──
+    final half = innerR / math.sqrt2;
+    final square = Rect.fromCenter(
+      center: center,
+      width: half * 2,
+      height: half * 2,
+    );
+    // Base color = pure hue (S=1, V=1).
+    final pureHue = HSVColor.fromAHSV(1, hsv.hue, 1, 1).toColor();
+    // Horizontal: white → pure hue (saturation).
+    final satShader = LinearGradient(
+      begin: Alignment.centerLeft,
+      end: Alignment.centerRight,
+      colors: [Colors.white, pureHue],
+    ).createShader(square);
+    canvas.drawRect(square, Paint()..shader = satShader);
+    // Vertical: transparent → black (value).
+    final valShader = const LinearGradient(
+      begin: Alignment.topCenter,
+      end: Alignment.bottomCenter,
+      colors: [Colors.transparent, Colors.black],
+    ).createShader(square);
+    canvas.drawRect(square, Paint()..shader = valShader);
+
+    // SV indicator inside the square.
+    final sx = square.left + hsv.saturation * square.width;
+    final sy = square.top + (1.0 - hsv.value) * square.height;
+    canvas.drawCircle(
+      Offset(sx, sy),
+      7,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.5,
+    );
+    canvas.drawCircle(
+      Offset(sx, sy),
+      7,
+      Paint()
+        ..color = Colors.black54
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_ColorWheelPainter old) =>
+      old.hsv != hsv || old.ringThickness != ringThickness;
+}
+
+/// Brightness slider — pure hue at S=current on the right, fades to
+/// black on the left. Separate from the SV square so dragging value
+/// doesn't lose the saturation position.
+class _ValueSlider extends StatelessWidget {
+  final HSVColor hsv;
+  final ValueChanged<double> onChanged;
+  const _ValueSlider({required this.hsv, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (ctx, constraints) {
+        final width = constraints.maxWidth;
+        void onTouch(Offset local) {
+          final v = (local.dx / width).clamp(0.0, 1.0);
+          onChanged(v);
+        }
+
+        final fullColor = hsv.withValue(1).toColor();
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onPanStart: (d) => onTouch(d.localPosition),
+          onPanUpdate: (d) => onTouch(d.localPosition),
+          onTapDown: (d) => onTouch(d.localPosition),
+          child: Stack(
+            alignment: Alignment.centerLeft,
+            children: [
+              Container(
+                height: 18,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(colors: [Colors.black, fullColor]),
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(color: const Color(0x33000000)),
+                ),
+              ),
+              Positioned(
+                left: (hsv.value.clamp(0.0, 1.0) * width) - 8,
+                child: IgnorePointer(
+                  child: Container(
+                    width: 16,
+                    height: 22,
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: Colors.black54, width: 1),
+                      boxShadow: const [
+                        BoxShadow(
+                            color: Color(0x33000000),
+                            blurRadius: 3,
+                            offset: Offset(0, 1)),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+

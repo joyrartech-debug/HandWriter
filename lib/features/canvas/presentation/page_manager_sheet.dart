@@ -153,13 +153,39 @@ Future<String?> _pickChapter(
 /// same state updates.
 class PageManagerSheet extends ConsumerStatefulWidget {
   final CanvasState initialState;
-  const PageManagerSheet({super.key, required this.initialState});
+  /// Messenger captured from the canvas screen so SnackBars survive the
+  /// bottom sheet route's lifecycle. On iPad, `ScaffoldMessenger.of(context)`
+  /// resolved inside the sheet could resolve to a messenger that gets torn
+  /// down with the sheet — leaving a "deleted" snackbar pinned to the
+  /// bottom until the app is restarted.
+  final ScaffoldMessengerState? parentMessenger;
+  const PageManagerSheet({
+    super.key,
+    required this.initialState,
+    this.parentMessenger,
+  });
 
   @override
   ConsumerState<PageManagerSheet> createState() => _PageManagerSheetState();
 }
 
 class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
+  /// Resolves the messenger to use for SnackBars. Prefers the parent
+  /// messenger (captured before the sheet was opened) so the snackbar lives
+  /// in the canvas screen's scope and respects its own duration timer even
+  /// if the sheet is dismissed quickly.
+  ScaffoldMessengerState get _messenger =>
+      widget.parentMessenger ?? ScaffoldMessenger.of(context);
+
+  @override
+  void dispose() {
+    // Clear any pending snackbars when the sheet closes — guards against
+    // the iPad bug where a delete-page snackbar lingered past its 5s
+    // duration and could only be cleared by restarting the app.
+    widget.parentMessenger?.clearSnackBars();
+    super.dispose();
+  }
+
   /// Document indices of currently selected pages.
   final Set<int> _selected = {};
 
@@ -204,7 +230,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
 
   Future<void> _assignSelectedToChapter(CanvasState s) async {
     if (s.metadata.chapters.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      _messenger.showSnackBar(
         const SnackBar(content: Text('Crea prima almeno un capitolo.')),
       );
       return;
@@ -281,7 +307,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
     );
     ref.read(canvasProvider.notifier).deletePages(_selected.toList());
     _clearSelection();
-    ScaffoldMessenger.of(context).showSnackBar(
+    _messenger.showSnackBar(
       SnackBar(
         content: Text('${pages.length} pagine tagliate — aprire il notebook di destinazione per incollare.'),
         duration: const Duration(seconds: 4),
@@ -388,7 +414,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                                 entries: clip.entries,
                               );
                               ref.read(pageClipboardProvider.notifier).state = null;
-                              ScaffoldMessenger.of(context).showSnackBar(
+                              _messenger.showSnackBar(
                                 SnackBar(
                                   content: Text('${clip.pages.length} pagine incollate.'),
                                   duration: const Duration(seconds: 2),
@@ -580,8 +606,8 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
                       // can roll it back without per-call bookkeeping.
                       ref.read(canvasProvider.notifier).deletePage(docIndex);
                       HapticFeedback.mediumImpact();
-                      ScaffoldMessenger.of(context).hideCurrentSnackBar();
-                      ScaffoldMessenger.of(context).showSnackBar(
+                      _messenger.hideCurrentSnackBar();
+                      _messenger.showSnackBar(
                         SnackBar(
                           content: Text('Pagina ${docIndex + 1} eliminata'),
                           duration: const Duration(seconds: 5),
@@ -617,7 +643,7 @@ class _PageManagerSheetState extends ConsumerState<PageManagerSheet> {
   Future<void> _showChapterPickerForPage(
       BuildContext ctx, CanvasState s, int pageIndex) async {
     if (s.metadata.chapters.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
+      _messenger.showSnackBar(
         const SnackBar(content: Text('Crea prima almeno un capitolo.')),
       );
       return;

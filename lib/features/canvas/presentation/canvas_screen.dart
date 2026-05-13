@@ -2429,6 +2429,18 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
     ref.read(canvasProvider.notifier).addImageElement(pagePos, name, bytes, w, h);
   }
 
+  /// Asks the user which pages of the PDF to import. Returns `null` if
+  /// the user cancels. When the user picks "Tutte le pagine" both
+  /// `start` and `end` come back null so the caller streams the entire
+  /// PDF without bound checks.
+  Future<_PdfImportRange?> _askPdfImportRange(int estimatedPages) async {
+    if (!mounted) return null;
+    return showDialog<_PdfImportRange>(
+      context: context,
+      builder: (ctx) => _PdfRangeDialog(estimatedPages: estimatedPages),
+    );
+  }
+
   /// Estimate the number of pages in a PDF from its raw bytes.
   /// Searches for /Type /Page (not /Pages) entries in the byte stream.
   int _countPdfPages(Uint8List bytes) {
@@ -2445,32 +2457,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
 
     // Estimate page count for pre-confirmation
     final estimated = _countPdfPages(bytes);
-    const kPageConfirmThreshold = 5;
 
-    if (estimated > kPageConfirmThreshold) {
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: const Text('PDF con molte pagine'),
-          content: Text(
-            'Questo PDF ha circa $estimated pagine.\n'
-            'Verranno create $estimated nuove pagine nel notebook.\n\n'
-            'Continuare?',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Annulla'),
-            ),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: Text('Importa $estimated pagine'),
-            ),
-          ],
-        ),
-      );
-      if (confirmed != true) return;
-    }
+    // Always offer page-range selection (even for short PDFs) so the user
+    // can import just the chunk they care about. The dialog falls back to
+    // "all" by default so single-tap imports stay quick.
+    final range = await _askPdfImportRange(estimated);
+    if (range == null) return;
+    // 1-based inclusive bounds; null = unbounded on that side.
+    final int? rangeStart = range.start;
+    final int? rangeEnd = range.end;
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
@@ -2496,8 +2491,21 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       // the wrong chapter assignment.
       notifier.beginBulkOperation();
       int processed = 0;
+      // sourcePageNumber tracks the 1-based index of the page in the
+      // source PDF as we walk Printing.raster's stream — used for the
+      // range filter.
+      int sourcePageNumber = 0;
+      // Render only the pages the user wants. `Printing.raster` doesn't
+      // expose per-page rendering selection (5.x), so we walk all pages
+      // and skip those outside the range. For PDFs with a tight end
+      // bound we break out early to save the remaining rasterizations.
       await for (final raster in Printing.raster(bytes, dpi: dpi.toDouble())) {
         if (!mounted) return;
+        sourcePageNumber++;
+        // Skip pages before the requested start.
+        if (rangeStart != null && sourcePageNumber < rangeStart) continue;
+        // Stop once we've passed the end of the requested range.
+        if (rangeEnd != null && sourcePageNumber > rangeEnd) break;
 
         final png = await raster.toPng();
         if (!mounted) return;
@@ -2536,11 +2544,16 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
         processed++;
 
         // Progress feedback for long imports so the user sees we're alive.
-        if (mounted && estimated > kPageConfirmThreshold && processed % 5 == 0) {
+        // Total = pages in the requested range (or estimated total when
+        // the user picked "all" — still a decent approximation).
+        final rangeTotal = (rangeStart != null && rangeEnd != null)
+            ? (rangeEnd - rangeStart + 1)
+            : estimated;
+        if (mounted && rangeTotal > 5 && processed % 5 == 0) {
           ScaffoldMessenger.of(context)
             ..clearSnackBars()
             ..showSnackBar(SnackBar(
-              content: Text('Importazione PDF: $processed/$estimated'),
+              content: Text('Importazione PDF: $processed/$rangeTotal'),
               duration: const Duration(seconds: 30),
             ));
         }
@@ -2892,6 +2905,15 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                       for (final i in canvasState.filteredPageIndices) i + 1,
                     ],
                     currentPage: canvasState.currentPageIndex + 1,
+                    previousPage: (() {
+                      final prev = canvasState.previousPageIndex;
+                      if (prev == null) return null;
+                      if (prev < 0 ||
+                          prev >= canvasState.document.pages.length) {
+                        return null;
+                      }
+                      return prev + 1;
+                    })(),
                     onPageTap: (n) => notifier.goToPage(n - 1),
                     onPageSecondary: (n, pos) =>
                         _showPageStripContextMenu(n, pos),
@@ -2968,6 +2990,11 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
                             .penPresets[slot];
                         if (preset == null) return;
                         notifier.applyPenPreset(preset);
+                        // Dismiss the popup so the canvas is unobstructed
+                        // — picking a preset is a committed choice, the
+                        // user doesn't need to keep the panel open to
+                        // tweak further.
+                        if (_popupOpen) setState(() => _popupOpen = false);
                       },
                       onSavePreset: (slot) {
                         final s = canvasState;
@@ -5929,6 +5956,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
   }
 
   void _showPageManager(CanvasState canvasState) {
+    // Capture the canvas-screen messenger up front so SnackBars triggered
+    // inside the sheet (delete page, paste, etc.) live in this screen's
+    // scope and respect their duration timer even after the sheet closes.
+    final parentMessenger = ScaffoldMessenger.of(context);
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -5936,7 +5967,10 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) => PageManagerSheet(initialState: canvasState),
+      builder: (ctx) => PageManagerSheet(
+        initialState: canvasState,
+        parentMessenger: parentMessenger,
+      ),
     );
   }
 
@@ -6307,4 +6341,160 @@ Future<Uint8List> _buildPdfOnIsolate(List<_PdfPagePayload> payloads) async {
 /// barrel override. Mirrors the two `penFlags` bits the C++ runner
 /// reads — see `PenInputChannel` doc comment.
 enum _NativeBarrel { upper, lower }
+
+// ═══════════════════════════════════════════════════════════════
+//  PDF IMPORT RANGE PICKER
+// ═══════════════════════════════════════════════════════════════
+
+/// Page range chosen by the user when importing a PDF. `null` on either
+/// side means "no bound on this side" — i.e. start from page 1 or end at
+/// the last page. Both null = import every page.
+class _PdfImportRange {
+  final int? start;
+  final int? end;
+  const _PdfImportRange({this.start, this.end});
+  const _PdfImportRange.all() : start = null, end = null;
+}
+
+class _PdfRangeDialog extends StatefulWidget {
+  final int estimatedPages;
+  const _PdfRangeDialog({required this.estimatedPages});
+
+  @override
+  State<_PdfRangeDialog> createState() => _PdfRangeDialogState();
+}
+
+class _PdfRangeDialogState extends State<_PdfRangeDialog> {
+  /// 'all' or 'range'.
+  String _mode = 'all';
+  late final TextEditingController _startCtrl;
+  late final TextEditingController _endCtrl;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _startCtrl = TextEditingController(text: '1');
+    _endCtrl = TextEditingController(
+      text: widget.estimatedPages > 0 ? '${widget.estimatedPages}' : '',
+    );
+  }
+
+  @override
+  void dispose() {
+    _startCtrl.dispose();
+    _endCtrl.dispose();
+    super.dispose();
+  }
+
+  void _confirm() {
+    if (_mode == 'all') {
+      Navigator.of(context).pop(const _PdfImportRange.all());
+      return;
+    }
+    final start = int.tryParse(_startCtrl.text.trim());
+    final end = int.tryParse(_endCtrl.text.trim());
+    if (start == null || end == null || start < 1 || end < start) {
+      setState(() => _error = 'Inserisci un intervallo valido (es. 1–10).');
+      return;
+    }
+    if (widget.estimatedPages > 0 && start > widget.estimatedPages) {
+      setState(() => _error =
+          'Il PDF ha circa ${widget.estimatedPages} pagine. Inizio fuori range.');
+      return;
+    }
+    final clampedEnd =
+        widget.estimatedPages > 0 ? min(end, widget.estimatedPages) : end;
+    Navigator.of(context).pop(_PdfImportRange(start: start, end: clampedEnd));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final est = widget.estimatedPages;
+    return AlertDialog(
+      title: const Text('Importa PDF'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (est > 0)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(
+                'Il PDF ha circa $est pagine.',
+                style: TextStyle(color: Colors.grey.shade700),
+              ),
+            ),
+          RadioListTile<String>(
+            value: 'all',
+            groupValue: _mode,
+            onChanged: (v) => setState(() => _mode = v ?? 'all'),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: Text(est > 0
+                ? 'Tutte le pagine ($est)'
+                : 'Tutte le pagine'),
+          ),
+          RadioListTile<String>(
+            value: 'range',
+            groupValue: _mode,
+            onChanged: (v) => setState(() => _mode = v ?? 'all'),
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('Intervallo personalizzato'),
+          ),
+          if (_mode == 'range') ...[
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _startCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'Da',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _confirm(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Text('–'),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: _endCtrl,
+                    keyboardType: TextInputType.number,
+                    decoration: const InputDecoration(
+                      labelText: 'A',
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                    ),
+                    onSubmitted: (_) => _confirm(),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          if (_error != null) ...[
+            const SizedBox(height: 8),
+            Text(_error!,
+                style: const TextStyle(color: Colors.red, fontSize: 12)),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Annulla'),
+        ),
+        FilledButton(
+          onPressed: _confirm,
+          child: const Text('Importa'),
+        ),
+      ],
+    );
+  }
+}
 

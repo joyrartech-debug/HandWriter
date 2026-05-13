@@ -403,6 +403,11 @@ class CanvasState {
   final DocumentStructure document;
   final Map<String, PageData> pages;
   final int currentPageIndex;
+  /// Last page index visited before navigating to [currentPageIndex].
+  /// Used by the page navigation bar to show a "← previous" chip so the
+  /// user can toggle between two pages without having to remember the
+  /// number. `null` means no prior page (fresh notebook open).
+  final int? previousPageIndex;
   final CanvasTool currentTool;
   final ToolSettings toolSettings;
   final List<StrokePoint> activeStroke;
@@ -481,6 +486,7 @@ class CanvasState {
     required this.document,
     required this.pages,
     this.currentPageIndex = 0,
+    this.previousPageIndex,
     this.currentTool = CanvasTool.pen,
     this.toolSettings = const ToolSettings(),
     this.activeStroke = const [],
@@ -542,6 +548,8 @@ class CanvasState {
     DocumentStructure? document,
     Map<String, PageData>? pages,
     int? currentPageIndex,
+    int? previousPageIndex,
+    bool clearPreviousPage = false,
     CanvasTool? currentTool,
     ToolSettings? toolSettings,
     List<StrokePoint>? activeStroke,
@@ -586,6 +594,9 @@ class CanvasState {
         document: document ?? this.document,
         pages: pages ?? this.pages,
         currentPageIndex: currentPageIndex ?? this.currentPageIndex,
+        previousPageIndex: clearPreviousPage
+            ? null
+            : (previousPageIndex ?? this.previousPageIndex),
         currentTool: currentTool ?? this.currentTool,
         toolSettings: toolSettings ?? this.toolSettings,
         activeStroke: activeStroke ?? this.activeStroke,
