@@ -418,6 +418,32 @@ class WebDavService {
             print('[WebDAV] downloadFile critical-verify: PROPFIND failed '
                 'for $remotePath: $e — trusting body');
           }
+        } else if (expectedSize == null &&
+            bytes.isNotEmpty &&
+            bytes.length % 1024 == 0) {
+          // Defense-in-depth for non-criticalVerify paths (assets,
+          // pages, symbols): when Content-Length was absent (chunked
+          // response — Tailscale relay does this routinely) AND the
+          // body is exactly 1024-aligned, that's the historic
+          // truncation fingerprint. Same defense the upload path
+          // applies: confirm the real size via PROPFIND, let the
+          // existing mismatch path drive retry+Range-recovery on
+          // truncation. The PROPFIND cost is paid ONLY when we already
+          // see a suspicious body — clean downloads pay nothing.
+          //
+          // Without this, asset bytes truncated at a 1024-aligned cut
+          // sneak through and end up in the local .ncnote ZIP cache,
+          // causing `ui.instantiateImageCodec` to throw on every page
+          // paint until the user re-imports the source PDF.
+          try {
+            final propfindSize = await getContentLength(remotePath)
+                .timeout(const Duration(seconds: 10));
+            if (propfindSize != null) expectedSize = propfindSize;
+          } catch (e) {
+            // ignore: avoid_print
+            print('[WebDAV] downloadFile 1024-suspicion: PROPFIND failed '
+                'for $remotePath: $e — trusting body');
+          }
         }
 
         if (expectedSize != null && expectedSize != bytes.length) {
