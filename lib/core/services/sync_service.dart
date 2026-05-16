@@ -762,17 +762,33 @@ class SyncService {
     // blip on the PROPFIND) falls back to "trusting the PUT" — same
     // semantics as the per-PUT verify did when its own PROPFIND timed
     // out.
+    //
+    // Failure handling is split deliberately: a listDirectory hiccup is
+    // transient and we fall through (PUTs probably stuck — best effort).
+    // But a WebDavSizeMismatchException out of the retry path means we
+    // ALREADY confirmed truncation and exhausted retries — that asset's
+    // bytes on the server are corrupt and we must NOT proceed to
+    // document.json / metadata.json (committing those would advertise
+    // broken assets to every other device, exactly the May 2026
+    // incident). Rethrow so syncDelta aborts before the commit markers.
     if (expectedAssetSizes.isNotEmpty) {
+      Map<String, int>? remoteSizes;
       try {
         final items = await _webdav
             .listDirectory('${dir}assets/')
             .timeout(const Duration(seconds: 30));
-        final remoteSizes = <String, int>{};
+        remoteSizes = <String, int>{};
         for (final it in items) {
           if (it.contentLength != null) {
             remoteSizes[it.name] = it.contentLength!;
           }
         }
+      } catch (e) {
+        // ignore: avoid_print
+        print('[Sync] Batched asset listDirectory failed '
+            '(${expectedAssetSizes.length} assets) — trusting PUTs: $e');
+      }
+      if (remoteSizes != null) {
         final retriesNeeded = <String>[];
         for (final entry in expectedAssetSizes.entries) {
           final remote = remoteSizes[entry.key];
@@ -790,17 +806,15 @@ class SyncService {
         }
         if (retriesNeeded.isNotEmpty) {
           // Re-upload only the broken ones with criticalVerify (the
-          // strict per-file PROPFIND-with-retries path).
+          // strict per-file PROPFIND-with-retries path). A
+          // WebDavSizeMismatchException out of here means retries
+          // exhausted — propagate, do NOT continue to commit markers.
           await Future.wait(retriesNeeded.map((k) {
             final bytes = dirtyAssets![k]!;
             return _webdav.uploadFile('${dir}assets/$k', bytes,
                 timeoutSeconds: dt, criticalVerify: true);
           }));
         }
-      } catch (e) {
-        // ignore: avoid_print
-        print('[Sync] Batched asset verify failed (${expectedAssetSizes.length} '
-            'assets) — trusting PUTs: $e');
       }
     }
 
