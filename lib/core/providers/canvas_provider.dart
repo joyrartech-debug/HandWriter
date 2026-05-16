@@ -955,12 +955,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final bytes = s.assetBytes[assetId];
     if (bytes == null) {
       // The asset is referenced by a page but its bytes aren't in
-      // memory — typically because the server never had them (404 on
-      // GET) or the .ncnote zip we downloaded was incomplete. Silently
-      // skipping leaves the user with blank thumbnails and no clue
-      // why; mark as corrupt so the broken-image overlay appears with
-      // the "re-import the source PDF/image" tooltip.
-      if (_corruptAssetIds.add(assetId)) {
+      // memory. This commonly happens when the .ncnote ZIP cache was
+      // built from an incomplete state (a delta pull whose asset GETs
+      // were truncated by Tailscale and silently dropped) but the
+      // server actually has the bytes. Try a one-shot fetch from the
+      // delta folder before giving up — with the post-GET 1024-aligned
+      // verification in webdav_service.dart the fetched bytes are
+      // trustworthy. Only mark corrupt when the fetch genuinely fails
+      // (404 / network gone).
+      //
+      // Throttle to once per assetId per session via [_healAttempted]
+      // so we don't keep retrying on every paint frame for assets
+      // that truly are 404.
+      final notebookId = s.metadata.id;
+      if (_healAttempted.add(assetId)) {
+        unawaited(_lazyFetchMissingAsset(assetId, notebookId));
+      } else if (_corruptAssetIds.add(assetId)) {
+        // Already attempted once and failed — mark corrupt so the UI
+        // shows the broken-image overlay with the recovery tooltip.
         // ignore: avoid_print
         print('[Canvas] Asset $assetId has no bytes available — '
             'likely missing on server (404) or never downloaded. '
@@ -4757,6 +4769,56 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// failure branch so a user who re-imported the source on another
   /// device gets the fix automatically on the affected device's next
   /// paint instead of having to wait for a sync round-trip.
+  /// Sister to [_healCorruptAsset] for the "bytes never landed in
+  /// state.assetBytes" case: the asset is referenced by a page but no
+  /// payload is in memory. Fetches from the delta folder and, on
+  /// success, writes into state + decodes. Used by
+  /// [ensureAssetDecodedForThumbnail] so a missing asset doesn't
+  /// immediately render as broken when the server actually has it.
+  Future<void> _lazyFetchMissingAsset(
+      String assetId, String ownerNotebookId) async {
+    try {
+      final syncService = _ref.read(syncServiceProvider);
+      if (syncService == null) {
+        _markMissingAsCorrupt(assetId);
+        return;
+      }
+      final fresh = await syncService.downloadDeltaAsset(
+          ownerNotebookId, assetId);
+      if (_disposed ||
+          state == null ||
+          state!.metadata.id != ownerNotebookId) {
+        return;
+      }
+      // Server returned bytes — install and decode. Defense-in-depth
+      // (the webdav layer already verifies); a 1024-aligned body here
+      // means something slipped past, so reject it.
+      if (fresh.isEmpty || fresh.length % 1024 == 0) {
+        _markMissingAsCorrupt(assetId);
+        return;
+      }
+      final mergedAssets = Map<String, Uint8List>.from(state!.assetBytes);
+      mergedAssets[assetId] = fresh;
+      state = state!.copyWith(assetBytes: mergedAssets);
+      await _decodeAndCacheImage(assetId, fresh);
+    } catch (_) {
+      // 404 / network failure / etc — only NOW do we declare the asset
+      // unrecoverable and surface the broken-image overlay.
+      _markMissingAsCorrupt(assetId);
+    }
+  }
+
+  void _markMissingAsCorrupt(String assetId) {
+    if (_disposed || state == null) return;
+    if (_corruptAssetIds.add(assetId)) {
+      // ignore: avoid_print
+      print('[Canvas] Asset $assetId has no bytes available — '
+          'likely missing on server (404) or never downloaded. '
+          'Re-import the source PDF/image to recover.');
+      imageCacheVersion.value++;
+    }
+  }
+
   Future<void> _healCorruptAsset(String assetId, String ownerNotebookId) async {
     try {
       final syncService = _ref.read(syncServiceProvider);
