@@ -152,6 +152,65 @@ script reports them but won't touch them.
 
 ---
 
+## `build_deb.sh`
+
+Builds a Debian/Ubuntu `.deb` package from the release bundle. Pulls
+the existing `build/linux/x64/release/bundle/` by default; pass
+`--rebuild` to run `flutter build linux --release` first.
+
+```bash
+./tool/build_deb.sh             # use existing bundle
+./tool/build_deb.sh --rebuild   # rebuild Flutter first
+```
+
+Output: `build/deb/handwriter_<version>_amd64.deb`. The package
+installs to:
+
+- `/usr/lib/handwriter/`          — Flutter bundle (binary + lib/ + data/)
+- `/usr/bin/handwriter`           — symlink into the bundle
+- `/usr/share/applications/handwriter.desktop`
+- `/usr/share/icons/hicolor/{512x512,192x192}/apps/handwriter.png`
+
+Install / uninstall:
+
+```bash
+sudo apt install ./build/deb/handwriter_<version>_amd64.deb
+sudo apt remove handwriter
+```
+
+Dependencies declared in the control file: `libc6, libstdc++6, libgtk-3-0t64 | libgtk-3-0, libsecret-1-0, libsqlite3-0`. `poppler-utils` is recommended (used by `tool/recover_truncated_assets.py`'s pdftocairo fallback, not the app itself).
+
+---
+
+## `recover_truncated_assets.py`
+
+One-shot recovery for the May 2026 1024-aligned asset truncation
+incident. Scans the local Nextcloud mirror for PNG assets whose size
+is a multiple of 1024 (the truncation fingerprint), then attempts two
+recovery paths in order:
+
+1. **Nextcloud Versions API** — fetches a historical clean version
+   if one exists, with Range-based GET fallback for the
+   truncation-on-read pattern Tailscale also exhibits.
+2. **Source PDF re-render** — locates the original PDF under
+   `~/Nextcloud/CLOUD/My files/` and re-rasters the affected page
+   via `pdftocairo`, with DPI derived from the surviving PNG IHDR
+   width vs `pdfinfo` page-size.
+
+```bash
+python3 tool/recover_truncated_assets.py            # dry run
+python3 tool/recover_truncated_assets.py --apply    # write changes
+python3 tool/recover_truncated_assets.py --phase A  # versions only
+python3 tool/recover_truncated_assets.py --phase B  # PDF rerender only
+```
+
+Atomic writes to the mirror. Reads credentials from
+`~/.local/share/com.example.handwriter/shared_preferences.json` and
+never prints them. After `--apply`, the Nextcloud desktop client syncs
+the modified files to the server.
+
+---
+
 ## Safety notes
 
 - Both scripts use atomic `temp + rename` writes — a Nextcloud client
