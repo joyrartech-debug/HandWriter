@@ -608,10 +608,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final isMobile = defaultTargetPlatform == TargetPlatform.iOS ||
           defaultTargetPlatform == TargetPlatform.android;
       final initialRefs = _assetRefsForPage(startPageIndex, repaired.document, repaired.pages);
-      // Phase 1: kick off decodes for the initial page.
+      // Phase 1: kick off decodes for the initial page. Missing-bytes
+      // assets get routed through ensureAssetDecodedForThumbnail which
+      // triggers a lazy fetch — so an incomplete .ncnote heals itself
+      // on open without the user having to navigate away and back.
       for (final assetId in initialRefs) {
         final bytes = assets[assetId];
-        if (bytes != null) unawaited(_decodeAndCacheImage(assetId, bytes));
+        if (bytes != null) {
+          unawaited(_decodeAndCacheImage(assetId, bytes));
+        } else {
+          ensureAssetDecodedForThumbnail(assetId);
+        }
       }
       if (isMobile) {
         // Phase 2 mobile: decode only the ±_mobileAssetWindow page window.
@@ -662,9 +669,25 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
 
   /// Ensure assets needed by pages in the current window are decoded, and
   /// evict far-away ones (mobile only). Called after page navigation.
+  ///
+  /// Also triggers `ensureAssetDecodedForThumbnail` for any image element
+  /// on the CURRENT page whose bytes are missing — that routes through
+  /// the lazy-fetch path so the user doesn't have to navigate away and
+  /// back to make a missing image appear after sync completes.
   void _ensureAssetsForCurrentWindow() {
     final s = state;
     if (s == null) return;
+    // Lazy-fetch missing assets on the current page (all platforms).
+    // ensureAssetDecodedForThumbnail is idempotent + race-free: if the
+    // asset is already loading/cached/corrupt it returns immediately.
+    final page = s.currentPage;
+    if (page != null) {
+      for (final el in page.layers.content) {
+        if (el is ImageElement) {
+          ensureAssetDecodedForThumbnail(el.data.assetPath);
+        }
+      }
+    }
     final isMobile = defaultTargetPlatform == TargetPlatform.iOS ||
         defaultTargetPlatform == TargetPlatform.android;
     if (!isMobile) return;
@@ -964,23 +987,24 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // trustworthy. Only mark corrupt when the fetch genuinely fails
       // (404 / network gone).
       //
-      // Throttle to once per assetId per session via [_healAttempted]
-      // so we don't keep retrying on every paint frame for assets
-      // that truly are 404.
-      final notebookId = s.metadata.id;
-      if (_healAttempted.add(assetId)) {
-        unawaited(_lazyFetchMissingAsset(assetId, notebookId));
-      } else if (_corruptAssetIds.add(assetId)) {
-        // Already attempted once and failed — mark corrupt so the UI
-        // shows the broken-image overlay with the recovery tooltip.
-        // ignore: avoid_print
-        print('[Canvas] Asset $assetId has no bytes available — '
-            'likely missing on server (404) or never downloaded. '
-            'Re-import the source PDF/image to recover.');
-        // Bump the image-cache version so the painter repaints (the
-        // corrupt-asset overlay is gated on corruptAssetIds.contains()).
-        imageCacheVersion.value++;
-      }
+      // Three exit gates in order:
+      //   1. Already in _loadingAssetIds: fetch is in flight — return
+      //      so a re-paint during the fetch doesn't race and prematurely
+      //      mark the asset corrupt (the original bug).
+      //   2. Already in _corruptAssetIds OR _healAttempted: an earlier
+      //      attempt landed (success → already decoded path; failure →
+      //      stay corrupt). Don't retry every paint frame.
+      //   3. Otherwise: kick off a new fetch.
+      if (_loadingAssetIds.contains(assetId)) return;
+      if (_corruptAssetIds.contains(assetId)) return;
+      if (_healAttempted.contains(assetId)) return;
+      _healAttempted.add(assetId);
+      _loadingAssetIds.add(assetId);
+      // Bump version so the UI repaints — the page render now sees
+      // loadingAssetIds.contains(assetId) and shows a "loading"
+      // placeholder instead of nothing.
+      imageCacheVersion.value++;
+      unawaited(_lazyFetchMissingAsset(assetId, s.metadata.id));
       return;
     }
     _onDemandDecodeQueued.add(assetId);
@@ -4757,6 +4781,18 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// Public read-only view of [_corruptAssetIds] for UI consumers.
   Set<String> get corruptAssetIds => _corruptAssetIds;
 
+  /// Asset IDs whose bytes are currently being fetched from the server
+  /// because they were missing from `state.assetBytes`. While in this
+  /// set, callers should render a "loading" placeholder, NOT the
+  /// broken-image badge — the asset isn't corrupt, it just hasn't
+  /// arrived yet. Distinct from `_healAttempted` because that set
+  /// stays populated AFTER the fetch (success or failure) to gate
+  /// retries; this set is cleared the moment the fetch lands.
+  final Set<String> _loadingAssetIds = <String>{};
+
+  /// Public read-only view of [_loadingAssetIds] for UI consumers.
+  Set<String> get loadingAssetIds => _loadingAssetIds;
+
   /// Tracks per-session asset IDs that have already been the target of
   /// a one-shot fresh-fetch attempt. Without this we'd loop pulling
   /// the same asset every paint frame if the server bytes are STILL
@@ -4805,6 +4841,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // 404 / network failure / etc — only NOW do we declare the asset
       // unrecoverable and surface the broken-image overlay.
       _markMissingAsCorrupt(assetId);
+    } finally {
+      // Always clear the loading flag — either we landed bytes (UI
+      // shows the image) or we marked corrupt (UI shows the broken
+      // overlay). Either way the loading placeholder must go.
+      if (_loadingAssetIds.remove(assetId)) {
+        imageCacheVersion.value++;
+      }
     }
   }
 

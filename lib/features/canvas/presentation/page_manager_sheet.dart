@@ -1234,16 +1234,29 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
     }
     // Detect corrupt-asset indicator: any image element on this page
     // whose asset has been flagged as un-decodable (typically due to
-    // the historic 1024-aligned server-truncation bug).
+    // the historic 1024-aligned server-truncation bug). Also detect
+    // loading-asset (lazy-fetch in flight) so the thumbnail shows a
+    // distinct "image is on its way" spinner instead of either nothing
+    // or the alarming broken-image badge.
     bool hasCorruptAsset = false;
-    final corruptAssetIds = page != null
-        ? ref.read(canvasProvider.notifier).corruptAssetIds
-        : const <String>{};
-    if (page != null && corruptAssetIds.isNotEmpty) {
+    bool hasLoadingAsset = false;
+    final notifier = ref.read(canvasProvider.notifier);
+    final corruptAssetIds =
+        page != null ? notifier.corruptAssetIds : const <String>{};
+    final loadingAssetIds =
+        page != null ? notifier.loadingAssetIds : const <String>{};
+    if (page != null &&
+        (corruptAssetIds.isNotEmpty || loadingAssetIds.isNotEmpty)) {
       for (final el in page.layers.content) {
-        if (el is ImageElement && corruptAssetIds.contains(el.data.assetPath)) {
-          hasCorruptAsset = true;
-          break;
+        if (el is ImageElement) {
+          final ap = el.data.assetPath;
+          if (corruptAssetIds.contains(ap)) {
+            hasCorruptAsset = true;
+            break;
+          }
+          if (loadingAssetIds.contains(ap)) {
+            hasLoadingAsset = true;
+          }
         }
       }
     }
@@ -1303,6 +1316,23 @@ class _PageGridReorderableState extends ConsumerState<PageGridReorderable> {
                             Icons.broken_image_rounded,
                             color: Color(0xFFE65100),
                             size: 18,
+                          ),
+                        ),
+                      )
+                    else if (hasLoadingAsset)
+                      const Positioned(
+                        top: 6,
+                        right: 6,
+                        child: Tooltip(
+                          message: 'Caricamento immagine dal server…',
+                          child: SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation(
+                                  Color(0xFF1976D2)),
+                            ),
                           ),
                         ),
                       ),
