@@ -22,11 +22,25 @@ cd "$PROJECT_ROOT"
 REBUILD=0
 [[ "${1:-}" == "--rebuild" ]] && REBUILD=1
 
-# Version from pubspec.yaml — `0.36.9+38` → deb version `0.36.9-38`.
+# Version composition:
+#   pubspec.yaml `version: 0.36.9+38`     → upstream 0.36.9, revision 38
+#   built suffix `+<UTC-timestamp>.g<sha>` → makes every rebuild unique AND
+#                                            monotonically greater than the
+#                                            previous one (timestamp leads)
+#   `.dirty` appended when working tree has uncommitted changes
+#
+# Result example: `0.36.9-38+20260518T091530Z.g3579e86`
+# dpkg --compare-versions orders these correctly (digit-grouped lexicographic).
 PUBSPEC_VER=$(grep -E '^version:' pubspec.yaml | awk '{print $2}')
 VER_BASE=${PUBSPEC_VER%+*}
 VER_BUILD=${PUBSPEC_VER#*+}
-DEB_VER="${VER_BASE}-${VER_BUILD}"
+BUILD_TS=$(date -u +%Y%m%dT%H%M%SZ)
+GIT_SHA=$(git rev-parse --short=7 HEAD 2>/dev/null || echo "nogit")
+DIRTY_TAG=""
+if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+  DIRTY_TAG=".dirty"
+fi
+DEB_VER="${VER_BASE}-${VER_BUILD}+${BUILD_TS}.g${GIT_SHA}${DIRTY_TAG}"
 ARCH="amd64"
 PKG="handwriter_${DEB_VER}_${ARCH}"
 
