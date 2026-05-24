@@ -1102,8 +1102,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         '(chapter recovered: $recoveredChapter, unmapped: $unmappedChapter). '
         'Notebook marked dirty so save() pushes the repaired document.');
 
+    // Append orphans AFTER the existing document order: the user's
+    // page-manager reorder lives in `s.document.pages` and must survive
+    // the heal. Sorting the whole combined list by filename was wiping a
+    // local reorder every time the heal fired on open or pre-save. Sort
+    // only orphans among themselves so their relative order is
+    // deterministic across devices when a heal actually recovers files.
+    orphans.sort((a, b) =>
+        _filenameNum(a.fileName).compareTo(_filenameNum(b.fileName)));
     final combined = [...s.document.pages, ...orphans];
-    combined.sort((a, b) => _filenameNum(a.fileName).compareTo(_filenameNum(b.fileName)));
     for (var i = 0; i < combined.length; i++) {
       combined[i] = combined[i].copyWith(pageNumber: i + 1);
     }
@@ -8305,18 +8312,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             'The next save() will push the repaired document to the server.');
       }
 
-      // Assemble merged document: remote entries first (preserves chapter
-      // assignments), then local-only, then orphaned-and-healed.  Sort by
-      // filename numeric suffix (page_001 .. page_NNN) which is the only
-      // stable ordering key — pageNumber inside PageData has been seen
-      // corrupted so we never trust it for sorting.
+      // Assemble merged document: remote entries first (canonical order from
+      // the server — preserves any page-manager reorder), then local-only,
+      // then orphaned-and-healed.  Do NOT sort the combined list by filename
+      // numeric suffix: filenames are minted sequentially at page-creation
+      // time, so sorting by filename destroys a user-defined reorder
+      // (page-manager drag) every time a heal or local-only branch fires
+      // here. Only sort the orphan-synth set internally so its members
+      // appear deterministically across devices when the heal actually
+      // recovers something.
+      orphanSynthEntries.sort((a, b) =>
+          _filenameNum(a.fileName).compareTo(_filenameNum(b.fileName)));
       final combinedEntries = [
         ...remoteMeta.document.pages,
         ...localOnlyEntries,
         ...orphanSynthEntries,
       ];
-      combinedEntries.sort((a, b) =>
-          _filenameNum(a.fileName).compareTo(_filenameNum(b.fileName)));
       // Renumber to guarantee sequential, unique pageNumbers after the heal.
       for (var i = 0; i < combinedEntries.length; i++) {
         combinedEntries[i] = combinedEntries[i].copyWith(pageNumber: i + 1);
