@@ -1010,6 +1010,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _lastSyncedDocument = repaired.document;
     _lastSyncedMetadata = metadata;
     _ghostEntryStrikes.clear();
+    _assetsByLength.clear();
+    _assetIndexBuilt = false;
     _pageJsonCache.clear();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -1947,6 +1949,8 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _lastSyncedDocument = null;
     _lastSyncedMetadata = null;
     _ghostEntryStrikes.clear();
+    _assetsByLength.clear();
+    _assetIndexBuilt = false;
     _pageJsonCache.clear();
     // Reset the corrupt-asset blocklist: once the user closes the notebook,
     // any "this asset failed to decode" state from this session is stale.
@@ -5197,7 +5201,12 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final pageFileName = s.currentPageFileName;
     final undoStack = _pushUndo(s, pageFileName, page);
 
-    final assetId = '${const Uuid().v4()}_$fileName';
+    // Content-dedup: reuse an existing identical-bytes asset instead of
+    // minting a fresh UUID. PDF (re-)import and page-duplicate otherwise store
+    // the same page render under a new id each time, bloating the notebook
+    // (observed: 62 duplicate groups / ~19 MB in one notebook).
+    final dupId = _findIdenticalAsset(bytes, s.assetBytes);
+    final assetId = dupId ?? '${const Uuid().v4()}_$fileName';
 
     final newElement = ContentElement.image(
       id: const Uuid().v4(),
@@ -5216,9 +5225,14 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     final updatedPages = Map<String, PageData>.from(s.pages);
     updatedPages[pageFileName] = updatedPage;
 
-    // Store raw bytes for persistence and decode for rendering.
+    // Store raw bytes for persistence and decode for rendering. When we reused
+    // an existing asset (dupId != null) the bytes are already present and
+    // already uploaded — only register/mark-dirty genuinely new content.
     final newAssetBytes = Map<String, Uint8List>.from(s.assetBytes);
-    newAssetBytes[assetId] = bytes;
+    if (dupId == null) {
+      newAssetBytes[assetId] = bytes;
+      (_assetsByLength[bytes.length] ??= []).add(assetId);
+    }
     // Skip eager decode during bulk operations (PDF import). Each
     // decoded `ui.Image` lives on the GPU at ~3-5 MB; eagerly
     // decoding 78 PDF pages while importing was the OOM that
@@ -5228,9 +5242,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // ONE page during the import, and only that page's image needs
     // to be decoded.
     if (!_bulkOperationInProgress) {
-      _decodeAndCacheImage(assetId, bytes);
+      _decodeAndCacheImage(assetId, newAssetBytes[assetId] ?? bytes);
     }
-    _markAssetDirty(assetId);
+    if (dupId == null) _markAssetDirty(assetId);
 
     state = s.copyWith(
       pages: updatedPages,
@@ -5376,6 +5390,34 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       if (a[i] != b[i]) return false;
     }
     return true;
+  }
+
+  /// Content-dedup index: byte-length → assetIds that have that length. Lets
+  /// [addImageElement] reuse an existing identical-bytes asset instead of
+  /// minting a fresh UUID for the same image. Without this, PDF (re-)import
+  /// and page-duplicate store the same page render under a new asset id every
+  /// time — observed bloating a real notebook by 62 duplicate groups (~19 MB,
+  /// ~10%). Bucketing on length keeps the dedup check to a handful of exact
+  /// byte-compares (no hashing, no extra dependency). Built lazily, reset on
+  /// notebook open/close.
+  final Map<int, List<String>> _assetsByLength = {};
+  bool _assetIndexBuilt = false;
+
+  /// Returns the id of an existing asset whose bytes are identical to [bytes],
+  /// or null if none. Lazily indexes the current asset set on first use.
+  String? _findIdenticalAsset(Uint8List bytes, Map<String, Uint8List> assets) {
+    if (!_assetIndexBuilt) {
+      _assetsByLength.clear();
+      assets.forEach((id, b) => (_assetsByLength[b.length] ??= []).add(id));
+      _assetIndexBuilt = true;
+    }
+    final candidates = _assetsByLength[bytes.length];
+    if (candidates == null) return null;
+    for (final id in candidates) {
+      final b = assets[id];
+      if (b != null && _bytesEqual(b, bytes)) return id;
+    }
+    return null;
   }
 
   /// AssetIds whose decode is currently in flight. Used to prevent two
