@@ -1102,6 +1102,17 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       }
     }
     _logMemoryStats('openNotebook');
+
+    // Background self-heal: re-pull any locally-truncated assets from the
+    // server (where the clean copy lives in the notebook itself). Deferred so
+    // it doesn't compete with the initial open/pull, and a no-op for healthy
+    // notebooks. Recovers corrupt assets on pages the user never opens, which
+    // the view-driven lazy heal would otherwise miss.
+    final healGen = _openGeneration;
+    Future.delayed(const Duration(seconds: 4), () {
+      if (_disposed || _openGeneration != healGen) return;
+      _recoverTruncatedAssetsFromServer();
+    });
   }
 
   /// Pages ahead/behind current to keep decoded in the imageCache on mobile.
@@ -5372,15 +5383,52 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       final mergedAssets =
           Map<String, Uint8List>.from(state!.assetBytes);
       mergedAssets[assetId] = fresh;
-      state = state!.copyWith(assetBytes: mergedAssets);
-      // Mark the notebook dirty so the next save persists the fresh
-      // bytes into the on-disk ZIP — otherwise a fresh app launch
-      // hits the stale ZIP cache again.
-      // (state.copyWith already sets isDirty via the asset write —
-      // belt-and-braces.)
+      // Mark the notebook dirty so the next save persists the fresh bytes into
+      // the on-disk ZIP — otherwise a fresh app launch hits the stale ZIP
+      // cache and re-heals every session. We do NOT add the asset to
+      // _dirtyAssetKeys: the server already has these clean bytes (that's
+      // where we just fetched them), so the local-only ZIP rewrite is enough
+      // and no redundant re-upload is triggered.
+      state = state!.copyWith(assetBytes: mergedAssets, isDirty: true);
       await _decodeAndCacheImage(assetId, fresh);
     } catch (_) {
       // Network blip / server-side 404 / etc — keep corrupt flag.
+    }
+  }
+
+  /// Proactively re-fetch locally-truncated assets from the server. The
+  /// rendered PDF/image pages live IN the notebook (server `_delta/.../assets`
+  /// + local), independent of the original source PDF — so when a local asset
+  /// carries the 1024-aligned truncation fingerprint, the authoritative clean
+  /// bytes are almost always still on the server and we just re-pull them.
+  ///
+  /// The lazy heal in [_decodeAndCacheImage] only fires for assets the user
+  /// actually views; this sweep covers assets on pages they never open, so a
+  /// notebook fully self-heals in the background. Each fetch is throttled via
+  /// [_healAttempted] (once per asset per session) and [_healCorruptAsset]
+  /// replaces bytes only when the server copy actually differs — so a clean
+  /// asset that happens to be 1024-aligned costs one harmless PROPFIND/GET and
+  /// nothing else. Capped so a false-positive-heavy notebook can't trigger a
+  /// fetch storm; the rest still heal lazily on view.
+  void _recoverTruncatedAssetsFromServer() {
+    final s = state;
+    if (s == null) return;
+    if (_ref.read(syncServiceProvider) == null) return; // offline → skip
+    final nb = s.metadata.id;
+    const cap = 80;
+    var fired = 0;
+    for (final entry in s.assetBytes.entries) {
+      if (fired >= cap) break;
+      final b = entry.value;
+      if (b.isEmpty || b.length % 1024 != 0) continue; // not a truncation suspect
+      if (!_healAttempted.add(entry.key)) continue; // already tried this session
+      fired++;
+      unawaited(_healCorruptAsset(entry.key, nb));
+    }
+    if (fired > 0) {
+      print('[Canvas] Proactive asset recovery: re-fetching $fired '
+          'truncated-fingerprint asset(s) from server (clean copy lives in '
+          'the notebook; no source PDF needed)');
     }
   }
 
