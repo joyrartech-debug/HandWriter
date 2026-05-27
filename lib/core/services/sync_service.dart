@@ -786,10 +786,12 @@ class SyncService {
       } catch (e) {
         // ignore: avoid_print
         print('[Sync] Batched asset listDirectory failed '
-            '(${expectedAssetSizes.length} assets) — trusting PUTs: $e');
+            '(${expectedAssetSizes.length} assets) — falling back to '
+            'per-asset size checks: $e');
       }
+
+      final retriesNeeded = <String>[];
       if (remoteSizes != null) {
-        final retriesNeeded = <String>[];
         for (final entry in expectedAssetSizes.entries) {
           final remote = remoteSizes[entry.key];
           if (remote == null) {
@@ -804,17 +806,47 @@ class SyncService {
             retriesNeeded.add(entry.key);
           }
         }
-        if (retriesNeeded.isNotEmpty) {
-          // Re-upload only the broken ones with criticalVerify (the
-          // strict per-file PROPFIND-with-retries path). A
-          // WebDavSizeMismatchException out of here means retries
-          // exhausted — propagate, do NOT continue to commit markers.
-          await Future.wait(retriesNeeded.map((k) {
-            final bytes = dirtyAssets![k]!;
-            return _webdav.uploadFile('${dir}assets/$k', bytes,
-                timeoutSeconds: dt, criticalVerify: true);
-          }));
+      } else {
+        // A single listDirectory blip must NOT skip verification for the
+        // WHOLE batch — that was how a truncated asset could slip through to
+        // the commit markers (the May 2026 incident). Verify each asset with
+        // an individual PROPFIND instead; on a per-asset error, conservatively
+        // schedule a criticalVerify re-upload rather than trusting the PUT.
+        final sizes = await Future.wait(
+          expectedAssetSizes.keys.map((k) async {
+            try {
+              final sz = await _webdav
+                  .getContentLength('${dir}assets/$k')
+                  .timeout(const Duration(seconds: 15));
+              return MapEntry(k, sz);
+            } catch (_) {
+              return MapEntry(k, null);
+            }
+          }),
+        );
+        for (final e in sizes) {
+          final expected = expectedAssetSizes[e.key];
+          if (e.value == null || e.value != expected) {
+            if (e.value != null) {
+              // ignore: avoid_print
+              print('[Sync] Asset ${e.key} size mismatch on server: '
+                  'sent ${expected}B, server has ${e.value}B — retry');
+            }
+            retriesNeeded.add(e.key);
+          }
         }
+      }
+
+      if (retriesNeeded.isNotEmpty) {
+        // Re-upload only the broken ones with criticalVerify (the
+        // strict per-file PROPFIND-with-retries path). A
+        // WebDavSizeMismatchException out of here means retries
+        // exhausted — propagate, do NOT continue to commit markers.
+        await Future.wait(retriesNeeded.map((k) {
+          final bytes = dirtyAssets![k]!;
+          return _webdav.uploadFile('${dir}assets/$k', bytes,
+              timeoutSeconds: dt, criticalVerify: true);
+        }));
       }
     }
 

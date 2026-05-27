@@ -345,6 +345,24 @@ class PendingRemoteChanges {
   final int deletedPageCount;
   final int newAssetCount;
 
+  /// fileNames where BOTH sides edited the page but the edits were disjoint
+  /// (different elements), so they can be element-merged automatically at
+  /// apply time instead of prompting the user. The pull decided this against
+  /// the pull-start snapshot; [acceptRemoteChanges] re-merges with the LIVE
+  /// local page (to fold in any mid-pull edits) and falls back to keeping
+  /// local if the live re-merge turns out to conflict.
+  final Set<String> autoMergeable;
+
+  /// The server's authoritative page-file listing at pull time (every page the
+  /// server currently has). [acceptRemoteChanges] uses it to tell a doc entry
+  /// that is "pending hydration" (still on the server → keep) apart from a
+  /// "ghost" (gone from the server, no local data → prune after N strikes).
+  final Set<String> remotePageFileNames;
+
+  /// fileNames the pull confirmed were deleted remotely (so their document
+  /// entry is dropped immediately, not treated as a ghost).
+  final Set<String> remoteDeletedFileNames;
+
   const PendingRemoteChanges({
     required this.metadata,
     required this.document,
@@ -355,6 +373,9 @@ class PendingRemoteChanges {
     this.modifiedPageCount = 0,
     this.deletedPageCount = 0,
     this.newAssetCount = 0,
+    this.autoMergeable = const {},
+    this.remotePageFileNames = const {},
+    this.remoteDeletedFileNames = const {},
   });
 
   int get totalChanges => newPageCount + modifiedPageCount + deletedPageCount + newAssetCount;
@@ -375,6 +396,13 @@ class PageConflict {
   /// Pre-decoded images for rendering remote version in preview.
   final Map<String, ui.Image> remoteImageCache;
 
+  /// True when the conflict is "edited locally vs deleted remotely": the
+  /// other device removed this page while we changed it. [remotePage] then
+  /// has no real remote content (it mirrors [localPage] only so previews
+  /// don't crash). Resolution must branch on this: accepting "remote" means
+  /// honouring the deletion, not copying [remotePage] back over local.
+  final bool isDeletion;
+
   const PageConflict({
     required this.fileName,
     required this.pageNumber,
@@ -383,6 +411,7 @@ class PageConflict {
     required this.remotePage,
     this.localImageCache = const {},
     this.remoteImageCache = const {},
+    this.isDeletion = false,
   });
 }
 

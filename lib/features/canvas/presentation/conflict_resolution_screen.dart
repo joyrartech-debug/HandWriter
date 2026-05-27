@@ -50,7 +50,9 @@ class _ConflictResolutionScreenState
           onPressed: () => _confirmDismiss(context, conflicts),
         ),
         title: Text(
-          'Conflitto — Pagina ${conflict.pageNumber}',
+          conflict.isDeletion
+              ? 'Pagina ${conflict.pageNumber} eliminata altrove'
+              : 'Conflitto — Pagina ${conflict.pageNumber}',
           style: const TextStyle(
             color: Colors.white,
             fontSize: 16,
@@ -85,19 +87,48 @@ class _ConflictResolutionScreenState
               ),
             ),
 
-          // ── Element count diff bar ──
-          _DiffSummaryBar(conflict: conflict),
+          // ── Element count diff bar (only meaningful for edit-vs-edit) ──
+          if (!conflict.isDeletion) _DiffSummaryBar(conflict: conflict),
 
-          // ── Side-by-side page previews ──
+          // ── Deletion-conflict explainer banner ──
+          if (conflict.isDeletion)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                    color: const Color(0xFFF59E0B).withValues(alpha: 0.4)),
+              ),
+              child: const Row(
+                children: [
+                  Icon(Icons.info_outline, color: Color(0xFFFBBF24), size: 18),
+                  SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Hai modificato questa pagina, ma un altro dispositivo '
+                      "l'ha eliminata. Vuoi mantenerla o eliminarla?",
+                      style: TextStyle(color: Colors.white70, fontSize: 12.5),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+          // ── Choice cards ──
           Expanded(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
               child: Row(
                 children: [
-                  // LOCAL version
+                  // KEEP (local) — shows the user's actual page
                   Expanded(
                     child: _VersionCard(
-                      label: 'Locale (tuo)',
+                      label: conflict.isDeletion
+                          ? 'Mantieni la pagina'
+                          : 'Locale (tuo)',
                       sublabel: _modifiedLabel(conflict.localPage.modifiedAt),
                       page: conflict.localPage,
                       imageCache: conflict.localImageCache,
@@ -109,19 +140,27 @@ class _ConflictResolutionScreenState
                     ),
                   ),
                   const SizedBox(width: 10),
-                  // REMOTE version
+                  // REMOTE / DELETE
                   Expanded(
-                    child: _VersionCard(
-                      label: 'Remoto (altro dispositivo)',
-                      sublabel: _modifiedLabel(conflict.remotePage.modifiedAt),
-                      page: conflict.remotePage,
-                      imageCache: conflict.remoteImageCache,
-                      selected: choice == false,
-                      accentColor: const Color(0xFF22C55E),
-                      onTap: () => setState(() {
-                        _choices[conflict.fileName] = false;
-                      }),
-                    ),
+                    child: conflict.isDeletion
+                        ? _DeleteCard(
+                            selected: choice == false,
+                            onTap: () => setState(() {
+                              _choices[conflict.fileName] = false;
+                            }),
+                          )
+                        : _VersionCard(
+                            label: 'Remoto (altro dispositivo)',
+                            sublabel:
+                                _modifiedLabel(conflict.remotePage.modifiedAt),
+                            page: conflict.remotePage,
+                            imageCache: conflict.remoteImageCache,
+                            selected: choice == false,
+                            accentColor: const Color(0xFF22C55E),
+                            onTap: () => setState(() {
+                              _choices[conflict.fileName] = false;
+                            }),
+                          ),
                   ),
                 ],
               ),
@@ -556,6 +595,93 @@ class _VersionCard extends StatelessWidget {
               child: ClipRRect(
                 borderRadius: const BorderRadius.vertical(bottom: Radius.circular(13)),
                 child: _PagePreview(page: page, imageCache: imageCache),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  DELETE CARD — the "accept the remote deletion" choice
+// ═══════════════════════════════════════════════════════════════
+
+class _DeleteCard extends StatelessWidget {
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _DeleteCard({required this.selected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    const red = Color(0xFFEF4444);
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? red : Colors.white12,
+            width: selected ? 2.5 : 1,
+          ),
+          color: selected
+              ? red.withValues(alpha: 0.08)
+              : Colors.white.withValues(alpha: 0.03),
+        ),
+        child: Column(
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                color: selected
+                    ? red.withValues(alpha: 0.12)
+                    : Colors.white.withValues(alpha: 0.04),
+                borderRadius:
+                    const BorderRadius.vertical(top: Radius.circular(13)),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    selected ? Icons.check_circle : Icons.radio_button_off,
+                    color: selected ? red : Colors.white30,
+                    size: 18,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Elimina la pagina',
+                      style: TextStyle(
+                        color: selected ? red : Colors.white70,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Expanded(
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.delete_outline, color: Colors.white24, size: 44),
+                    SizedBox(height: 8),
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        'Come sull\'altro dispositivo',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white38, fontSize: 11),
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],

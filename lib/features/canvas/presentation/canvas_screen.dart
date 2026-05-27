@@ -612,17 +612,26 @@ class _CanvasScreenState extends ConsumerState<CanvasScreen>
       // to avoid two concurrent save paths fighting over the .ncnote.
       if (_closing) return;
 
-      // Flush any in-flight pull-save / remote-sync so pages downloaded
-      // by the pull timer actually land on disk before the OS kills us.
-      // Without this, closing the PC/iPad app right after a pull would
-      // lose all the downloaded pages — next launch would re-run the
-      // same pull from scratch ("chiudo riapro e la sync ricomincia").
-      unawaited(ref.read(canvasProvider.notifier).flushPendingWork());
+      // Commit any stroke still inside the 50 ms pen-up defer window FIRST.
+      // commitAndEndStroke mutates provider state synchronously, so after
+      // this the stroke is in `state` and `isDirty` is true. Without it, a
+      // stroke finished microseconds before the app was backgrounded never
+      // reached state → isDirty was false → the save below skipped it and
+      // the last stroke was lost on a screen-lock/app-switch right after
+      // lifting the pen.
+      _flushDeferredCommit();
 
       final canvas = ref.read(canvasProvider);
       if (canvas != null && canvas.isDirty && !_isSaving) {
         _save(silent: true);
       }
+
+      // Flush any in-flight pull-save / remote-sync (and the save just
+      // queued above) so pages downloaded by the pull timer — and the last
+      // stroke — actually land on disk before the OS kills us. Without this,
+      // closing right after a pull lost the downloaded pages ("chiudo riapro
+      // e la sync ricomincia").
+      unawaited(ref.read(canvasProvider.notifier).flushPendingWork());
 
       // Detached = Flutter engine is shutting down. Release GPU textures
       // NOW so the Linux desktop build doesn't segfault at exit while

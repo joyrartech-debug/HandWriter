@@ -217,6 +217,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
   /// different object than `_lastSyncedPages[fileName]`, it was edited.
   Map<String, PageData> _lastSyncedPages = {};
 
+  /// Last-synced common ancestor for the document structure (page order +
+  /// chapter assignments) and notebook metadata (title/chapters/paper/cover).
+  /// These are the "base" side of a 3-way merge on pull: comparing the live
+  /// local value against this baseline tells us whether the LOCAL device
+  /// changed order/chapters/metadata since the last sync, so a remote change
+  /// to a DIFFERENT field doesn't clobber the local edit (and vice-versa).
+  /// Null until the first successful sync/open; merge falls back to
+  /// remote-wins while null.
+  DocumentStructure? _lastSyncedDocument;
+  NotebookMetadata? _lastSyncedMetadata;
+
+  /// Strike counter for "ghost" document entries — pages listed in
+  /// document.json that have NO data locally AND are absent from the server's
+  /// page listing, so they can never be hydrated. Left in place they pin the
+  /// pull in a hot retry loop forever (the consistency gate `pages < doc` can
+  /// never be satisfied → meta-ETag never advances → ~50% CPU on a large
+  /// notebook). We prune such an entry only after [_ghostPruneThreshold]
+  /// consecutive confirmations so a single flaky/partial PROPFIND can't wrongly
+  /// drop a page that is really on the server. Keyed by fileName.
+  final Map<String, int> _ghostEntryStrikes = {};
+  static const int _ghostPruneThreshold = 3;
+
   /// Cache of encoded page JSON bytes per fileName. Reused when the current
   /// [PageData] instance is identical to the one that produced the cached
   /// bytes — i.e. the page wasn't mutated since the last save. For big
@@ -353,6 +375,443 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     return (
       document: doc.copyWith(pages: repairedEntries),
       pages: repairedPages,
+    );
+  }
+
+  static bool _listEqStr(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Records a strike for each ghost [candidates] fileName this pull and
+  /// returns those confirmed dead for [_ghostPruneThreshold] consecutive pulls
+  /// (i.e. safe to prune from the document). Candidates absent this cycle have
+  /// their strike count reset, so a page that reappears on the server before
+  /// ripening is never pruned.
+  Set<String> _updateGhostStrikes(Set<String> candidates) {
+    _ghostEntryStrikes.removeWhere((fn, _) => !candidates.contains(fn));
+    final ripe = <String>{};
+    for (final fn in candidates) {
+      final n = (_ghostEntryStrikes[fn] ?? 0) + 1;
+      _ghostEntryStrikes[fn] = n;
+      if (n >= _ghostPruneThreshold) ripe.add(fn);
+    }
+    return ripe;
+  }
+
+  /// Builds the set of fileNames the merged document should KEEP, applying the
+  /// ghost-prune policy. Starts from [withData] (pages that have page bytes)
+  /// and walks every current [docPages] entry that lacks data, classifying it:
+  ///   • a confirmed remote deletion ([remoteDeleted])  → drop (honour delete)
+  ///   • still on the server ([serverFileNames])        → keep (will hydrate)
+  ///   • otherwise a ghost → keep until it has accrued [_ghostPruneThreshold]
+  ///     strikes, then drop so the state can finally converge.
+  /// Ripe (pruned) ghosts are also evicted from the ETag cache so a later pull
+  /// doesn't resurrect them.
+  Set<String> _survivingFileNames({
+    required Iterable<String> withData,
+    required List<PageEntry> docPages,
+    required Set<String> serverFileNames,
+    required Set<String> remoteDeleted,
+  }) {
+    final keep = <String>{...withData};
+    final ghostCandidates = <String>{};
+    for (final e in docPages) {
+      final fn = e.fileName;
+      if (keep.contains(fn)) continue;
+      if (remoteDeleted.contains(fn)) continue; // honour confirmed deletion
+      if (serverFileNames.contains(fn)) {
+        keep.add(fn); // pending hydration — the page is on the server
+      } else {
+        ghostCandidates.add(fn);
+      }
+    }
+    final ripe = _updateGhostStrikes(ghostCandidates);
+    keep.addAll(ghostCandidates.where((fn) => !ripe.contains(fn)));
+    if (ripe.isNotEmpty) {
+      for (final fn in ripe) {
+        _lastPageEtags.remove(fn);
+      }
+      print('[Canvas] Pruning ${ripe.length} ghost document entr'
+          '${ripe.length == 1 ? "y" : "ies"} (no data locally or on server '
+          'for $_ghostPruneThreshold+ pulls): '
+          '${ripe.take(3).join(", ")}${ripe.length > 3 ? "…" : ""}');
+      unawaited(CrashLogger.append(
+          '[Pull] pruned ${ripe.length} ghost entries → state can converge'));
+    }
+    return keep;
+  }
+
+  /// True if two documents differ in page ORDER, the SET of pages, or any
+  /// per-page chapter assignment. Ignores pageNumber (a pure renumber is not
+  /// a meaningful change). Used to decide whether a merge produced something
+  /// the server doesn't have yet (→ needs an upload to converge).
+  static bool _documentStructurallyDiffers(
+      DocumentStructure a, DocumentStructure b) {
+    if (a.pages.length != b.pages.length) return true;
+    for (var i = 0; i < a.pages.length; i++) {
+      if (a.pages[i].fileName != b.pages[i].fileName) return true;
+      if (a.pages[i].chapterId != b.pages[i].chapterId) return true;
+    }
+    return false;
+  }
+
+  /// True if two metadata objects differ in any user-meaningful field
+  /// (title/cover/paper/tags/author/description/chapter list). Ignores
+  /// modifiedAt, pageCount, createdAt — those are derived/bookkeeping.
+  static bool _metadataStructurallyDiffers(
+      NotebookMetadata a, NotebookMetadata b) {
+    if (a.title != b.title ||
+        a.coverStyle != b.coverStyle ||
+        a.coverColor != b.coverColor ||
+        a.paperType != b.paperType ||
+        a.paperColor != b.paperColor ||
+        a.author != b.author ||
+        a.description != b.description) {
+      return true;
+    }
+    if (!_listEqStr(a.tags, b.tags)) return true;
+    if (a.chapters.length != b.chapters.length) return true;
+    for (var i = 0; i < a.chapters.length; i++) {
+      if (a.chapters[i].id != b.chapters[i].id) return true;
+      if (a.chapters[i].title != b.chapters[i].title) return true;
+    }
+    return false;
+  }
+
+  /// 3-way merge of notebook metadata + document structure on pull.
+  ///
+  /// `base` is the last-synced common ancestor (what we last knew the server
+  /// had); `local` is the LIVE local state at apply time (may include edits
+  /// the user made DURING the pull download window); `remote` is what the
+  /// server has now. Returns the merged metadata + document.
+  ///
+  /// Core principle that eliminates the cross-device clobber class: a change
+  /// made on ONE side to something the OTHER side left untouched is ALWAYS
+  /// kept. Only when both sides changed the SAME thing do we tie-break —
+  /// low-stakes structural fields (page order, per-page chapter, chapter
+  /// order) resolve to LOCAL (the device the user is holding, so their most
+  /// recent action sticks); scalar metadata tie-breaks by `modifiedAt`.
+  ///
+  /// `survivingFileNames` is the authoritative set of pages that have data in
+  /// the merged page map; the returned document lists exactly those, once.
+  ///
+  /// When `baseDoc`/`baseMeta` are null (first sync, no ancestor) we fall
+  /// back to remote-wins for ordering/scalars — matching legacy behaviour.
+  static ({NotebookMetadata metadata, DocumentStructure document}) _merge3Way({
+    required NotebookMetadata? baseMeta,
+    required NotebookMetadata localMeta,
+    required NotebookMetadata remoteMeta,
+    required DocumentStructure? baseDoc,
+    required DocumentStructure localDoc,
+    required DocumentStructure remoteDoc,
+    required Set<String> survivingFileNames,
+  }) {
+    final baseByFn = {
+      for (final e in (baseDoc?.pages ?? const <PageEntry>[])) e.fileName: e
+    };
+    final localByFn = {for (final e in localDoc.pages) e.fileName: e};
+    final remoteByFn = {for (final e in remoteDoc.pages) e.fileName: e};
+
+    List<String> fnOrder(List<PageEntry> p) =>
+        p.map((e) => e.fileName).toList();
+
+    // Did `side` reorder the pages it shares with the baseline? Compares the
+    // RELATIVE order of common pages, so pure adds/deletes don't read as a
+    // reorder.
+    bool reordered(List<PageEntry> side) {
+      if (baseDoc == null) return false;
+      final baseOrder = fnOrder(baseDoc.pages);
+      final sideOrder = fnOrder(side);
+      final sideSet = sideOrder.toSet();
+      final baseSet = baseOrder.toSet();
+      final a = baseOrder.where(sideSet.contains).toList();
+      final b = sideOrder.where(baseSet.contains).toList();
+      return !_listEqStr(a, b);
+    }
+
+    final localReordered = reordered(localDoc.pages);
+    final remoteReordered = reordered(remoteDoc.pages);
+    final List<String> spine;
+    if (localReordered && !remoteReordered) {
+      spine = fnOrder(localDoc.pages);
+    } else if (remoteReordered && !localReordered) {
+      spine = fnOrder(remoteDoc.pages);
+    } else if (localReordered && remoteReordered) {
+      spine = fnOrder(localDoc.pages); // both moved → device wins
+    } else {
+      spine = fnOrder(remoteDoc.pages); // neither → canonical/remote
+    }
+
+    // Final ordered fileName list: spine first, then any surviving fileName
+    // not in the spine (remote order, then local order, then bare orphans).
+    final seen = <String>{};
+    final orderedFns = <String>[];
+    void take(Iterable<String> fns) {
+      for (final fn in fns) {
+        if (survivingFileNames.contains(fn) && seen.add(fn)) orderedFns.add(fn);
+      }
+    }
+
+    take(spine);
+    take(fnOrder(remoteDoc.pages));
+    take(fnOrder(localDoc.pages));
+    take(survivingFileNames);
+
+    // Per-page chapterId 3-way.
+    String? mergeChapterId(String fn) {
+      final b = baseByFn[fn]?.chapterId;
+      final l = localByFn[fn]?.chapterId;
+      final r = remoteByFn[fn]?.chapterId;
+      if (baseDoc == null) return r ?? l;
+      final lChanged = l != b;
+      final rChanged = r != b;
+      if (lChanged && !rChanged) return l;
+      if (rChanged && !lChanged) return r;
+      if (lChanged && rChanged) return l; // both → device wins
+      return r ?? l;
+    }
+
+    final mergedEntries = <PageEntry>[];
+    for (var i = 0; i < orderedFns.length; i++) {
+      final fn = orderedFns[i];
+      final src = remoteByFn[fn] ?? localByFn[fn];
+      final chapterId = mergeChapterId(fn);
+      if (src != null) {
+        mergedEntries.add(
+            src.copyWith(pageNumber: i + 1, fileName: fn, chapterId: chapterId));
+      } else {
+        // Pure orphan (page data exists but no entry on either side). Heal
+        // reconciles pageId from the page bytes; fileName is a safe stand-in.
+        mergedEntries.add(PageEntry(
+          pageId: fn,
+          pageNumber: i + 1,
+          fileName: fn,
+          chapterId: chapterId,
+        ));
+      }
+    }
+
+    final mergedDoc = DocumentStructure(
+      notebookId: remoteDoc.notebookId,
+      formatVersion: remoteDoc.formatVersion,
+      pages: mergedEntries,
+    );
+
+    // ── Metadata scalar fields (per-field 3-way) ──
+    final lMod = localMeta.modifiedAt;
+    final rMod = remoteMeta.modifiedAt;
+    T pick<T>(T? base, T local, T remote) {
+      if (baseMeta == null) return remote;
+      final lChanged = local != base;
+      final rChanged = remote != base;
+      if (lChanged && !rChanged) return local;
+      if (rChanged && !lChanged) return remote;
+      if (lChanged && rChanged) return rMod.isAfter(lMod) ? remote : local;
+      return remote;
+    }
+
+    // ── Chapters merged by id (union of adds, honour deletes, title 3-way) ──
+    final baseCh = {for (final c in (baseMeta?.chapters ?? const <Chapter>[])) c.id: c};
+    final localCh = {for (final c in localMeta.chapters) c.id: c};
+    final remoteCh = {for (final c in remoteMeta.chapters) c.id: c};
+
+    final survivingChIds = <String>{};
+    for (final id in {...localCh.keys, ...remoteCh.keys, ...baseCh.keys}) {
+      final b = baseCh[id];
+      final l = localCh[id];
+      final r = remoteCh[id];
+      if (b == null) {
+        if (l != null || r != null) survivingChIds.add(id); // new on a side
+      } else if (l != null && r != null) {
+        survivingChIds.add(id);
+      } else if (l != null && r == null) {
+        if (l != b) survivingChIds.add(id); // remote deleted, local edited → keep
+      } else if (l == null && r != null) {
+        if (r != b) survivingChIds.add(id); // local deleted, remote edited → keep
+      }
+      // else: deleted on both (or unchanged-deleted) → drop
+    }
+
+    // Chapter order: same spine logic as pages.
+    bool chReordered(List<Chapter> side) {
+      if (baseMeta == null) return false;
+      final baseOrder = baseMeta.chapters.map((c) => c.id).toList();
+      final sideOrder = side.map((c) => c.id).toList();
+      final ss = sideOrder.toSet();
+      final bs = baseOrder.toSet();
+      final a = baseOrder.where(ss.contains).toList();
+      final b = sideOrder.where(bs.contains).toList();
+      return !_listEqStr(a, b);
+    }
+
+    final List<String> chSpine;
+    final lChRe = chReordered(localMeta.chapters);
+    final rChRe = chReordered(remoteMeta.chapters);
+    if (lChRe && !rChRe) {
+      chSpine = localMeta.chapters.map((c) => c.id).toList();
+    } else if (rChRe && !lChRe) {
+      chSpine = remoteMeta.chapters.map((c) => c.id).toList();
+    } else if (lChRe && rChRe) {
+      chSpine = localMeta.chapters.map((c) => c.id).toList();
+    } else {
+      chSpine = remoteMeta.chapters.map((c) => c.id).toList();
+    }
+
+    Chapter mergeChapterObj(String id) {
+      final b = baseCh[id];
+      final l = localCh[id];
+      final r = remoteCh[id];
+      final fallback = (r ?? l ?? b)!;
+      final title = pick<String>(b?.title, l?.title ?? fallback.title,
+          r?.title ?? fallback.title);
+      return Chapter(id: id, title: title, pageIds: const []);
+    }
+
+    final chSeen = <String>{};
+    final mergedChapters = <Chapter>[];
+    void takeCh(Iterable<String> ids) {
+      for (final id in ids) {
+        if (survivingChIds.contains(id) && chSeen.add(id)) {
+          mergedChapters.add(mergeChapterObj(id));
+        }
+      }
+    }
+
+    takeCh(chSpine);
+    takeCh(remoteMeta.chapters.map((c) => c.id));
+    takeCh(localMeta.chapters.map((c) => c.id));
+
+    // Recompute each chapter's pageIds from the merged document so the backup
+    // membership list (used by the orphan-heal path) stays consistent with
+    // the authoritative PageEntry.chapterId.
+    final pageIdsByChapter = <String, List<String>>{};
+    for (final e in mergedDoc.pages) {
+      final cid = e.chapterId;
+      if (cid != null) (pageIdsByChapter[cid] ??= []).add(e.pageId);
+    }
+    final finalChapters = mergedChapters
+        .map((c) => c.copyWith(pageIds: pageIdsByChapter[c.id] ?? const []))
+        .toList();
+
+    final mergedMeta = remoteMeta.copyWith(
+      title: pick(baseMeta?.title, localMeta.title, remoteMeta.title),
+      coverStyle:
+          pick(baseMeta?.coverStyle, localMeta.coverStyle, remoteMeta.coverStyle),
+      coverColor:
+          pick(baseMeta?.coverColor, localMeta.coverColor, remoteMeta.coverColor),
+      paperType:
+          pick(baseMeta?.paperType, localMeta.paperType, remoteMeta.paperType),
+      paperColor:
+          pick(baseMeta?.paperColor, localMeta.paperColor, remoteMeta.paperColor),
+      tags: pick(baseMeta?.tags, localMeta.tags, remoteMeta.tags),
+      author: pick(baseMeta?.author, localMeta.author, remoteMeta.author),
+      description:
+          pick(baseMeta?.description, localMeta.description, remoteMeta.description),
+      chapters: finalChapters,
+      pageCount: mergedDoc.pages.length,
+      modifiedAt: rMod.isAfter(lMod) ? rMod : lMod,
+    );
+
+    return (metadata: mergedMeta, document: mergedDoc);
+  }
+
+  /// Attempts a 3-way element-level merge of ONE page so that two devices
+  /// editing DIFFERENT parts of the same page converge automatically instead
+  /// of being forced into a manual conflict. Elements (strokes/text/images/
+  /// shapes) carry stable ids, so we diff by id against the [base] (last-
+  /// synced) version:
+  ///   • added on one side only            → keep it
+  ///   • modified on one side only          → take that side
+  ///   • deleted on one side, untouched other → honour the deletion
+  ///   • identical on both                  → keep
+  ///   • SAME element changed on BOTH sides differently, OR edited on one
+  ///     side and deleted on the other      → real conflict ⇒ return null
+  ///     (caller falls back to the page-level conflict UI; nothing is lost).
+  /// The render engine paints by zIndex, so unioning the element lists is
+  /// visually correct regardless of list order.
+  static PageData? _mergePageElements({
+    required PageData base,
+    required PageData local,
+    required PageData remote,
+  }) {
+    String idOf(ContentElement e) => e.map(
+        stroke: (s) => s.id,
+        text: (t) => t.id,
+        image: (i) => i.id,
+        shape: (s) => s.id);
+    int zOf(ContentElement e) => e.map(
+        stroke: (s) => s.zIndex,
+        text: (t) => t.zIndex,
+        image: (i) => i.zIndex,
+        shape: (s) => s.zIndex);
+
+    final baseById = {for (final e in base.layers.content) idOf(e): e};
+    final localById = {for (final e in local.layers.content) idOf(e): e};
+    final remoteById = {for (final e in remote.layers.content) idOf(e): e};
+
+    final merged = <ContentElement>[];
+    for (final id in {...baseById.keys, ...localById.keys, ...remoteById.keys}) {
+      final b = baseById[id];
+      final l = localById[id];
+      final r = remoteById[id];
+      final inL = l != null, inR = r != null, inB = b != null;
+      if (inL && inR) {
+        if (l == r) {
+          merged.add(l);
+        } else if (inB && l == b) {
+          merged.add(r); // only remote changed
+        } else if (inB && r == b) {
+          merged.add(l); // only local changed
+        } else {
+          return null; // both changed the same element → conflict
+        }
+      } else if (inL && !inR) {
+        if (!inB) {
+          merged.add(l); // local-added
+        } else if (l == b) {
+          // remote deleted it, local untouched → honour deletion (drop)
+        } else {
+          return null; // remote deleted, local edited → conflict
+        }
+      } else if (!inL && inR) {
+        if (!inB) {
+          merged.add(r); // remote-added
+        } else if (r == b) {
+          // local deleted it, remote untouched → honour deletion (drop)
+        } else {
+          return null; // local deleted, remote edited → conflict
+        }
+      }
+      // else: absent on both live sides → dropped
+    }
+
+    // Background: same one-sided-change rule; both-changed-differently = conflict.
+    final bb = base.layers.background;
+    final lb = local.layers.background;
+    final rb = remote.layers.background;
+    final BackgroundLayer bg;
+    if (lb == rb) {
+      bg = lb;
+    } else if (lb == bb) {
+      bg = rb;
+    } else if (rb == bb) {
+      bg = lb;
+    } else {
+      return null; // both changed background differently → conflict
+    }
+
+    merged.sort((a, b) => zOf(a).compareTo(zOf(b)));
+    final lMod = local.modifiedAt;
+    final rMod = remote.modifiedAt;
+    return remote.copyWith(
+      layers: RenderingLayers(background: bg, content: merged),
+      modifiedAt: (rMod != null && lMod != null && rMod.isAfter(lMod))
+          ? rMod
+          : (lMod ?? rMod),
     );
   }
 
@@ -547,6 +1006,10 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // and `pages` itself is treated as immutable: every edit replaces it
     // with a fresh map. So Map.of(...) was a defensive copy with no benefit.
     _lastSyncedPages = repaired.pages;
+    // Seed the 3-way-merge baselines from the just-loaded on-disk state.
+    _lastSyncedDocument = repaired.document;
+    _lastSyncedMetadata = metadata;
+    _ghostEntryStrikes.clear();
     _pageJsonCache.clear();
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
@@ -1481,6 +1944,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     _dirtyPageFileNames.clear();
     _dirtyAssetKeys.clear();
     _lastSyncedPages = {};
+    _lastSyncedDocument = null;
+    _lastSyncedMetadata = null;
+    _ghostEntryStrikes.clear();
     _pageJsonCache.clear();
     // Reset the corrupt-asset blocklist: once the user closes the notebook,
     // any "this asset failed to decode" state from this session is stale.
@@ -6641,6 +7107,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         // hit a commit-phase failure, and the strokes stayed invisible
         // to other devices even though iPad's local file had them.
         _lastSyncedPages = s.pages;
+        // Advance the structure/metadata baselines to exactly what we just
+        // uploaded (the `s` snapshot + the committed metadata), so the next
+        // pull's 3-way merge treats THIS as the common ancestor.
+        _lastSyncedDocument = s.document;
+        _lastSyncedMetadata = updatedMeta;
         for (final k in snapshotDirtyAssetKeys) {
           _dirtyAssetKeys.remove(k);
           // Mark these asset IDs as having a server-side counterpart.
@@ -6758,6 +7229,22 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     List<Map<String, dynamic>>? symbolLibraries,
     List<String>? deletedPages,
   }) async {
+    // Collision guard (queue-lifetime, not just this save): never DELETE a
+    // fileName we're also PUTting in THIS syncDelta call. syncDelta runs
+    // Phase 0 (DELETE) and Phase 1 (PUT) under one Future.wait with no
+    // ordering, so a stale pending delete for page_010 racing the new
+    // page_010 PUT could leave the server without the just-uploaded content.
+    // _saveInner already drops same-save collisions, but a delete QUEUED IN A
+    // PRIOR save (dropped on a flaky link) reaches _remoteSync independently
+    // and bypasses that guard — so re-check against the live upload set here.
+    // Sequential filename reuse after delete+re-import makes this real.
+    if (dirtyPages.isNotEmpty) {
+      _pendingPageDeletes.removeWhere((fn) => dirtyPages.containsKey(fn));
+    }
+    if (dirtyAssets != null && dirtyAssets.isNotEmpty) {
+      _pendingAssetDeletes.removeWhere((id) => dirtyAssets.containsKey(id));
+    }
+
     // Pending sets carry every delete request — both this save's and any
     // from prior saves whose DELETE drops on flaky networks (Tailscale).
     // Drain in CAPPED batches so a backlog of hundreds of orphans (can
@@ -7318,9 +7805,15 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
           // unreachable until manual "Forza sync".
           final stillOpen = state != null && state!.metadata.id == pullNotebookId;
           final sNow = stillOpen ? state! : null;
+          // Per-fileName check, not a length comparison: a local-only page
+          // can make `pages.length >= document.pages.length` true while a
+          // DIFFERENT document entry still has no page data. Advancing the
+          // meta ETag in that state makes the gap permanent (next pull
+          // fast-path skips). Require that EVERY document entry is backed by
+          // page data in memory — exactly what the comment above intends.
           final stateConsistent = sNow == null
               ? false
-              : sNow.pages.length >= sNow.document.pages.length;
+              : sNow.document.pages.every((e) => sNow.pages.containsKey(e.fileName));
           if (stillOpen && !_pullHadFailures && stateConsistent) {
             // Wait for the pulled-changes local save to land on disk BEFORE
             // persisting the meta ETag. Otherwise a crash/kill in the small
@@ -7532,42 +8025,67 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       try {
         final remoteMeta =
             await syncService.downloadDeltaMeta(s.metadata.id);
-        // Preserve pages that exist locally but not on the server (offline
-        // additions waiting to upload) when adopting the remote document.
-        final remoteFileNames =
-            remoteMeta.document.pages.map((p) => p.fileName).toSet();
-        final localOnlyEntries = s.document.pages
-            .where((p) => !remoteFileNames.contains(p.fileName))
-            .toList();
-        final mergedDoc = localOnlyEntries.isEmpty
-            ? remoteMeta.document
-            : DocumentStructure(
-                notebookId: remoteMeta.document.notebookId,
-                formatVersion: remoteMeta.document.formatVersion,
-                pages: [...remoteMeta.document.pages, ...localOnlyEntries],
-              );
-        final metaChanged = remoteMeta.metadata != s.metadata;
-        final docChanged = mergedDoc != s.document;
-        if ((metaChanged || docChanged) &&
-            state != null &&
-            state!.metadata.id == s.metadata.id) {
-          // Stamp pageCount from the merged document so the library card
-          // stays accurate when local-only entries exist.
-          final mergedMeta = remoteMeta.metadata.copyWith(
-            pageCount: mergedDoc.pages.length,
+        if (state != null && state!.metadata.id == s.metadata.id) {
+          // 3-way merge against the LIVE state (not the pull-start snapshot)
+          // so a reorder / chapter-move / rename the user made during this
+          // tick isn't clobbered by the remote metadata. No page data moved on
+          // this path (pagesToPull empty), so any doc entry without local data
+          // is NOT on the server (else it'd be in pagesToPull) → a ghost. Prune
+          // it via the strike policy so a long-broken document.json (more
+          // entries than real pages) finally converges instead of pinning the
+          // pull in a hot retry loop forever.
+          final live = state!;
+          final surviving = _survivingFileNames(
+            withData: live.pages.keys,
+            docPages: live.document.pages,
+            serverFileNames: remotePageEtags.keys.toSet(),
+            remoteDeleted: const {},
           );
-          state = state!.copyWith(
-            metadata: mergedMeta,
-            document: mergedDoc,
-            isDirty: true,
+          final merged = CanvasNotifier._merge3Way(
+            baseMeta: _lastSyncedMetadata,
+            localMeta: live.metadata,
+            remoteMeta: remoteMeta.metadata,
+            baseDoc: _lastSyncedDocument,
+            localDoc: live.document,
+            remoteDoc: remoteMeta.document,
+            survivingFileNames: surviving,
           );
-          print('[Canvas] Pull noop: applied metadata-only changes '
-              '(meta=$metaChanged, doc=$docChanged) — '
-              'chapters/title/paper from remote');
-          unawaited(CrashLogger.append(
-            '[Pull] noop: metadata content changed → applied '
-            '(meta=$metaChanged, doc=$docChanged)',
-          ));
+          final finalDoc = merged.document;
+          final finalMeta =
+              merged.metadata.copyWith(pageCount: finalDoc.pages.length);
+          final changed = CanvasNotifier._documentStructurallyDiffers(
+                  finalDoc, live.document) ||
+              CanvasNotifier._metadataStructurallyDiffers(
+                  finalMeta, live.metadata);
+          if (changed) {
+            // Mark dirty only when our merge differs from what the server has
+            // (local-side edits to push) AND the document is internally
+            // consistent — pushing while data-less entries remain would just
+            // trip PRE-SAVE GUARD #2 → abort → pull → hot loop. Defer until the
+            // ghost-prune / hydration makes it consistent.
+            final docConsistent = finalDoc.pages
+                .every((e) => live.pages.containsKey(e.fileName));
+            final needsPush = docConsistent &&
+                (CanvasNotifier._documentStructurallyDiffers(
+                        finalDoc, remoteMeta.document) ||
+                    CanvasNotifier._metadataStructurallyDiffers(
+                        finalMeta, remoteMeta.metadata));
+            state = live.copyWith(
+              metadata: finalMeta,
+              document: finalDoc,
+              isDirty: needsPush || live.isDirty,
+            );
+            print('[Canvas] Pull noop: merged metadata/structure '
+                '(needsPush=$needsPush) — chapters/title/paper/order');
+            unawaited(CrashLogger.append(
+              '[Pull] noop: 3-way merged metadata/structure '
+              '(needsPush=$needsPush)',
+            ));
+          }
+          // Baseline tracks SERVER TRUTH regardless of whether we adopted a
+          // change, so the next merge has the correct common ancestor.
+          _lastSyncedDocument = remoteMeta.document;
+          _lastSyncedMetadata = remoteMeta.metadata;
         }
       } catch (e) {
         // Don't fail the whole pull on a metadata-fetch hiccup; next pull
@@ -8083,6 +8601,7 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
             remotePage: localPage, // no remote version — show local as both
             localImageCache: Map.of(state!.imageCache),
             remoteImageCache: const {},
+            isDeletion: true,
           ));
           print('[Canvas] CONFLICT: $fileName edited locally but deleted remotely');
         } else {
@@ -8120,6 +8639,9 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       // ── Detect conflicts: pages changed both locally AND remotely ──
       final conflicts = <PageConflict>[...deletionConflicts];
       final safePages = <String>{}; // non-conflicting remote pages
+      // fileNames where both sides edited but the edits look disjoint
+      // (element-level) → auto-merge at apply time instead of prompting.
+      final autoMergeable = <String>{};
       for (final fileName in pagesToPull) {
         final remotePage = updatedPages[fileName];
         final localPage = s.pages[fileName];
@@ -8156,22 +8678,40 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         final remoteEdited = lastSynced != null &&
             remotePage.copyWith(modifiedAt: null) != lastSyncedNorm;
         if (locallyEdited && remoteEdited) {
-          final pageIndex = remoteMeta.document.pages.indexWhere(
-              (e) => e.fileName == fileName);
-          final pageEntry = pageIndex >= 0
-              ? remoteMeta.document.pages[pageIndex]
-              : null;
-          final chapterName = _chapterNameForPage(pageEntry, remoteMeta.metadata);
-          conflicts.add(PageConflict(
-            fileName: fileName,
-            pageNumber: remotePage.pageNumber,
-            chapterName: chapterName,
-            localPage: localPage,
-            remotePage: remotePage,
-            localImageCache: Map.of(state!.imageCache),
-            remoteImageCache: Map.of(state!.imageCache),
-          ));
-          print('[Canvas] CONFLICT on $fileName — local + remote edits');
+          // Before prompting, try an element-level 3-way merge: if the two
+          // sides touched DIFFERENT strokes/images/shapes/text, we can fold
+          // them together silently — no dialog, which keeps the experience
+          // smooth (most "same page" edits on different devices are actually
+          // disjoint). Only a genuine same-element clash surfaces a prompt.
+          // acceptRemoteChanges re-runs this with the LIVE local page; here
+          // we only DECIDE (against the snapshot) whether a prompt is needed.
+          // lastSynced and localPage are both non-null here (locallyEdited
+          // implies it), so Dart has already promoted them.
+          final autoMerged = CanvasNotifier._mergePageElements(
+              base: lastSynced, local: localPage, remote: remotePage);
+          if (autoMerged != null) {
+            autoMergeable.add(fileName);
+            safePages.add(fileName);
+            print('[Canvas] Auto-mergeable (disjoint element edits): $fileName');
+          } else {
+            final pageIndex = remoteMeta.document.pages.indexWhere(
+                (e) => e.fileName == fileName);
+            final pageEntry = pageIndex >= 0
+                ? remoteMeta.document.pages[pageIndex]
+                : null;
+            final chapterName = _chapterNameForPage(pageEntry, remoteMeta.metadata);
+            conflicts.add(PageConflict(
+              fileName: fileName,
+              pageNumber: remotePage.pageNumber,
+              chapterName: chapterName,
+              localPage: localPage,
+              remotePage: remotePage,
+              localImageCache: Map.of(state!.imageCache),
+              remoteImageCache: Map.of(state!.imageCache),
+            ));
+            print('[Canvas] CONFLICT on $fileName — local + remote edits '
+                'touch the same element(s)');
+          }
         } else if (locallyEdited && !remoteEdited) {
           // Local has unsynced edits but remote is unchanged from baseline:
           // the server's "new" ETag is just our own pending upload echoing
@@ -8367,6 +8907,13 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
                 modifiedPageCount: modCount,
                 deletedPageCount: safeDeleteCount,
                 newAssetCount: missingAssets.length,
+                autoMergeable: autoMergeable,
+                // The server's ACTUAL page listing (PROPFIND of pages/), NOT
+                // document.json — document.json is exactly what contains the
+                // ghost entries we're trying to detect. A doc entry whose
+                // fileName isn't in this set and has no local data is a ghost.
+                remotePageFileNames: remotePageEtags.keys.toSet(),
+                remoteDeletedFileNames: deletedRemotelyByEtag.toSet(),
               )
             : null;
 
@@ -8466,103 +9013,48 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       return;
     }
 
-    // Note: _lastSyncedPages is set after repair, below, once repaired is computed.
-
-    // ── Keep the user on the same page they were viewing ──
-    // After a pull the remote document may have reordered pages or added
-    // new ones before/after the current index. Look up the current page
-    // by fileName so the absolute index stays correct rather than
-    // accidentally jumping to a different page (the "chapter mixing" bug).
-    int newPageIndex = s.currentPageIndex;
-    if (s.document.pages.isNotEmpty) {
-      final currentFileName = s.document.pages[s.currentPageIndex].fileName;
-      final found = pending.document.pages.indexWhere(
-          (p) => p.fileName == currentFileName);
-      if (found >= 0) {
-        newPageIndex = found;
-      } else {
-        // Current page was deleted remotely — land on the nearest page.
-        newPageIndex = s.currentPageIndex.clamp(
-            0, pending.document.pages.length - 1);
-      }
-    }
-
-    // ── Guard against a page whose data wasn't downloaded ("Nessuna pagina") ──
-    // Walk forward from newPageIndex until we find an index whose fileName
-    // exists in the merged pages Map. Fall back to 0 if none found.
-    for (int attempt = 0; attempt < pending.document.pages.length; attempt++) {
-      final idx = (newPageIndex + attempt) % pending.document.pages.length;
-      if (pending.pages.containsKey(pending.document.pages[idx].fileName)) {
-        newPageIndex = idx;
-        break;
-      }
-    }
-
     // ── Self-healing: repair duplicate fileNames introduced by the merge ──
     final repaired = CanvasNotifier._repairDuplicateFileNames(
         pending.document, pending.pages);
 
-    // After repair the page index may need adjusting (entries were renamed
-    // but not reordered, so the index is still valid).
-
-    // ── Sync activeChapterId with the page's actual chapter ──
-    // After a merge the absolute page ordering can shift. The page at
-    // newPageIndex might now belong to a different chapter than the current
-    // activeChapterId filter. If we leave them mismatched, the nav bar
-    // computes filteredPageIndices.indexOf(newPageIndex) == -1 → shows "—/N".
-    String? mergedChapterId = s.activeChapterId;
-    if (repaired.document.pages.isNotEmpty) {
-      final pageChapterId = repaired.document.pages[newPageIndex].chapterId;
-      if (pageChapterId != s.activeChapterId) {
-        mergedChapterId = pageChapterId;
-        print('[Canvas] activeChapterId corrected after merge: '
-            '${s.activeChapterId} → $mergedChapterId');
-      }
-    }
-
-    // ── Preserve locally-added assets that haven't been uploaded yet ──
-    // pending.assets contains only what the server currently has.  Any
-    // assets in s.assetBytes that are absent from the remote set are
-    // locally-added (e.g. a just-imported PDF that save() hasn't flushed
-    // yet).  Discarding them here means save() can no longer find their
-    // bytes and they are silently dropped → blank pages after re-open.
-    // Fix: merge local-only assets back into the combined set.
-    final mergedAssets = Map<String, Uint8List>.from(pending.assets);
-    for (final entry in s.assetBytes.entries) {
-      mergedAssets.putIfAbsent(entry.key, () => entry.value);
-    }
-    // pending.assets came from a remote PROPFIND/GET — every key is
-    // server-confirmed. Track them so prune knows it's safe to issue a
-    // DELETE for them later if they become orphans.
-    _uploadedAssetKeys.addAll(pending.assets.keys);
-
-    // Stamp the actual merged page count so the library card is always
-    // accurate — remote metadata.pageCount may be stale if local pages
-    // were added after the last upload.
-    final mergedMeta = pending.metadata.copyWith(
-      pageCount: repaired.document.pages.length,
-    );
-
-    // ── Preserve strokes drawn during the pull window ──
+    // ── Merge page DATA: preserve strokes drawn during the pull window ──
     // pending.pages was captured at pull-start. If the user kept drawing
     // while the pull was in flight (slow Tailscale: 30-90s), state.pages[k]
-    // is now a NEW PageData instance while repaired.pages[k] is the
-    // pre-pull snapshot. Replacing pages directly silently overwrites
-    // those mid-pull strokes — active data loss exactly when the network
-    // is at its worst. Identity check against _lastSyncedPages tells us
-    // whether the user touched this page since last sync; if yes, keep
-    // local; if no, take remote.
+    // is now a NEW PageData instance while repaired.pages[k] is the pre-pull
+    // snapshot. Identity vs _lastSyncedPages tells us whether the user
+    // touched this page since last sync; if yes keep live local, else take
+    // remote. Plus: keep truly local-only pages, drop remote-deleted ones.
     final mergedPages = <String, PageData>{};
     final newLastSynced = <String, PageData>{};
+    var anyAutoMerged = false;
     for (final entry in repaired.pages.entries) {
       final k = entry.key;
       final live = s.pages[k];
       final lastSynced = _lastSyncedPages[k];
+      // Element-level auto-merge: both sides edited this page but the pull
+      // judged the edits disjoint. Re-run the merge with the LIVE local page
+      // (folds in any edits made during the pull window) against the RAW
+      // remote (entry.value). On success we adopt the union — no prompt; on
+      // failure (a same-element clash introduced by a mid-pull edit) we keep
+      // local and leave it dirty so the next pull can re-evaluate.
+      if (pending.autoMergeable.contains(k) &&
+          lastSynced != null &&
+          live != null) {
+        final reMerged = CanvasNotifier._mergePageElements(
+            base: lastSynced, local: live, remote: entry.value);
+        if (reMerged != null) {
+          mergedPages[k] = reMerged;
+          anyAutoMerged = true; // differs from remote → must re-upload
+        } else {
+          mergedPages[k] = live;
+        }
+        // Either way the result isn't the server's version, so DON'T advance
+        // the baseline for this page — let save() detect it as dirty.
+        continue;
+      }
       final userTouchedDuringPull =
           live != null && !identical(live, lastSynced);
       if (userTouchedDuringPull) {
-        // Keep local; do not advance _lastSyncedPages so save() will
-        // re-upload these strokes on the next cycle.
         mergedPages[k] = live;
         if (lastSynced != null) newLastSynced[k] = lastSynced;
       } else {
@@ -8570,27 +9062,92 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         newLastSynced[k] = entry.value;
       }
     }
-    // Defense-in-depth: any local-only page (e.g. just-added by the user
-    // and not yet in the remote merge) must survive. BUT: don't resurrect
-    // a page that was REMOTE-DELETED (gone from repaired.pages AND
-    // previously present in _lastSyncedPages). Without this distinction,
-    // accepting a remote-side deletion would re-add the page from the
-    // stale local state — ghost-page bug after a multi-device delete.
     for (final entry in s.pages.entries) {
       if (mergedPages.containsKey(entry.key)) continue;
       final wasPreviouslySynced = _lastSyncedPages.containsKey(entry.key);
-      if (wasPreviouslySynced) {
-        // Previously synced AND absent from remote merge → remote-deleted.
-        // Drop it.
-        continue;
-      }
-      // Truly local-only page (never been on the server). Keep it.
-      mergedPages[entry.key] = entry.value;
+      if (wasPreviouslySynced) continue; // remote-deleted → drop
+      mergedPages[entry.key] = entry.value; // truly local-only → keep
     }
 
+    // ── 3-way merge of STRUCTURE (page order + per-page chapter) and
+    //    METADATA (title/chapters/paper/cover) against the LIVE local state ──
+    // This is the fix for the structural-race data-loss bug: the old code
+    // applied `repaired.document` (the remote snapshot's order) wholesale,
+    // silently discarding any reorder / chapter-move / rename the user made
+    // DURING the download window. Feeding the LIVE s.document/s.metadata as
+    // the "local" side, with _lastSynced* as the common ancestor, preserves
+    // one-sided edits on BOTH sides and only tie-breaks true same-field
+    // conflicts. survivingFileNames is the authoritative page set.
+    // Keep pages with data, plus data-less entries still pending hydration on
+    // the server; prune only ghosts confirmed dead for _ghostPruneThreshold
+    // pulls. Without keeping pending-hydration entries, a page whose download
+    // merely failed this cycle on a flaky link would be wrongly dropped.
+    final surviving = _survivingFileNames(
+      withData: mergedPages.keys,
+      docPages: s.document.pages,
+      serverFileNames: pending.remotePageFileNames,
+      remoteDeleted: pending.remoteDeletedFileNames,
+    );
+    final merged = CanvasNotifier._merge3Way(
+      baseMeta: _lastSyncedMetadata,
+      localMeta: s.metadata,
+      remoteMeta: pending.metadata,
+      baseDoc: _lastSyncedDocument,
+      localDoc: s.document,
+      remoteDoc: repaired.document,
+      survivingFileNames: surviving,
+    );
+    final finalDoc = merged.document;
+    final finalMeta =
+        merged.metadata.copyWith(pageCount: finalDoc.pages.length);
+
+    // ── Keep the user on the same page they were viewing ──
+    // Resolve by fileName against the MERGED order so the user doesn't jump.
+    int newPageIndex = s.currentPageIndex;
+    if (s.document.pages.isNotEmpty &&
+        s.currentPageIndex < s.document.pages.length) {
+      final currentFileName = s.document.pages[s.currentPageIndex].fileName;
+      final found =
+          finalDoc.pages.indexWhere((p) => p.fileName == currentFileName);
+      if (found >= 0) {
+        newPageIndex = found;
+      } else {
+        newPageIndex = finalDoc.pages.isEmpty
+            ? 0
+            : s.currentPageIndex.clamp(0, finalDoc.pages.length - 1);
+      }
+    }
+    // Land on an index whose page data actually exists ("Nessuna pagina"
+    // guard) — walk forward from the resolved index.
+    for (int attempt = 0; attempt < finalDoc.pages.length; attempt++) {
+      final idx = (newPageIndex + attempt) % finalDoc.pages.length;
+      if (mergedPages.containsKey(finalDoc.pages[idx].fileName)) {
+        newPageIndex = idx;
+        break;
+      }
+    }
+
+    // ── Sync activeChapterId with the landed page's actual chapter ──
+    String? mergedChapterId = s.activeChapterId;
+    if (finalDoc.pages.isNotEmpty) {
+      final pageChapterId = finalDoc.pages[newPageIndex].chapterId;
+      if (pageChapterId != s.activeChapterId) {
+        mergedChapterId = pageChapterId;
+      }
+    }
+
+    // ── Preserve locally-added assets that haven't been uploaded yet ──
+    // pending.assets contains only what the server currently has; merge any
+    // local-only assets back so save() can still find their bytes.
+    final mergedAssets = Map<String, Uint8List>.from(pending.assets);
+    for (final entry in s.assetBytes.entries) {
+      mergedAssets.putIfAbsent(entry.key, () => entry.value);
+    }
+    _uploadedAssetKeys.addAll(pending.assets.keys);
+
     state = s.copyWith(
-      metadata: mergedMeta,
-      document: repaired.document,
+      metadata: finalMeta,
+      document: finalDoc,
       pages: mergedPages,
       assetBytes: mergedAssets,
       currentPageIndex: newPageIndex,
@@ -8598,8 +9155,35 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
       clearPendingRemoteChanges: true,
     );
     _lastSyncedPages = newLastSynced;
+    // Baselines track SERVER TRUTH (what this pull observed), NOT the merged
+    // result — the merge isn't on the server until we push it. Setting the
+    // baseline to `merged` would let a pull during the push window read
+    // local's own unpushed contributions as "remote reverted them" and drop
+    // them. save() advances these to the merged doc once the upload commits.
+    _lastSyncedDocument = repaired.document;
+    _lastSyncedMetadata = pending.metadata;
+
+    // If our local structural / metadata edits made the merged result differ
+    // from what the server has, mark dirty so the next save pushes the merge
+    // up. This is what makes two devices CONVERGE instead of ping-ponging.
+    //
+    // BUT only when the merged document is internally consistent (every entry
+    // has page data). If data-less entries remain (pages still hydrating, or
+    // ghosts not yet ripe for prune), a triggered save would hit PRE-SAVE
+    // GUARD #2, abort, and fire another pull — a hot CPU loop. Defer the push
+    // until the state converges; the ghost-prune / hydration will get us there
+    // and the NEXT consistent pull marks dirty then.
+    final docConsistent =
+        finalDoc.pages.every((e) => mergedPages.containsKey(e.fileName));
+    final needsPush = docConsistent &&
+        (anyAutoMerged ||
+            CanvasNotifier._documentStructurallyDiffers(finalDoc, repaired.document) ||
+            CanvasNotifier._metadataStructurallyDiffers(finalMeta, pending.metadata));
+    if (needsPush && state != null) {
+      state = state!.copyWith(isDirty: true);
+    }
     print('[Canvas] User accepted remote changes (landed on page $newPageIndex, '
-        'chapter $mergedChapterId)');
+        'chapter $mergedChapterId, needsPush=$needsPush, consistent=$docConsistent)');
 
     // The pull may have placed us on a different page than the pre-pull
     // one (new pages added, landing shifted). The decode priority loop
@@ -8620,23 +9204,28 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // skip conditions trigger later, the in-memory merge survives but disk
     // never catches up → first re-open reverts to pre-merge .ncnote and
     // the pulled pages silently vanish.
-    final missingCount = repaired.document.pages
-        .where((e) => !repaired.pages.containsKey(e.fileName))
+    // Validate against the MERGED document + `mergedPages` (what we actually
+    // applied to state and are about to persist), NOT the pull-start snapshot.
+    // Persisting the snapshot dropped any strokes/structure the user changed
+    // DURING the pull window — they survived in memory but the on-disk
+    // .ncnote was written from the older snapshot, so a cold reopen lost them.
+    final missingCount = finalDoc.pages
+        .where((e) => !mergedPages.containsKey(e.fileName))
         .length;
-    if (repaired.pages.isEmpty && repaired.document.pages.isNotEmpty) {
+    if (mergedPages.isEmpty && finalDoc.pages.isNotEmpty) {
       print('[Canvas] acceptRemoteChanges: merged pages empty — '
           'skipping .ncnote persist but refreshing DB metadata');
       // Still refresh the library-visible metadata so the card reflects the
       // (partial) pull — otherwise after a failed pull the notebook is stuck
       // showing the install-time pageCount (e.g. "1 pagina") until the user
       // opens it again and a retry succeeds.
-      _pendingPulledLocalSave = _persistPulledMetaOnly(mergedMeta);
+      _pendingPulledLocalSave = _persistPulledMetaOnly(finalMeta);
       return;
     }
     if (missingCount > 0) {
       print('[Canvas] acceptRemoteChanges: $missingCount merged page entries '
           'have no data — skipping .ncnote persist but refreshing DB metadata');
-      _pendingPulledLocalSave = _persistPulledMetaOnly(mergedMeta);
+      _pendingPulledLocalSave = _persistPulledMetaOnly(finalMeta);
       return;
     }
     // Two callers reach this point:
@@ -8657,11 +9246,11 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     // actually writes.  `_isPulling` tells us which case we're in.
     if (_isPulling) {
       _pendingPulledLocalSave = _savePulledChangesLocally(
-        mergedMeta, repaired.document, repaired.pages, mergedAssets,
+        finalMeta, finalDoc, mergedPages, mergedAssets,
       );
     } else {
       _pendingPulledLocalSave = _runPulledSaveLocked(
-        mergedMeta, repaired.document, repaired.pages, mergedAssets,
+        finalMeta, finalDoc, mergedPages, mergedAssets,
       );
     }
   }
@@ -8740,12 +9329,37 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
     if (state == null || state!.pendingConflicts.isEmpty) return;
     final s = state!;
     final updatedPages = Map<String, PageData>.from(s.pages);
+    // fileNames whose remote DELETION the user accepted — these get purged
+    // locally (and from the document) instead of copied back from remote.
+    final removedByDeletion = <String>{};
     var anyRemoteAccepted = false;
     var anyLocalKept = false;
 
     for (final conflict in s.pendingConflicts) {
       final keepLocal = resolutions[conflict.fileName] ?? true;
-      if (!keepLocal) {
+      if (conflict.isDeletion) {
+        // Edit-vs-delete conflict: `remotePage` is a placeholder (== local),
+        // so the old code's `updatedPages[fn] = remotePage` was a no-op that
+        // resurrected the page on BOTH choices → the delete could never win
+        // and the two devices ping-ponged forever.
+        if (keepLocal) {
+          // Reject the deletion: keep + re-upload so the page comes back on
+          // the server for the device that deleted it.
+          anyLocalKept = true;
+          _dirtyPageFileNames.add(conflict.fileName);
+          print('[Canvas] Deletion conflict → KEEP LOCAL (resurrect): '
+              '${conflict.fileName}');
+        } else {
+          // Honour the deletion: drop locally. The server already removed it,
+          // so no upload is needed — just purge local traces so the page is
+          // not re-detected as a change on the next pull.
+          updatedPages.remove(conflict.fileName);
+          removedByDeletion.add(conflict.fileName);
+          anyRemoteAccepted = true;
+          print('[Canvas] Deletion conflict → ACCEPT REMOTE (delete): '
+              '${conflict.fileName}');
+        }
+      } else if (!keepLocal) {
         updatedPages[conflict.fileName] = conflict.remotePage;
         anyRemoteAccepted = true;
         print('[Canvas] Conflict resolved → REMOTE: ${conflict.fileName}');
@@ -8758,27 +9372,58 @@ class CanvasNotifier extends StateNotifier<CanvasState?> {
         print('[Canvas] Conflict resolved → LOCAL: ${conflict.fileName}');
       }
     }
+
+    // Rebuild the document without pages whose remote deletion was accepted,
+    // so the document never points at missing page data (the "Nessuna
+    // pagina" ghost-entry bug). Renumber to keep pageNumbers sequential.
+    DocumentStructure updatedDoc = s.document;
+    if (removedByDeletion.isNotEmpty) {
+      final kept = s.document.pages
+          .where((e) => !removedByDeletion.contains(e.fileName))
+          .toList();
+      for (var i = 0; i < kept.length; i++) {
+        kept[i] = kept[i].copyWith(pageNumber: i + 1);
+      }
+      updatedDoc = DocumentStructure(
+        notebookId: s.document.notebookId,
+        formatVersion: s.document.formatVersion,
+        pages: kept,
+      );
+    }
+
     // For pages whose local version won the conflict, set their baseline
     // to the CURRENT local page so the next diff doesn't mistake them as
     // still locally-edited; for pages where remote won, baseline is the
-    // new (remote) content.
+    // new (remote) content. Pages whose deletion we accepted are purged
+    // from every tracking map so they can't be resurrected by a later diff.
     //
     // IMPORTANT: pages NOT involved in the conflict keep their previous
     // _lastSyncedPages entry intact — overwriting with the current in-memory
     // page would hide legitimate local edits on unrelated pages.
     final newBaseline = Map<String, PageData>.from(_lastSyncedPages);
     for (final conflict in s.pendingConflicts) {
-      newBaseline[conflict.fileName] = updatedPages[conflict.fileName]!;
+      if (removedByDeletion.contains(conflict.fileName)) {
+        newBaseline.remove(conflict.fileName);
+        _lastPageEtags.remove(conflict.fileName);
+      } else {
+        newBaseline[conflict.fileName] = updatedPages[conflict.fileName]!;
+      }
     }
     _lastSyncedPages = newBaseline;
 
+    // A removed page may have left currentPageIndex past the end.
+    final newIndex = updatedDoc.pages.isEmpty
+        ? 0
+        : s.currentPageIndex.clamp(0, updatedDoc.pages.length - 1);
+
     state = s.copyWith(
       pages: updatedPages,
+      document: updatedDoc,
+      currentPageIndex: newIndex,
       isDirty: anyRemoteAccepted || anyLocalKept || s.isDirty,
       clearPendingConflicts: true,
     );
 
-    // Save merged result locally + trigger sync
     // Save merged result locally + trigger sync whenever the user touched
     // the conflict set, regardless of direction — keep-local still needs an
     // upload so the server reflects the user's chosen version.
